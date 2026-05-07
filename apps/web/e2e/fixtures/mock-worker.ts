@@ -35,7 +35,10 @@ export type MockProgressEvent = {
   evidence_needed?: string[];
   uncertainty?: string[];
   safety_note?: string;
+  related_search_query?: string;
+  files?: string[];
   command?: string | string[];
+  aggregate?: Record<string, unknown>;
 };
 
 // ── Default fixtures ──────────────────────────────────────────────────────────
@@ -107,7 +110,10 @@ export function buildProgressEvents(runId: string, threadId: string, events: Moc
     evidence_needed: ev.evidence_needed,
     uncertainty: ev.uncertainty,
     safety_note: ev.safety_note,
+    related_search_query: ev.related_search_query,
+    files: ev.files,
     command: ev.command,
+    aggregate: ev.aggregate,
     timestamp: new Date().toISOString(),
   }));
 }
@@ -205,12 +211,36 @@ export async function mockGetAgentRun(page: Page, runRecord: ReturnType<typeof b
   });
 }
 
+export async function mockGetAgentRunDynamic(
+  page: Page,
+  runId: string,
+  getRunRecord: () => ReturnType<typeof buildMockRunRecord>,
+) {
+  await page.route(`/api/worker/agent/runs/${runId}`, async (route: Route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(getRunRecord()),
+    });
+  });
+}
+
 export async function mockGetAgentRunEvents(page: Page, runId: string, events: unknown[]) {
   await page.route(`/api/worker/agent/runs/${runId}/events*`, async (route: Route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ events }),
+    });
+  });
+}
+
+export async function mockGetAgentRunEventsDynamic(page: Page, runId: string, getEvents: () => unknown[]) {
+  await page.route(`/api/worker/agent/runs/${runId}/events*`, async (route: Route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ events: getEvents() }),
     });
   });
 }
@@ -222,6 +252,46 @@ export async function mockGetActiveRuns(page: Page, runs: ReturnType<typeof buil
       contentType: "application/json",
       body: JSON.stringify({ runs }),
     });
+  });
+}
+
+export async function mockGetActiveRunsDynamic(page: Page, getRuns: () => ReturnType<typeof buildMockRunRecord>[]) {
+  await page.route("/api/worker/agent/runs/active*", async (route: Route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ runs: getRuns() }),
+    });
+  });
+}
+
+export async function mockDebugRoutes(page: Page, runs: () => ReturnType<typeof buildMockRunRecord>[] = () => []) {
+  await page.route("/api/worker/debug/runtime", async (route: Route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        worker: { status: "ok", service: "mock" },
+        model: { provider: "mock", connection_mode: "direct", name: "mock-model" },
+        permissions: { mode: "basic", sandbox: {}, approval: {}, tools: {} },
+        repository: { source: "local", project_path: DEFAULT_REPO.project_path, branch: DEFAULT_REPO.branch },
+        agent: { orchestration_mode: "mock" },
+        active_runs: runs(),
+        recent_runs: [],
+      }),
+    });
+  });
+  await page.route("/api/worker/debug/memory", async (route: Route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], graph: { nodes: [], edges: [] } }) });
+  });
+  await page.route("/api/worker/debug/skills", async (route: Route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ skills: [] }) });
+  });
+  await page.route("/api/worker/debug/integrations", async (route: Route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ integrations: [] }) });
+  });
+  await page.route("/api/worker/tools", async (route: Route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ tools: [], permissions: {} }) });
   });
 }
 

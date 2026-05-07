@@ -13,7 +13,8 @@ import {
   type ChangeProposal,
   type ProposalStatus,
 } from "./ProposalCard";
-import { ProgressTimeline, type ProgressStep } from "./ProgressTimeline";
+import type { ProgressStep } from "./ProgressTimeline";
+import { AgentActivityTranscript } from "./AgentActivityTranscript";
 import { workTraceSummary } from "./work-trace-display";
 
 export type ChatMessage = {
@@ -605,7 +606,7 @@ export function ChatMessages({
               {msg.proposal ? (
                 <>
                   {msg.progressSteps && msg.progressSteps.length > 0 ? (
-                    <ProgressTimeline steps={msg.progressSteps} done={true} />
+                    <AgentActivityTranscript steps={msg.progressSteps} done={true} />
                   ) : null}
                   <ChangedFilesArchive records={msg.metadata?.edit_archive} />
                   <ProposalCard
@@ -665,7 +666,7 @@ export function ChatMessages({
               ) : msg.role === "assistant" ? (
                 <div className="message-bubble message-bubble-md">
                   {msg.progressSteps && msg.progressSteps.length > 0 ? (
-                    <ProgressTimeline steps={msg.progressSteps} done={true} />
+                    <AgentActivityTranscript steps={msg.progressSteps} done={true} />
                   ) : null}
                   <ChangedFilesArchive records={msg.metadata?.edit_archive} />
                   <MarkdownContent content={msg.content} />
@@ -685,7 +686,7 @@ export function ChatMessages({
               <span className="message-role-label">RepoOperator</span>
               {progressSteps.length > 0 ? (
                 <>
-                  <ProgressTimeline steps={progressSteps} done={false} />
+                  <AgentActivityTranscript steps={progressSteps} done={false} />
                   {streamedAnswer ? (
                     <div className="message-bubble message-bubble-md">
                       <MarkdownContent content={streamedAnswer} />

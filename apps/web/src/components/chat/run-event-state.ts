@@ -86,6 +86,7 @@ export function mergeRunEventsIntoProgressSteps(
       steps = mergeProgressStep(steps, progressStepFromEvent(event as AgentRunEvent, options));
     }
   }
+  steps = attachFinalResultEditArchive(steps, finalResult, options);
   return options.finalizeRunning
     ? steps.map((step) => (step.status === "running" ? { ...step, status: "completed" } : step))
     : steps;
@@ -181,8 +182,16 @@ function hasProgressStepContent(event: Partial<AgentRunEvent & ProgressStep>): b
       || event.observation
       || event.next_action
       || event.nextAction
+      || event.related_search_query
+      || event.relatedSearchQuery
       || event.safety_note
-      || event.safetyNote,
+      || event.safetyNote
+      || event.command
+      || event.related_command
+      || event.files?.length
+      || event.proposal_id
+      || event.proposalId
+      || (event.aggregate && Object.keys(event.aggregate).length > 0),
   );
 }
 
@@ -215,6 +224,10 @@ function mergeProgressStepFields(existing: ProgressStep, incoming: ProgressStep)
     evidenceNeeded: mergeStringLists(existing.evidenceNeeded, incoming.evidenceNeeded),
     uncertainty: mergeStringLists(existing.uncertainty, incoming.uncertainty),
     safetyNote: incoming.safetyNote ?? existing.safetyNote,
+    files: mergeStringLists(existing.files, incoming.files),
+    command: incoming.command ?? existing.command,
+    proposalId: incoming.proposalId ?? existing.proposalId,
+    aggregate: mergeAggregate(existing.aggregate, incoming.aggregate),
   };
 }
 
@@ -230,4 +243,102 @@ function mergeStringLists(existing?: string[], incoming?: string[]): string[] | 
     if (item && !merged.includes(item)) merged.push(item);
   }
   return merged.length ? merged : undefined;
+}
+
+function mergeAggregate(
+  existing?: Record<string, unknown> | null,
+  incoming?: Record<string, unknown> | null,
+): Record<string, unknown> | null | undefined {
+  if (!existing && !incoming) return incoming ?? existing;
+  return {
+    ...(existing || {}),
+    ...(incoming || {}),
+  };
+}
+
+function attachFinalResultEditArchive(
+  steps: ProgressStep[],
+  finalResult?: AgentRunPayload | null,
+  options: { finalizeRunning?: boolean } = {},
+): ProgressStep[] {
+  const archive = finalResult?.edit_archive || [];
+  if (!archive.length) return steps;
+
+  const files = archive.map((record) => record.file_path).filter(Boolean);
+  const archiveAggregate = {
+    action_type: "generate_edit",
+    edit_archive: archive,
+    additions: sumEditArchiveField(archive, "additions"),
+    deletions: sumEditArchiveField(archive, "deletions"),
+    diff_available: archive.some((record) => Boolean(record.diff)),
+    status: commonArchiveStatus(archive),
+    proposal_id: finalResult?.proposal_relative_path || archive[0]?.proposal_id || null,
+  };
+  const safetyNote = proposalOnlySafetyNote(finalResult);
+  let attached = false;
+  const next = steps.map((step) => {
+    const aggregate = step.aggregate || {};
+    const actionType = typeof aggregate.action_type === "string" ? aggregate.action_type : null;
+    const stepFiles = step.files || [];
+    const intersectsArchive = stepFiles.some((file) => files.includes(file));
+    const isEditStep =
+      actionType === "generate_edit"
+      || step.eventType === "file_edit"
+      || (String(step.phase || "").toLowerCase().includes("editing") && intersectsArchive);
+    if (!isEditStep) return step;
+    attached = true;
+    return {
+      ...step,
+      status: options.finalizeRunning && step.status === "running" ? "completed" : step.status,
+      files: mergeStringLists(step.files, files),
+      proposalId: step.proposalId || archiveAggregate.proposal_id || undefined,
+      safetyNote: step.safetyNote || safetyNote,
+      aggregate: {
+        ...archiveAggregate,
+        ...aggregate,
+        edit_archive: archive,
+        action_type: "generate_edit",
+      },
+    };
+  });
+  if (attached) return next;
+  return [
+    ...next,
+    {
+      id: `edit-archive:${finalResult?.run_id || "completed"}`,
+      activityId: `edit-archive:${finalResult?.run_id || "completed"}`,
+      runId: finalResult?.run_id || undefined,
+      eventType: "work_trace",
+      phase: "Editing",
+      label: "Prepared proposed changes",
+      status: "completed",
+      files,
+      proposalId: archiveAggregate.proposal_id || undefined,
+      safetyNote,
+      aggregate: archiveAggregate,
+    },
+  ];
+}
+
+function sumEditArchiveField(
+  archive: NonNullable<AgentRunPayload["edit_archive"]>,
+  field: "additions" | "deletions",
+): number | undefined {
+  const values = archive.map((record) => record[field]).filter((value) => typeof value === "number");
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : undefined;
+}
+
+function commonArchiveStatus(archive: NonNullable<AgentRunPayload["edit_archive"]>): string | undefined {
+  const statuses = archive.map((record) => record.status).filter(Boolean);
+  return statuses.length > 0 && statuses.every((status) => status === statuses[0]) ? statuses[0] : undefined;
+}
+
+function proposalOnlySafetyNote(finalResult?: AgentRunPayload | null): string | null {
+  if (
+    finalResult?.response_type === "change_proposal"
+    || finalResult?.edit_archive?.some((record) => record.status === "proposed")
+  ) {
+    return "Proposal only. No files were written.";
+  }
+  return null;
 }

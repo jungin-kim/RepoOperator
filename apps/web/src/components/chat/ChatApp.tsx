@@ -62,6 +62,7 @@ import {
   LEGACY_ACTIVE_THREAD_KEY,
   activeThreadStorageKey,
   activeThreadStorageKeyForIdentity,
+  findThreadToRestore,
   repoIdentityKey,
   repoMatchesIdentity,
 } from "./thread-persistence";
@@ -419,7 +420,13 @@ export function ChatApp() {
         const completedSteps = progressStepsForCompletedRun(events, finalResult);
         finalizeRunInUi(runId, threadId, finalResult, completedSteps);
       } catch {
-        rememberActiveRun(null, threadId);
+        const savedRunId = window.localStorage.getItem(activeRunStorageKey(threadId));
+        if (savedRunId) {
+          setActiveRunId(savedRunId);
+          setQuestionPending(true);
+        } else {
+          rememberActiveRun(null, threadId);
+        }
       }
     }
     void rehydrateRun();
@@ -490,14 +497,28 @@ export function ChatApp() {
     async function loadThreadHistory() {
       setThreadStoreState("loading");
       try {
-        const payload = await listThreads();
+        const [payload, activeRunsPayload] = await Promise.all([
+          listThreads(),
+          getActiveAgentRuns().catch(() => ({ runs: [] })),
+        ]);
         if (cancelled) return;
+        const nextActiveRunByThread: Record<string, string> = {};
+        for (const run of activeRunsPayload.runs) {
+          if (run.thread_id && isActiveRunStatus(run.status)) nextActiveRunByThread[run.thread_id] = run.id;
+        }
+        if (Object.keys(nextActiveRunByThread).length > 0) {
+          activeRunByThreadRef.current = nextActiveRunByThread;
+          setActiveRunByThread(nextActiveRunByThread);
+        }
         const loadedThreads = payload.threads.map(threadFromRecord);
         threadsRef.current = loadedThreads;
         setThreads(loadedThreads);
         if (!activeThreadIdRef.current && loadedThreads.length > 0) {
-          const restored = findThreadToRestore(loadedThreads);
-          restoreThreadSnapshot(restored);
+          const restored = findThreadToRestore(loadedThreads, {
+            repoIdentity: restoreRepoIdentity(),
+            activeRunThreadIds: Object.keys(nextActiveRunByThread),
+          });
+          if (restored) restoreThreadSnapshot(restored);
         }
         setThreadStoreState("connected");
       } catch {
@@ -717,40 +738,10 @@ export function ChatApp() {
     };
   }
 
-  function findThreadToRestore(loadedThreads: ChatThread[]): ChatThread {
-    const currentRepoIdentity = repoResultRef.current
+  function restoreRepoIdentity(): string | null {
+    return repoResultRef.current
       ? repoIdentityKey(repoResultRef.current)
       : window.localStorage.getItem(ACTIVE_REPO_IDENTITY_KEY);
-
-    if (currentRepoIdentity) {
-      const scopedKey = activeThreadStorageKeyForIdentity(currentRepoIdentity);
-      const scopedThreadId = window.localStorage.getItem(scopedKey);
-      const scopedThread = loadedThreads.find(
-        (thread) => thread.id === scopedThreadId && repoMatchesIdentity(thread.repoResult, currentRepoIdentity),
-      );
-      if (scopedThread) return scopedThread;
-      if (scopedThreadId) window.localStorage.removeItem(scopedKey);
-    }
-
-    const legacyThreadId = window.localStorage.getItem(LEGACY_ACTIVE_THREAD_KEY);
-    if (legacyThreadId) {
-      const legacyThread = loadedThreads.find((thread) => thread.id === legacyThreadId);
-      const legacyMatchesCurrentRepo =
-        legacyThread && (!currentRepoIdentity || repoMatchesIdentity(legacyThread.repoResult, currentRepoIdentity));
-      window.localStorage.removeItem(LEGACY_ACTIVE_THREAD_KEY);
-      if (legacyThread && legacyMatchesCurrentRepo) {
-        const identity = repoIdentityKey(legacyThread.repoResult);
-        window.localStorage.setItem(activeThreadStorageKeyForIdentity(identity), legacyThread.id);
-        window.localStorage.setItem(ACTIVE_REPO_IDENTITY_KEY, identity);
-        return legacyThread;
-      }
-    }
-
-    if (currentRepoIdentity) {
-      const sameRepoThread = loadedThreads.find((thread) => repoMatchesIdentity(thread.repoResult, currentRepoIdentity));
-      if (sameRepoThread) return sameRepoThread;
-    }
-    return loadedThreads[0];
   }
 
   function restoreThreadSnapshot(thread: ChatThread) {

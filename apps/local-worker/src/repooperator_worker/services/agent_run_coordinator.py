@@ -294,6 +294,7 @@ def append_activity(
     detail: str = "",
     related_files: list[str] | None = None,
     related_command: list[str] | None = None,
+    aggregate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     stable_activity_id = f"{event_type}:{label.lower().replace(' ', '-')}"
     return append_run_event(
@@ -311,7 +312,9 @@ def append_activity(
             "repo": request.project_path if request else None,
             "branch": request.branch if request else None,
             "related_files": related_files or [],
+            "files": related_files or [],
             "related_command": related_command,
+            "aggregate": aggregate,
             "started_at": _now_iso(),
             "ended_at": _now_iso() if status in {"completed", "failed"} else None,
         },
@@ -433,6 +436,16 @@ def _record_response_events(run_id: str, request: AgentRunRequest, response: Age
             status="completed",
             event_type="file_edit",
             related_files=[file_path] if file_path else [],
+            aggregate={
+                "action_type": "generate_edit",
+                "edit_archive": [record],
+                "additions": record.get("additions"),
+                "deletions": record.get("deletions"),
+                "diff_available": bool(record.get("diff")),
+                "status": record.get("status"),
+                "proposal_id": record.get("proposal_id"),
+                "edit_summary": record.get("summary"),
+            },
         )
     append_activity(
         run_id,

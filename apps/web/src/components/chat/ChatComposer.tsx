@@ -105,7 +105,7 @@ export function ChatComposer({
             <span className="composer-hint">{hint}</span>
             {pending ? (
               <div className="composer-run-controls" aria-label="Active run controls">
-                <button type="button" className="composer-stop-btn" onClick={onStopRun}>
+                <button type="button" className="composer-stop-btn" data-testid="stop-run-button" onClick={onStopRun}>
                   Stop
                 </button>
               </div>

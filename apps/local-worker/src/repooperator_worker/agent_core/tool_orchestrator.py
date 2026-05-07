@@ -252,6 +252,12 @@ class ToolOrchestrator:
         phase = _tool_phase(action.type, result.status if result else None)
         files = list((result.files_read if result else None) or action.target_files or [])
         command = action.command or (result.command_result.get("command") if result and result.command_result else None)
+        aggregate: dict[str, Any] = {"tool": tool_name, "action_type": action.type}
+        if result and result.command_result:
+            if result.command_result.get("exit_code") is not None:
+                aggregate["exit_code"] = result.command_result.get("exit_code")
+            if result.command_result.get("display_command"):
+                aggregate["display_command"] = result.command_result.get("display_command")
         append_work_trace(
             run_id=self.run_id,
             request=self.request,
@@ -266,7 +272,7 @@ class ToolOrchestrator:
             safety_note=_tool_safety_note(action.type, result),
             related_files=files,
             command=command,
-            aggregate={"tool": tool_name, "action_type": action.type},
+            aggregate=aggregate,
         )
 
 

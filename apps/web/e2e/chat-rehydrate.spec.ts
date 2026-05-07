@@ -21,8 +21,12 @@ import {
   mockSaveThread,
   mockOpenRepository,
   mockGetAgentRun,
+  mockGetAgentRunDynamic,
   mockGetAgentRunEvents,
+  mockGetAgentRunEventsDynamic,
   mockGetActiveRuns,
+  mockGetActiveRunsDynamic,
+  mockDebugRoutes,
 } from "./fixtures/mock-worker";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -37,15 +41,39 @@ const PROGRESS_EVENTS = [
   { phase: "Thinking", label: "Loaded context", status: "completed" as const, sequence: 1, visibility: "debug", display: "secondary" },
   { phase: "Planning", label: "Framed request", status: "completed" as const, sequence: 2, visibility: "debug", display: "secondary" },
   {
-    phase: "Searching",
-    label: "Inspecting repository structure",
-    status: "running" as const,
+    phase: "Planning",
+    label: "Mapped restore plan",
+    status: "completed" as const,
     sequence: 3,
-    activity_id: "summary-stage-1",
+    activity_id: "summary-note-1",
     event_type: "work_trace",
     visibility: "user",
     display: "primary",
     safe_reasoning_summary: WORK_NOTE,
+  },
+  {
+    phase: "Searching",
+    label: "Searching file contents",
+    status: "completed" as const,
+    sequence: 4,
+    activity_id: "activity-search-1",
+    event_type: "work_trace",
+    visibility: "user",
+    display: "primary",
+    related_search_query: "repooperator-active-thread",
+    aggregate: { action_type: "search_text", query: "repooperator-active-thread" },
+  },
+  {
+    phase: "Reading files",
+    label: "Reading repository files",
+    status: "running" as const,
+    sequence: 5,
+    activity_id: "activity-read-1",
+    event_type: "work_trace",
+    visibility: "user",
+    display: "primary",
+    files: ["apps/web/src/components/chat/ChatApp.tsx"],
+    aggregate: { action_type: "read_file" },
   },
 ];
 
@@ -115,6 +143,13 @@ async function setStorageForThread(page: Page, threadId: string, runId?: string,
   );
 }
 
+async function revealCompletedWorkLog(page: Page) {
+  const showWorkLog = page.getByRole("button", { name: /Show work log/i });
+  if (await showWorkLog.isVisible().catch(() => false)) {
+    await showWorkLog.click();
+  }
+}
+
 // ── Scenario A: Active thread survives navigation during active run ────────────
 
 test("A: active thread survives navigation away and back during active run", async ({ page }) => {
@@ -134,22 +169,28 @@ test("A: active thread survives navigation away and back during active run", asy
   await mockGetActiveRuns(page, [runRecord]);
   await mockGetAgentRun(page, runRecord);
   await mockGetAgentRunEvents(page, RUN_ID, events);
+  await mockDebugRoutes(page, () => [runRecord]);
 
   await setStorageForThread(page, THREAD_ID, RUN_ID);
   await page.goto("/app");
 
-  // Wait for the app to load
-  await page.waitForTimeout(600);
+  await expect(page.getByText(USER_MSG)).toBeVisible({ timeout: 5000 });
+  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expect(page.locator(".agent-transcript-section")).toHaveCount(1);
+  await expect(page.getByTestId("stop-run-button")).toBeVisible();
 
-  // Navigate away then back (simulate page navigation)
-  await page.goto("/");
-  await page.goto("/app");
-  await page.waitForTimeout(600);
+  // Navigate away to the real debug route, which unmounts ChatApp, then return.
+  await page.goto("/debug");
+  await expect(page.locator(".debug-card:has-text('Worker') .debug-row:has-text('Active runs') strong")).toHaveText("1");
+  await page.getByRole("link", { name: "Back to app" }).click();
 
   // The thread must still be selected (user message visible)
   await expect(page.getByText(USER_MSG)).toBeVisible({ timeout: 5000 });
+  await expect(page.locator(".sidebar-thread.sidebar-item-active")).toContainText("mock/repo");
 
   await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expect(page.locator(".agent-transcript-section")).toHaveCount(1);
+  await expect(page.getByTestId("stop-run-button")).toBeVisible();
   await expect(page.getByText("Loaded context")).toHaveCount(0);
   await expect(page.getByText("Framed request")).toHaveCount(0);
 
@@ -159,9 +200,76 @@ test("A: active thread survives navigation away and back during active run", asy
   expect(count).toBeLessThanOrEqual(1);
 });
 
+test("B: active run completes while user is on debug page and rehydrates on return", async ({ page }) => {
+  const runningRun = buildMockRunRecord({
+    runId: RUN_ID,
+    threadId: THREAD_ID,
+    repo: DEFAULT_REPO,
+    status: "running",
+    progressEvents: PROGRESS_EVENTS,
+  });
+  const finalResult = buildFinalResult(RUN_ID, THREAD_ID, FINAL_RESPONSE, PROGRESS_EVENTS);
+  const completedRun = buildMockRunRecord({
+    runId: RUN_ID,
+    threadId: THREAD_ID,
+    repo: DEFAULT_REPO,
+    status: "completed",
+    finalResponse: FINAL_RESPONSE,
+    progressEvents: PROGRESS_EVENTS,
+  });
+  completedRun.final_result = finalResult;
+
+  let currentRun = runningRun;
+  let currentEvents: unknown[] = buildProgressEvents(RUN_ID, THREAD_ID, PROGRESS_EVENTS);
+  let currentActiveRuns = [runningRun];
+
+  await setupBaseRoutes(page);
+  await mockListThreads(page, [buildThread()]);
+  await mockOpenRepository(page, DEFAULT_REPO);
+  await mockGetActiveRunsDynamic(page, () => currentActiveRuns);
+  await mockGetAgentRunDynamic(page, RUN_ID, () => currentRun);
+  await mockGetAgentRunEventsDynamic(page, RUN_ID, () => currentEvents);
+  await mockDebugRoutes(page, () => currentActiveRuns);
+
+  await setStorageForThread(page, THREAD_ID, RUN_ID);
+  await page.goto("/app");
+  await expect(page.getByText(USER_MSG)).toBeVisible({ timeout: 5000 });
+  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+
+  await page.goto("/debug");
+  await expect(page.getByText("RepoOperator Debug")).toBeVisible();
+
+  currentRun = completedRun;
+  currentActiveRuns = [];
+  currentEvents = [
+    ...buildProgressEvents(RUN_ID, THREAD_ID, PROGRESS_EVENTS),
+    {
+      id: `${RUN_ID}-final`,
+      run_id: RUN_ID,
+      thread_id: THREAD_ID,
+      type: "final_message",
+      event_type: "final_message",
+      result: finalResult,
+      sequence: 20,
+      timestamp: new Date().toISOString(),
+    },
+  ];
+
+  await page.getByRole("link", { name: "Back to app" }).click();
+  await expect(page.getByText(USER_MSG)).toBeVisible({ timeout: 5000 });
+  await expect(page.getByText(FINAL_RESPONSE, { exact: false })).toBeVisible({ timeout: 8000 });
+  await revealCompletedWorkLog(page);
+  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expect(page.locator(".agent-transcript-section")).toHaveCount(1);
+  await expect(page.getByTestId("stop-run-button")).toHaveCount(0);
+
+  const assistantMsgs = page.locator('[data-testid="assistant-message"]');
+  expect(await assistantMsgs.count()).toBeLessThanOrEqual(1);
+});
+
 // ── Scenario B: Completed run rehydrates from persisted backend events ─────────
 
-test("B: completed run rehydrates final answer and progress from backend events", async ({ page }) => {
+test("B1: completed run rehydrates final answer and progress from backend events", async ({ page }) => {
   const finalResult = buildFinalResult(RUN_ID, THREAD_ID, FINAL_RESPONSE, PROGRESS_EVENTS);
   const completedRun = buildMockRunRecord({
     runId: RUN_ID,
@@ -219,9 +327,47 @@ test("B: completed run rehydrates final answer and progress from backend events"
   expect(count).toBeLessThanOrEqual(1);
 });
 
+test("C: transcript replacement hides low-value labels and expands structured detail rows", async ({ page }) => {
+  const runRecord = buildMockRunRecord({
+    runId: RUN_ID,
+    threadId: THREAD_ID,
+    repo: DEFAULT_REPO,
+    status: "running",
+    progressEvents: PROGRESS_EVENTS,
+  });
+
+  await setupBaseRoutes(page);
+  await mockListThreads(page, [buildThread()]);
+  await mockOpenRepository(page, DEFAULT_REPO);
+  await mockGetActiveRuns(page, [runRecord]);
+  await mockGetAgentRun(page, runRecord);
+  await mockGetAgentRunEvents(page, RUN_ID, buildProgressEvents(RUN_ID, THREAD_ID, PROGRESS_EVENTS));
+
+  await setStorageForThread(page, THREAD_ID, RUN_ID);
+  await page.goto("/app");
+
+  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  for (const hiddenLabel of [
+    "Loaded context",
+    "Framed request",
+    "Recorded observation",
+    "Chose next action",
+    "Inspect repository tree",
+  ]) {
+    await expect(page.getByText(hiddenLabel)).toHaveCount(0);
+  }
+
+  const group = page.locator(".agent-transcript-section").first();
+  await expect(group).toBeVisible();
+  await group.locator(".agent-section-summary").click();
+  await expect(group.locator(".agent-detail-item")).toHaveCount(2);
+  await expect(group.getByText("repooperator-active-thread", { exact: false })).toBeVisible();
+  await expect(group.getByText("apps/web/src/components/chat/ChatApp.tsx", { exact: false })).toBeVisible();
+});
+
 // ── Scenario C: Delayed assistant_delta does not make UI look stuck ────────────
 
-test("C: progress_delta events keep run alive when assistant_delta is delayed", async ({ page }) => {
+test("C1: progress_delta events keep run alive when assistant_delta is delayed", async ({ page }) => {
   const runRecord = buildMockRunRecord({
     runId: RUN_ID,
     threadId: THREAD_ID,
@@ -251,9 +397,64 @@ test("C: progress_delta events keep run alive when assistant_delta is delayed", 
   expect(emptyCount).toBe(0);
 });
 
+test("D: running transcript detail updates to completed without duplication", async ({ page }) => {
+  const runningProgress = [
+    {
+      phase: "Searching",
+      label: "Searching file contents",
+      status: "running" as const,
+      sequence: 1,
+      activity_id: "same-search",
+      event_type: "work_trace",
+      visibility: "user",
+      display: "primary",
+      related_search_query: "route navigation",
+      aggregate: { action_type: "search_text", query: "route navigation" },
+    },
+  ];
+  const completedProgress = [
+    {
+      ...runningProgress[0],
+      status: "completed" as const,
+      sequence: 2,
+    },
+  ];
+  const runRecord = buildMockRunRecord({
+    runId: RUN_ID,
+    threadId: THREAD_ID,
+    repo: DEFAULT_REPO,
+    status: "running",
+    progressEvents: runningProgress,
+  });
+  let currentEvents = buildProgressEvents(RUN_ID, THREAD_ID, runningProgress);
+
+  await setupBaseRoutes(page);
+  await mockListThreads(page, [buildThread()]);
+  await mockOpenRepository(page, DEFAULT_REPO);
+  await mockGetActiveRuns(page, [runRecord]);
+  await mockGetAgentRun(page, runRecord);
+  await mockGetAgentRunEventsDynamic(page, RUN_ID, () => currentEvents);
+
+  await setStorageForThread(page, THREAD_ID, RUN_ID);
+  await page.goto("/app");
+
+  const group = page.locator(".agent-transcript-section").first();
+  await expect(group).toBeVisible({ timeout: 5000 });
+  await expect(group.locator(".agent-detail-item")).toHaveCount(1);
+  await expect(group.locator(".agent-detail-status")).toHaveText("running");
+
+  currentEvents = buildProgressEvents(RUN_ID, THREAD_ID, completedProgress);
+  const completedSummary = group.locator("button.agent-section-summary");
+  await expect(completedSummary).toBeVisible({ timeout: 5000 });
+  await completedSummary.click();
+  await expect(group.locator(".agent-detail-status")).toHaveText("completed", { timeout: 5000 });
+  await expect(page.locator(".agent-transcript-section")).toHaveCount(1);
+  await expect(group.locator(".agent-detail-item")).toHaveCount(1);
+});
+
 // ── Scenario D: final_message without assistant_delta creates final message ────
 
-test("D: final_message without assistant_delta still creates assistant message", async ({ page }) => {
+test("D1: final_message without assistant_delta still creates assistant message", async ({ page }) => {
   const finalResult = buildFinalResult(RUN_ID, THREAD_ID, FINAL_RESPONSE, PROGRESS_EVENTS);
   const completedRun = buildMockRunRecord({
     runId: RUN_ID,
@@ -475,10 +676,16 @@ test("H: active thread storage is scoped by repo branch", async ({ page }) => {
   await mockListThreads(page, [mainThread, devThread]);
   await mockOpenRepository(page, devRepo);
   await mockGetActiveRuns(page, []);
+  await mockDebugRoutes(page);
 
   await setStorageForThread(page, "thread-dev", undefined, activeThreadKey(devRepo));
   await page.goto("/app");
 
+  await expect(page.getByText("dev branch thread")).toBeVisible({ timeout: 5000 });
+  await expect(page.getByText("main branch thread")).toHaveCount(0);
+
+  await page.goto("/debug");
+  await page.getByRole("link", { name: "Back to app" }).click();
   await expect(page.getByText("dev branch thread")).toBeVisible({ timeout: 5000 });
   await expect(page.getByText("main branch thread")).toHaveCount(0);
 });
