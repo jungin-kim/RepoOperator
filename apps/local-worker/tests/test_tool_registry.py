@@ -9,7 +9,7 @@ SRC_DIR = TESTS_DIR.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from repooperator_worker.agent_core.controller_graph import PLANNER_ACTION_TYPES  # noqa: E402
+from repooperator_worker.agent_core.planner import PLANNER_ACTION_TYPES  # noqa: E402
 from repooperator_worker.agent_core.tools.registry import ToolRegistry, get_default_tool_registry  # noqa: E402
 from repooperator_worker.agent_core.tools.builtin import ReadFileTool  # noqa: E402
 

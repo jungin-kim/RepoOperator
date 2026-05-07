@@ -32,7 +32,7 @@ import {
   type RepoOpenPayload,
   type ThreadRecordPayload,
 } from "@/lib/local-worker-client";
-import { ProgressTimeline, type ProgressStep } from "./ProgressTimeline";
+import type { ProgressStep } from "./progress-types";
 import {
   proposalFromRunPayload,
   type ChangeProposal,

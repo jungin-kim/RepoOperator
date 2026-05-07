@@ -103,13 +103,7 @@ class AgentCoreRefactorTests(unittest.TestCase):
         result = retrieve_context(
             self.repo,
             "natural language should not decide broad routing",
-            StructuredRetrievalIntent(
-                analysis_scope="repository_wide",
-                **{
-                    "requested_" + "workflow": "repository_review",
-                    "retrieval_" + "goal": "review",
-                },
-            ),
+            StructuredRetrievalIntent(repository_wide=True),
         )
         self.assertEqual(result.query_type, "project_review")
         self.assertTrue(result.files)

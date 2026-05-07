@@ -61,7 +61,6 @@ class TestRequestUnderstandingDataclass(unittest.TestCase):
         self.assertEqual(ru.uncertainties, [])
         self.assertFalse(ru.needs_clarification)
         self.assertIsNone(ru.clarification_question)
-        self.assertIsNone(ru.legacy_intent)
 
     def test_has_no_routing_fields(self):
         ru = RequestUnderstanding()

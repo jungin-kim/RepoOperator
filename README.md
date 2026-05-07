@@ -9,7 +9,7 @@
 
 ![RepoOperator CLI Screenshot](/repooperator-screenshot.png)
 
-RepoOperator is a local-first repository assistant for opening private codebases, asking read-only questions, and keeping repository access on your machine.
+RepoOperator is a local-first repository assistant for opening private codebases, answering codebase questions, preparing proposed changes, and keeping repository access on your machine.
 
 ## Why RepoOperator
 
@@ -21,7 +21,7 @@ RepoOperator explores a third path:
 - the user experience can still be browser-based and product-oriented
 - model access can be local through Ollama or remote through an enterprise-compatible API
 
-The current alpha is intentionally focused: onboard a machine, start the local runtime, open a repository, and ask read-only questions.
+The current alpha is intentionally focused: onboard a machine, start the local runtime, open a repository, and work through repository questions or proposal-only edits.
 
 ## Features
 
@@ -77,7 +77,7 @@ Start the local product runtime:
 repooperator up
 ```
 
-Open the printed local web URL, choose a repository, and ask a read-only question.
+Open the printed local web URL, choose a repository, and ask a repository question.
 
 > **No source clone required.** `repooperator onboard` downloads and prepares all runtime
 > dependencies into `~/.repooperator/runtime/` automatically. You do not need to clone the
@@ -139,7 +139,7 @@ The intended common path is:
 6. Open the printed web URL.
 7. Select a project and branch.
 8. Open the repository locally.
-9. Ask a read-only repository question.
+9. Ask a repository question or request a proposal-only change.
 10. Review the answer in the browser.
 
 ```bash
@@ -251,7 +251,7 @@ RepoOperator currently supports these repository sources:
 
 | Source | Status | Notes |
 | --- | --- | --- |
-| GitLab | Working alpha path | Project listing, branch listing, clone/fetch, and read-only Q&A are the most exercised path. |
+| GitLab | Working alpha path | Project listing, branch listing, clone/fetch, repository Q&A, and proposal flows are the most exercised path. |
 | GitHub | Supported alpha path | Uses the same provider-oriented flow, with GitHub token and base URL from onboarding. |
 | Local project | Supported alpha path | Uses absolute filesystem paths and can work with git repositories or plain directories. |
 
@@ -475,9 +475,9 @@ RepoOperator currently supports:
 - local project open flows with absolute paths
 - visible project lists and branch lists in the web UI
 - non-interactive clone/fetch for private repositories when provider credentials are configured
-- read-only repository questions through the local worker
-- query-aware repository context retrieval for more useful answers than a README-only flow
-- LangGraph-based agent orchestration with classify → retrieve → answer steps
+- repository questions through the local worker with persisted activity events
+- query-aware repository context and tool-based file evidence gathering
+- agent-core orchestration with request understanding, planning, safe tool execution, and final synthesis
 - local branch listing, branch creation, and branch switching from the web UI
 - approval-based write workflow: propose a change, review the diff, apply with one click
 - write permission model with `read-only` (default) and `write-with-approval` modes
@@ -487,7 +487,6 @@ RepoOperator currently supports:
 
 RepoOperator is still alpha-stage software. Important limitations:
 
-- The main polished flow is read-only.
 - Editing, patch review, validation, commit, and merge-request workflows are still evolving.
 - Hosted-to-local worker pairing is currently development-style rather than packaged desktop software.
 - GitLab is the most exercised provider path today.

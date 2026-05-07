@@ -76,7 +76,6 @@ class TaskFrame:
     uncertainty: list[str] = field(default_factory=list)
     should_ask_clarification: bool = False
     clarification_question: str | None = None
-    legacy_intent: str | None = None
 
 
 def propose_next_action_with_model(
@@ -262,7 +261,8 @@ def validate_model_next_action(payload: dict[str, Any], request: AgentRunRequest
 
 
 def build_task_frame(request: AgentRunRequest, state: AgentCoreState) -> TaskFrame:
-    # Prefer RequestUnderstanding facts; fall back to ClassifierResult for compat.
+    # Prefer RequestUnderstanding facts; keep ClassifierResult only as a target-file
+    # compatibility source for older steering/test helpers.
     ru = getattr(state, "request_understanding", None)
     classifier = state.classifier_result
 
@@ -315,7 +315,6 @@ def build_task_frame(request: AgentRunRequest, state: AgentCoreState) -> TaskFra
         uncertainty=list(getattr(ru, "uncertainties", None) or []) if ru else [],
         should_ask_clarification=needs_clarification,
         clarification_question=clarification_question,
-        legacy_intent=getattr(ru, "legacy_intent", None) or getattr(classifier, "intent", "ambiguous"),
     )
 
 

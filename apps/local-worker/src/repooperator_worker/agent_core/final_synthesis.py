@@ -185,11 +185,11 @@ def _is_placeholder_answer(answer: str) -> bool:
 
 
 def _looks_like_project_summary_request(request: AgentRunRequest) -> bool:
-    classifier = getattr(request, "task", "")
-    lowered = classifier.lower()
-    if any(term in classifier for term in ("아키텍처", "구조", "실행 흐름")) or any(term in lowered for term in ("architecture", "execution flow", "entrypoint")):
+    task_text = getattr(request, "task", "")
+    lowered = task_text.lower()
+    if any(term in task_text for term in ("아키텍처", "구조", "실행 흐름")) or any(term in lowered for term in ("architecture", "execution flow", "entrypoint")):
         return False
-    return "project" in lowered or "프로젝트" in classifier
+    return "project" in lowered or "프로젝트" in task_text
 
 
 def _looks_like_file_dump(answer: str) -> bool:

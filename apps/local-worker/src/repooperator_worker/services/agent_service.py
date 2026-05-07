@@ -62,6 +62,5 @@ def _agent_error_response(request: AgentRunRequest, exc: Exception) -> AgentRunR
         graph_path="agent_core:error",
         agent_flow="agent_core_controller",
         proposal_error_details=str(exc),
-        classifier="none",
         validation_status="agent_error",
     )

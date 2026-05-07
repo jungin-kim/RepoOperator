@@ -1,4 +1,4 @@
-import type { ProgressStep } from "./ProgressTimeline";
+import type { ProgressStep } from "./progress-types";
 import type {
   AgentActivityDetailItem,
   AgentEditSummaryItem,
@@ -6,7 +6,7 @@ import type {
   EditFileSummary,
   ReadFileDetailItem,
 } from "./agent-activity-types";
-import { isLowValuePrimaryLabel } from "./work-trace-display";
+import { isLowValuePrimaryLabel } from "./agent-activity-display";
 
 const SEARCH_TYPES = new Set(["search_files", "search_text"]);
 const READ_TYPES = new Set(["read_file"]);

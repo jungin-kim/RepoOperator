@@ -13,9 +13,9 @@ import {
   type ChangeProposal,
   type ProposalStatus,
 } from "./ProposalCard";
-import type { ProgressStep } from "./ProgressTimeline";
+import type { ProgressStep } from "./progress-types";
 import { AgentActivityTranscript } from "./AgentActivityTranscript";
-import { workTraceSummary } from "./work-trace-display";
+import { progressStepSummary } from "./agent-activity-display";
 
 export type ChatMessage = {
   id: string;
@@ -281,12 +281,6 @@ function ToolCard({ metadata }: { metadata: AgentRunPayload }) {
               <span className="tool-meta-value">{metadata.validation_status}</span>
             </div>
           )}
-          {metadata.graph_path && (
-            <div className="tool-meta-item">
-              <span className="tool-meta-label">Graph path</span>
-              <span className="tool-meta-value">{metadata.graph_path}</span>
-            </div>
-          )}
           {metadata.run_id && (
             <div className="tool-meta-item">
               <span className="tool-meta-label">Run ID</span>
@@ -341,12 +335,6 @@ function ToolCard({ metadata }: { metadata: AgentRunPayload }) {
               <span className="tool-meta-value">{metadata.resolved_symbols.join(", ")}</span>
             </div>
           ) : null}
-          {metadata.git_action ? (
-            <div className="tool-meta-item">
-              <span className="tool-meta-label">Git action</span>
-              <span className="tool-meta-value">{metadata.git_action}</span>
-            </div>
-          ) : null}
           {metadata.commands_run?.length ? (
             <div className="tool-meta-item" style={{ gridColumn: "1 / -1" }}>
               <span className="tool-meta-label">Commands run</span>
@@ -369,12 +357,6 @@ function ToolCard({ metadata }: { metadata: AgentRunPayload }) {
             <div className="tool-meta-item" style={{ gridColumn: "1 / -1" }}>
               <span className="tool-meta-label">Selected recommendations</span>
               <span className="tool-meta-value">{metadata.selected_recommendation_ids.join(", ")}</span>
-            </div>
-          ) : null}
-          {metadata.pasted_prompt_or_spec !== undefined ? (
-            <div className="tool-meta-item">
-              <span className="tool-meta-label">Pasted spec</span>
-              <span className="tool-meta-value">{metadata.pasted_prompt_or_spec ? "yes" : "no"}</span>
             </div>
           ) : null}
           {metadata.plan_steps?.length ? (
@@ -502,7 +484,7 @@ export function ChatMessages({
     if (message.progressSteps?.length) {
       lines.push("Work log:");
       for (const step of message.progressSteps) {
-        lines.push(`- ${workTraceSummary(step)}${step.detail ? ` - ${step.detail}` : ""}`);
+        lines.push(`- ${progressStepSummary(step)}${step.detail ? ` - ${step.detail}` : ""}`);
       }
     }
     if (message.metadata?.selected_target_file) {

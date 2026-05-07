@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildAgentActivityTranscript } from "../agent-activity-transcript";
-import type { ProgressStep } from "../ProgressTimeline";
+import type { ProgressStep } from "../progress-types";
 
 function step(overrides: Partial<ProgressStep> & { activityId: string }): ProgressStep {
   return {

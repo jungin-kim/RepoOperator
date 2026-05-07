@@ -8,7 +8,6 @@ SRC_DIR = TESTS_DIR.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from repooperator_worker.agent_core import controller_graph  # noqa: E402
 from repooperator_worker.agent_core.planner import TaskFrame, validate_model_next_action, validate_visible_work_note  # noqa: E402
 from repooperator_worker.agent_core.steering import SteeringDecision  # noqa: E402
 from repooperator_worker.agent_core.state import AgentCoreState, ClassifierResult  # noqa: E402
@@ -16,13 +15,11 @@ from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
 
 
 class PlannerSteeringModuleTests(unittest.TestCase):
-    def test_direct_and_compat_imports_exist(self) -> None:
+    def test_planner_and_steering_types_are_direct_imports(self) -> None:
         frame = TaskFrame(user_goal="Explain README.md", mentioned_files=["README.md"])
         decision = SteeringDecision(steering_type="defer")
         self.assertEqual(frame.mentioned_files, ["README.md"])
         self.assertEqual(decision.steering_type, "defer")
-        self.assertIs(controller_graph.TaskFrame, TaskFrame)
-        self.assertIs(controller_graph.SteeringDecision, SteeringDecision)
 
     def test_planner_validates_search_text_action_directly(self) -> None:
         request = AgentRunRequest(project_path=".", git_provider="local", branch="main", task="search text")

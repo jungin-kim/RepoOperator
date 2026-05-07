@@ -13,7 +13,6 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from repooperator_worker.agent_core.controller_graph import stream_controller_graph  # noqa: E402
-from repooperator_worker.agent_core.state import ClassifierResult  # noqa: E402
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
 from repooperator_worker.services.event_service import list_run_events  # noqa: E402
 
@@ -43,13 +42,9 @@ class FinalStreamingGuardTests(unittest.TestCase):
             repo.mkdir()
             (repo / "README.md").write_text("# Demo\n\nA small documented project.\n", encoding="utf-8")
             request = AgentRunRequest(project_path=str(repo), git_provider="local", branch="main", task="README.md 설명해줘.")
-            classifier = ClassifierResult(intent="read_only_question", confidence=0.9, target_files=["README.md"])
             config = Path(tmp) / "config.json"
             config.write_text(json.dumps({"repooperatorHomeDir": str(Path(tmp) / ".repooperator")}), encoding="utf-8")
             with patch.dict(os.environ, {"REPOOPERATOR_CONFIG_PATH": str(config)}, clear=False), patch(
-                "repooperator_worker.agent_core.controller_graph.classify_intent",
-                return_value=classifier,
-            ), patch(
                 "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
                 return_value=_BadStreamingFinalClient(),
             ), patch(

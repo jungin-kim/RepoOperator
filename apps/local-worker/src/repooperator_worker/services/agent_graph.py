@@ -244,7 +244,6 @@ def _format_response(state: AgentGraphState) -> dict[str, Any]:
     active_repository: ActiveRepository | None = state.get("active_repository")
     context: QueryAwareContext = state["context"]
     response_text: str = state["response_text"]
-    reasoning: str | None = state.get("reasoning")
     thread_context: ThreadContext = state.get("thread_context") or build_thread_context(request)
 
     trace_source = request.git_provider or (
@@ -272,7 +271,6 @@ def _format_response(state: AgentGraphState) -> dict[str, Any]:
         is_git_repository=context.is_git_repository,
         files_read=context.files_read,
         response=response_text,
-        reasoning=reasoning,
         thread_context_files=thread_context.recent_files,
         thread_context_symbols=thread_context.symbol_names,
         context_source=state.get("context_source") or "retrieval",

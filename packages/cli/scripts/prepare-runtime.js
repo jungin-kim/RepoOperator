@@ -45,6 +45,7 @@ const EXCLUDE_PATTERNS = [
   /\.pyc$/,
   /\.pyo$/,
   /\.DS_Store$/,
+  /^tsconfig\.tsbuildinfo$/,
 ];
 
 async function copyFiltered(src, dest) {

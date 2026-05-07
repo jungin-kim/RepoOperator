@@ -160,7 +160,7 @@ export type AgentRunPayload = {
   is_git_repository: boolean;
   files_read: string[];
   response: string;
-  // Write-intent routing fields
+  // Response metadata
   response_type?: "assistant_answer" | "change_proposal" | "edit_applied" | "permission_required" | "clarification" | "proposal_error" | "command_approval" | "command_result" | "command_denied" | "command_error" | "agent_error";
   proposal_relative_path?: string | null;
   proposal_original_content?: string | null;
@@ -185,18 +185,12 @@ export type AgentRunPayload = {
   resolved_symbols?: string[];
   reference_confidence?: number | null;
   reference_clarification_needed?: boolean | null;
-  classifier?: string | null;
-  classifier_confidence?: number | null;
   validation_status?: string | null;
-  git_action?: string | null;
   commands_planned?: string[];
   commands_run?: string[];
-  reasoning?: string | null;
   recommendation_context?: Record<string, unknown> | null;
   recommendation_context_loaded?: boolean;
   selected_recommendation_ids?: string[];
-  pasted_prompt_or_spec?: boolean;
-  apply_spec_to_repo?: boolean;
   plan_id?: string | null;
   plan_steps?: string[];
   proposal_validation_status?: string | null;
@@ -673,13 +667,13 @@ export async function generateApplySummary(input: {
   user_request?: string;
   proposal_summary?: string;
   diff_summary?: string;
-}): Promise<{ response: string; response_type: string; relative_path: string; reasoning?: string | null }> {
+}): Promise<{ response: string; response_type: string; relative_path: string }> {
   const response = await fetch("/api/worker/agent/apply-summary", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
-  return parseWorkerResponse<{ response: string; response_type: string; relative_path: string; reasoning?: string | null }>(response);
+  return parseWorkerResponse<{ response: string; response_type: string; relative_path: string }>(response);
 }
 
 export async function listThreads(): Promise<ThreadListPayload> {

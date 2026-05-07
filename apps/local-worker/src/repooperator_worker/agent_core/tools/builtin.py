@@ -10,14 +10,14 @@ from typing import Any
 from repooperator_worker.agent_core.command_security import validate_argv_shape
 from repooperator_worker.agent_core.events import append_activity_event
 from repooperator_worker.agent_core.policies import command_policy_preview, validate_repo_file
-from repooperator_worker.agent_core.repository_review import run_repository_review as _run_repository_review
+from repooperator_worker.agent_core.repository_review import run_repository_review
 from repooperator_worker.agent_core.secret_scanner import redact_secrets
 from repooperator_worker.agent_core.tools.base import BaseTool, ToolExecutionContext, ToolResult, ToolSpec
 from repooperator_worker.agent_core.permissions import PermissionDecision, ToolPermissionContext
 from repooperator_worker.services.command_service import run_command_with_policy
 from repooperator_worker.services.common import resolve_project_path
 from repooperator_worker.services.json_safe import json_safe, safe_agent_response_payload
-from repooperator_worker.services.model_client import ModelGenerationRequest, OpenAICompatibleModelClient as _OpenAICompatibleModelClient
+from repooperator_worker.services.model_client import ModelGenerationRequest, OpenAICompatibleModelClient
 
 
 TEXT_FILE_SUFFIXES = {
@@ -307,7 +307,7 @@ class AnalyzeRepositoryTool(BaseTool):
     )
 
     def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
-        response = _compat_run_repository_review(
+        response = run_repository_review(
             request=context.request,
             run_id=context.run_id,
             classifier=payload.get("classifier"),
@@ -734,7 +734,7 @@ Preserve existing class structure and lifecycle methods unless the requested cha
 
 def model_generate_edit_proposal(relative_path: str, content: str, task: str, context: dict[str, Any] | None = None) -> dict[str, Any] | None:
     try:
-        raw = _compat_model_client()().generate_text(
+        raw = OpenAICompatibleModelClient().generate_text(
             ModelGenerationRequest(
                 system_prompt=EDIT_PROPOSAL_PROMPT,
                 user_prompt=json.dumps(
@@ -1157,22 +1157,3 @@ def _command_from_payload(payload: dict[str, Any], default: list[str] | None = N
     if isinstance(command, list):
         return [str(item) for item in command]
     return str(command)
-
-
-def _compat_model_client():
-    try:
-        from repooperator_worker.agent_core import action_executor
-
-        return getattr(action_executor, "OpenAICompatibleModelClient", _OpenAICompatibleModelClient)
-    except Exception:
-        return _OpenAICompatibleModelClient
-
-
-def _compat_run_repository_review(**kwargs: Any):
-    try:
-        from repooperator_worker.agent_core import action_executor
-
-        func = getattr(action_executor, "run_repository_review", _run_repository_review)
-    except Exception:
-        func = _run_repository_review
-    return func(**kwargs)

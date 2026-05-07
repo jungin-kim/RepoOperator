@@ -210,15 +210,11 @@ class AgentRunResponse(BaseModel):
     proposal_error_details: str | None = None
     command_approval: dict | None = None
     command_result: dict | None = None
-    git_action: str | None = None
     commands_planned: list[str] = []
     commands_run: list[str] = []
-    reasoning: str | None = None
     recommendation_context: dict | None = None
     recommendation_context_loaded: bool = False
     selected_recommendation_ids: list[str] = []
-    pasted_prompt_or_spec: bool = False
-    apply_spec_to_repo: bool = False
     plan_id: str | None = None
     plan_steps: list[str] = []
     proposal_validation_status: str | None = None
@@ -236,8 +232,6 @@ class AgentRunResponse(BaseModel):
     resolved_symbols: list[str] = []
     reference_confidence: float | None = None
     reference_clarification_needed: bool | None = None
-    classifier: str | None = None
-    classifier_confidence: float | None = None
     validation_status: str | None = None
     plan_steps_summary: list[dict] = []
     activity_events: list[dict] = []

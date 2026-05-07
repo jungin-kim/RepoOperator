@@ -410,10 +410,10 @@ def _record_response_events(run_id: str, request: AgentRunRequest, response: Age
         run_id,
         request=request,
         phase="Thinking",
-        label="Classified request",
-        detail=f"Intent: {response.intent_classification or 'unknown'}",
+        label="Framed request",
+        detail=response.response_type or "assistant_answer",
         status="completed",
-        event_type="classifier",
+        event_type="request_framed",
     )
     for file_path in response.files_read:
         append_activity(

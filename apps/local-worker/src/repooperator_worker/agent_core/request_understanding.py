@@ -11,7 +11,6 @@ buckets, we extract:
   - safety notes from the task text (safety_notes)
   - things that are unclear (uncertainties)
   - a clarification question if the task is genuinely ambiguous (clarification_question)
-  - legacy_intent only when supplied by an old caller; it is compatibility data
 
 IMPORTANT: This module must NOT assign authoritative workflow buckets.
   - Do not add legacy intent constants.
@@ -46,8 +45,7 @@ Return ONLY a JSON object matching this schema:
   "safety_notes": ["<any safety or scope constraints implicit in the task>"],
   "uncertainties": ["<things that are unclear or ambiguous>"],
   "needs_clarification": false,
-  "clarification_question": null,
-  "legacy_intent": null
+  "clarification_question": null
 }
 
 Rules:
@@ -76,7 +74,6 @@ class RequestUnderstanding:
     uncertainties: list[str] = dataclasses.field(default_factory=list)
     needs_clarification: bool = False
     clarification_question: str | None = None
-    legacy_intent: str | None = None
 
     def model_dump(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -156,7 +153,6 @@ def _build_understanding(payload: dict[str, Any], request: AgentRunRequest) -> R
         uncertainties=_safe_public_list(payload.get("uncertainties"), limit=220),
         needs_clarification=bool(payload.get("needs_clarification")),
         clarification_question=_safe_public_text(payload.get("clarification_question"), limit=240),
-        legacy_intent=_safe_public_text(payload.get("legacy_intent"), limit=80) or None,
     )
 
 

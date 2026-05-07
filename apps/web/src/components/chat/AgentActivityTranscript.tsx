@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ProgressStep } from "./ProgressTimeline";
+import type { ProgressStep } from "./progress-types";
 import type {
   AgentActivityDetailItem,
   AgentEditSummaryItem,
   AgentTranscriptSection,
 } from "./agent-activity-types";
 import { buildAgentActivityTranscript } from "./agent-activity-transcript";
-import { compactWorkTraceSteps } from "./work-trace-display";
+import { hasTechnicalLogSteps } from "./agent-activity-display";
 
 type Props = {
   steps: ProgressStep[];
@@ -154,12 +154,11 @@ export function AgentActivityTranscript({ steps, done }: Props) {
   if (steps.length === 0) return null;
 
   const sections = buildAgentActivityTranscript(steps, { finalizeRunning: done });
-  const primarySteps = compactWorkTraceSteps(steps);
 
-  if (sections.length === 0 && primarySteps.length === 0) return null;
+  if (sections.length === 0) return null;
 
   const totalMs = runDurationMs(steps, done, now);
-  const hasHiddenTechnicalSteps = steps.length > primarySteps.length;
+  const hasHiddenTechnicalSteps = hasTechnicalLogSteps(steps);
 
   return (
     <section className="agent-transcript" aria-label="Agent activity">

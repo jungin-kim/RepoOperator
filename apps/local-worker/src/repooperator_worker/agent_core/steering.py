@@ -5,10 +5,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from repooperator_worker.agent_core.events import append_activity_event
+from repooperator_worker.agent_core.planner import _existing_target_files
 from repooperator_worker.agent_core.state import AgentCoreState
 from repooperator_worker.schemas import AgentRunRequest
 from repooperator_worker.services.json_safe import json_safe, safe_repr
-from repooperator_worker.services.model_client import ModelGenerationRequest, OpenAICompatibleModelClient as _OpenAICompatibleModelClient
+from repooperator_worker.services.model_client import ModelGenerationRequest, OpenAICompatibleModelClient
 
 
 SUPPORTED_STEERING_TYPES = {
@@ -55,7 +56,7 @@ def consume_steering_for_state(state: AgentCoreState, request: AgentRunRequest) 
         content = str(item.get("content") or "").strip()
         state.steering_instructions.append(item)
         applied = False
-        decision = _compat_parse_steering_instruction()(content, request, state)
+        decision = parse_steering_instruction(content, request, state)
         target_files = _existing_target_files(request, decision.target_files or [])
         if decision.steering_type == "add_target_file" and target_files:
             existing = list(state.classifier_result.target_files)
@@ -95,7 +96,7 @@ def parse_steering_instruction(content: str, request: AgentRunRequest, state: Ag
     if not raw_content:
         return SteeringDecision(steering_type="defer", target_files=[], confidence=0.0, reason="Empty steering instruction.")
     try:
-        raw = _compat_model_client()().generate_text(
+        raw = OpenAICompatibleModelClient().generate_text(
             ModelGenerationRequest(
                 system_prompt=STEERING_PROMPT,
                 user_prompt=json.dumps(
@@ -165,27 +166,3 @@ def _file_tokens(text: str) -> list[str]:
     from repooperator_worker.agent_core.request_parsing import extract_file_tokens
 
     return extract_file_tokens(text)
-
-
-def _existing_target_files(request: AgentRunRequest, target_files: list[str]) -> list[str]:
-    from repooperator_worker.agent_core.controller_graph import _existing_target_files as _impl
-
-    return _impl(request, target_files)
-
-
-def _compat_model_client():
-    try:
-        from repooperator_worker.agent_core import controller_graph
-
-        return getattr(controller_graph, "OpenAICompatibleModelClient", _OpenAICompatibleModelClient)
-    except Exception:
-        return _OpenAICompatibleModelClient
-
-
-def _compat_parse_steering_instruction():
-    try:
-        from repooperator_worker.agent_core import controller_graph
-
-        return getattr(controller_graph, "parse_steering_instruction", parse_steering_instruction)
-    except Exception:
-        return parse_steering_instruction

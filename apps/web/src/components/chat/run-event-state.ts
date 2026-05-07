@@ -4,7 +4,7 @@ import type {
   AgentRunRecord,
 } from "@/lib/local-worker-client";
 import type { ChatMessage } from "./ChatMessages";
-import type { ProgressStep } from "./ProgressTimeline";
+import type { ProgressStep } from "./progress-types";
 
 export type AgentRunEvent = AgentActivityEvent & {
   type?: string;

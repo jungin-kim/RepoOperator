@@ -1,10 +1,8 @@
-"""
-Query-aware file retrieval for the RepoOperator agent.
+"""Query-aware file retrieval for the legacy read-only context path.
 
-Classifies the user task into one of five strategies, then reads the relevant
-repository files before the model call.  The result includes a retrieval trace
-(list of relative paths that were actually read) so the answer can be grounded
-in specific evidence.
+The active agent loop uses agent_core.context_service and primitive tools. This
+module is kept for older read-only context callers and only routes by explicit
+file hints or a structured repository-wide flag.
 """
 from __future__ import annotations
 
@@ -77,20 +75,11 @@ class QueryType:
 
 @dataclass
 class StructuredRetrievalIntent:
-    """Retrieval hint struct.
-
-    requested_workflow and retrieval_goal are legacy fields kept only for
-    backward compatibility with existing tests and callers. They must NOT
-    be used to route planner behavior. Use target_files and mentioned_files
-    as the primary evidence signals.
-    """
-    analysis_scope: str = "unknown"
+    """Retrieval hints for callers that already have structured evidence."""
     target_files: list[str] = field(default_factory=list)
     target_symbols: list[str] = field(default_factory=list)
     file_types_requested: list[str] = field(default_factory=list)
-    # Legacy compatibility fields — do not add routing logic that reads these.
-    requested_workflow: str = "other"
-    retrieval_goal: str = "answer"
+    repository_wide: bool = False
 
 
 def classify_query(task: str) -> tuple[str, list[str]]:
@@ -119,16 +108,14 @@ def classify_structured_intent(intent: StructuredRetrievalIntent | dict | None) 
         return QueryType.GENERAL, []
     if isinstance(intent, dict):
         intent = StructuredRetrievalIntent(
-            analysis_scope=str(intent.get("analysis_scope") or "unknown"),
             target_files=[str(item) for item in intent.get("target_files") or []],
             target_symbols=[str(item) for item in intent.get("target_symbols") or []],
             file_types_requested=[str(item) for item in intent.get("file_types_requested") or []],
+            repository_wide=bool(intent.get("repository_wide")),
         )
     if intent.target_files:
         return QueryType.FILE_SPECIFIC, intent.target_files
-    # Evidence-based: broad scope when no target files and analysis_scope signals it.
-    # Do NOT route by requested_workflow / retrieval_goal bucket fields.
-    if intent.analysis_scope == "repository_wide":
+    if intent.repository_wide:
         return QueryType.PROJECT_REVIEW, []
     return QueryType.GENERAL, []
 
@@ -265,7 +252,7 @@ def _find_file(repo_path: Path, filename: str) -> list[Path]:
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def retrieve_context(repo_path: Path, task: str, intent: StructuredRetrievalIntent | dict | None = None) -> RetrievalResult:
-    """Retrieve relevant files from structured classifier fields."""
+    """Retrieve relevant files from structured hints or explicit task file refs."""
     query_type, targets = classify_structured_intent(intent) if intent is not None else classify_query(task)
 
     if query_type == QueryType.FILE_SPECIFIC:

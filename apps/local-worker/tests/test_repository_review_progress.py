@@ -2,7 +2,7 @@ import sys
 import tempfile
 import unittest
 import inspect
-import json
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,16 +14,13 @@ if str(SRC_DIR) not in sys.path:
 
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
 from repooperator_worker.agent_core.repository_review import (  # noqa: E402
-    inventory_repository_review_files,
-    review_progress_labels,
-)
-from repooperator_worker.services.agent_orchestration_graph import (  # noqa: E402
+    MAX_REPOSITORY_REVIEW_BYTES,
     REPOSITORY_REVIEW_BINARY_SUFFIXES,
     REPOSITORY_REVIEW_SUFFIXES,
-    MAX_REPOSITORY_REVIEW_BYTES,
-    _classify_intent,
-    _repository_wide_review,
-    _should_use_repository_wide_review,
+    inventory_repository_review_files,
+    review_progress_labels,
+    run_repository_review,
+    should_use_repository_wide_review,
 )
 from repooperator_worker.services.event_service import list_run_events  # noqa: E402
 
@@ -41,17 +38,6 @@ class _ReviewClient:
         if "Client.kt" in request.user_prompt:
             return "Purpose: contains a client entry point. Improvement: add error handling around network calls if present."
         return "Purpose: documentation or configuration. Confirmed issues: none from the shown content."
-
-
-class _ClassifierClient:
-    payload: dict = {}
-
-    @property
-    def model_name(self) -> str:
-        return "classifier-test-model"
-
-    def generate_text(self, request):
-        return json.dumps(self.payload)
 
 
 class _InspectingReviewClient(_ReviewClient):
@@ -108,15 +94,11 @@ class RepositoryReviewProgressTests(unittest.TestCase):
             "repooperator_worker.services.event_service.get_repooperator_home_dir",
             return_value=Path(self.home.name),
         ):
-            return _repository_wide_review(
-                {
-                    "request": request,
-                    "intent": "repo_analysis",
-                    "classifier": "llm",
-                    "confidence": 0.9,
-                    "run_id": "run_review_test",
-                }
-            )["result"]
+            return run_repository_review(
+                request=request,
+                run_id="run_review_test",
+                classifier=SimpleNamespace(intent="repo_analysis"),
+            )
 
     def test_repository_review_uses_per_file_progress_events(self) -> None:
         result = self._run_review("Please review the whole repository and summarize confirmed file-level findings.")
@@ -184,15 +166,11 @@ class RepositoryReviewProgressTests(unittest.TestCase):
             "repooperator_worker.services.event_service.get_repooperator_home_dir",
             return_value=Path(self.home.name),
         ):
-            result = _repository_wide_review(
-                {
-                    "request": request,
-                    "intent": "repo_analysis",
-                    "classifier": "llm",
-                    "confidence": 0.9,
-                    "run_id": "run_review_test",
-                }
-            )["result"]
+            result = run_repository_review(
+                request=request,
+                run_id="run_review_test",
+                classifier=SimpleNamespace(intent="repo_analysis"),
+            )
         self.assertTrue(result.activity_events)
 
     def test_safe_summary_generator_is_file_specific(self) -> None:
@@ -221,28 +199,19 @@ class RepositoryReviewProgressTests(unittest.TestCase):
             "repooperator_worker.services.event_service.get_repooperator_home_dir",
             return_value=Path(self.home.name),
         ):
-            result = _repository_wide_review(
-                {
-                    "request": request,
-                    "intent": "repo_analysis",
-                    "classifier": "llm",
-                    "confidence": 0.9,
-                    "run_id": "run_review_timeout",
-                }
-            )["result"]
+            result = run_repository_review(
+                request=request,
+                run_id="run_review_timeout",
+                classifier=SimpleNamespace(intent="repo_analysis"),
+            )
 
         self.assertIn("did not complete", result.response)
         self.assertNotIn("Confirmed File-Level Results", result.response)
         self.assertEqual(result.files_read, [])
 
-    def test_repository_wide_review_selection_uses_classifier_fields(self) -> None:
-        request = AgentRunRequest(project_path=str(self.repo), git_provider="local", branch="main", task="Look across this workspace.")
-        state = {
-            "request": request,
-            "target_files": [],
-            "file_hints": [],
-        }
-        self.assertTrue(_should_use_repository_wide_review(state))
+    def test_repository_wide_review_selection_uses_target_evidence(self) -> None:
+        classifier = SimpleNamespace(target_files=[], mentioned_files=[])
+        self.assertTrue(should_use_repository_wide_review(classifier))
 
     def test_duplicate_basename_labels_are_disambiguated(self) -> None:
         labels = review_progress_labels(["README.md", "docs/README.md", "package.json"])
@@ -257,69 +226,15 @@ class RepositoryReviewProgressTests(unittest.TestCase):
         self.assertEqual(stale[0]["reason"], "stale duplicate copy")
 
     def test_selected_files_override_repository_wide_classifier_fields(self) -> None:
-        request = AgentRunRequest(project_path=str(self.repo), git_provider="local", branch="main", task="Focus this pass.")
-        state = {
-            "request": request,
-            "target_files": ["server.py"],
-            "file_hints": [],
-        }
-        self.assertFalse(_should_use_repository_wide_review(state))
+        classifier = SimpleNamespace(target_files=["server.py"], mentioned_files=[])
+        self.assertFalse(should_use_repository_wide_review(classifier))
 
     def test_specific_file_hint_does_not_select_repository_wide_review(self) -> None:
-        request = AgentRunRequest(project_path=str(self.repo), git_provider="local", branch="main", task="Please help.")
-        state = {
-            "request": request,
-            "target_files": ["server.py"],
-            "file_hints": [],
-        }
-        self.assertFalse(_should_use_repository_wide_review(state))
-
-    def test_korean_paraphrase_uses_mocked_classifier_scope_not_keywords(self) -> None:
-        request = AgentRunRequest(project_path=str(self.repo), git_provider="local", branch="main", task="코드베이스를 한 바퀴 훑어줘")
-        _ClassifierClient.payload = {
-            "user_goal": "Broadly review the codebase",
-            "mentioned_files": [],
-            "mentioned_symbols": [],
-            "constraints": [],
-            "requested_outputs": ["review"],
-            "likely_needed_tools": ["inspect_repo_tree"],
-            "safety_notes": [],
-            "uncertainties": [],
-            "needs_clarification": False,
-            "clarification_question": None,
-        }
-        with patch(
-            "repooperator_worker.agent_core.request_understanding.OpenAICompatibleModelClient",
-            return_value=_ClassifierClient(),
-        ):
-            classified = _classify_intent({"request": request, "pending": {}})
-        self.assertEqual(classified["target_files"], [])
-        self.assertTrue(_should_use_repository_wide_review({**classified, "request": request}))
-
-    def test_english_paraphrase_uses_mocked_classifier_scope_not_keywords(self) -> None:
-        request = AgentRunRequest(project_path=str(self.repo), git_provider="local", branch="main", task="Give this codebase a quality pass.")
-        _ClassifierClient.payload = {
-            "user_goal": "Perform a broad quality pass over the codebase",
-            "mentioned_files": [],
-            "mentioned_symbols": [],
-            "constraints": [],
-            "requested_outputs": ["review"],
-            "likely_needed_tools": ["inspect_repo_tree"],
-            "safety_notes": [],
-            "uncertainties": [],
-            "needs_clarification": False,
-            "clarification_question": None,
-        }
-        with patch(
-            "repooperator_worker.agent_core.request_understanding.OpenAICompatibleModelClient",
-            return_value=_ClassifierClient(),
-        ):
-            classified = _classify_intent({"request": request, "pending": {}})
-        self.assertEqual(classified["target_files"], [])
-        self.assertTrue(_should_use_repository_wide_review({**classified, "request": request}))
+        classifier = SimpleNamespace(target_files=[], mentioned_files=["server.py"])
+        self.assertFalse(should_use_repository_wide_review(classifier))
 
     def test_repository_wide_review_gate_has_no_natural_language_phrase_lists(self) -> None:
-        source = inspect.getsource(_should_use_repository_wide_review)
+        source = inspect.getsource(should_use_repository_wide_review)
         self.assertNotIn("review" + "_signals", source)
         self.assertNotIn("broad" + "_scope_signals", source)
         self.assertNotIn("request.task", source)

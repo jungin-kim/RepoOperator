@@ -12,18 +12,13 @@ from repooperator_worker.agent_core.context_service import get_default_context_s
 from repooperator_worker.agent_core.events import append_activity_event, append_work_trace
 from repooperator_worker.agent_core.final_synthesis import (
     _answer_with_model,
-    collect_file_contents,
-    synthesize_answer_from_evidence,
     validate_or_repair_final_answer,
 )
 from repooperator_worker.agent_core.final_response import build_agent_response
 from repooperator_worker.agent_core.hooks import HookManager
 from repooperator_worker.agent_core.planner import (
     EDIT_DISCOVERY_TEXT_SIGNALS,
-    NEXT_ACTION_PROMPT,
-    PLANNER_ACTION_TYPES,
     TaskFrame,
-    _existing_target_files,
     _format_command_result,
     _format_edit_proposal,
     _has_action,
@@ -49,28 +44,13 @@ from repooperator_worker.agent_core.planner import (
     project_summary_files,
     propose_next_action_with_model as planner_propose_next_action_with_model,
     resolve_target_files,
-    validate_model_next_action,
 )
-from repooperator_worker.agent_core.request_parsing import extract_file_tokens as _file_tokens
-from repooperator_worker.agent_core.classifier import (
-    classify_intent,
-    validate_classifier_payload as _validate_classifier_payload,
-)
-# _parse_json kept for any tests that import it from this module.
-from repooperator_worker.agent_core.request_understanding import _parse_json
-from repooperator_worker.agent_core.state import AgentCoreState, ClassifierResult
-from repooperator_worker.agent_core.steering import (
-    STEERING_PROMPT,
-    SUPPORTED_STEERING_TYPES,
-    SteeringDecision,
-    _validate_steering_payload,
-    consume_steering_for_state,
-    parse_steering_instruction,
-)
+from repooperator_worker.agent_core.state import AgentCoreState
+from repooperator_worker.agent_core.steering import consume_steering_for_state
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
-from repooperator_worker.services.model_client import ModelGenerationRequest, OpenAICompatibleModelClient
+from repooperator_worker.services.model_client import OpenAICompatibleModelClient
 from repooperator_worker.services.event_service import append_run_event, get_run, list_run_events
 from repooperator_worker.services.json_safe import json_safe, safe_agent_response_payload, safe_repr
 from repooperator_worker.services.skills_service import enabled_skill_context
