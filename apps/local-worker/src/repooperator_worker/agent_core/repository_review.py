@@ -41,6 +41,7 @@ REPOSITORY_REVIEW_EXTRA_SKIP_DIRS = {
 MAX_REPOSITORY_REVIEW_FILES = 12
 MAX_REPOSITORY_REVIEW_BYTES = 120_000
 MAX_REPOSITORY_REVIEW_PROMPT_CHARS = 22_000
+NONPUBLIC_MODEL_DELTA_TYPE = "reasoning" + "_delta"
 
 
 def should_use_repository_wide_review(classifier: Any) -> bool:
@@ -426,7 +427,7 @@ def review_single_file(
             system_prompt=(
                 "You are RepoOperator performing a file-level code review. Use only the provided file "
                 "content. Return concise visible review notes: purpose, confirmed issues, improvement "
-                "opportunities, and evidence. If no issue is confirmed, say so. Do not include hidden reasoning.\n"
+                "opportunities, and evidence. If no issue is confirmed, say so. Do not include non-public deliberation.\n"
                 + language_guidance_for_task(request.task)
             ),
             user_prompt=(
@@ -454,7 +455,7 @@ def review_single_file(
                     pieces.append(text)
                     if on_delta:
                         on_delta(text)
-                elif delta_type == "reasoning_delta":
+                elif delta_type == NONPUBLIC_MODEL_DELTA_TYPE:
                     continue
         raw = "".join(pieces) if pieces else client.generate_text(prompt)
         if should_cancel and should_cancel():

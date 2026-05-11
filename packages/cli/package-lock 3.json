@@ -1,0 +1,19 @@
+{
+  "name": "repooperator",
+  "version": "0.2.5",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "repooperator",
+      "version": "0.2.5",
+      "license": "MIT",
+      "bin": {
+        "repooperator": "bin/repooperator.js"
+      },
+      "engines": {
+        "node": ">=20"
+      }
+    }
+  }
+}

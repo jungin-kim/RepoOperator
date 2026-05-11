@@ -49,7 +49,7 @@ class AgentLoop:
         self.deps.create_initial_plan(state)
         self.deps.emit_plan_update(state, request, "Created initial plan")
 
-        while self.deps.should_continue(state, started=started, max_wall_clock_seconds=self.max_wall_clock_seconds):
+        while self.deps.should_continue(state, request=request, started=started, max_wall_clock_seconds=self.max_wall_clock_seconds):
             self.deps.check_cancel(state, request)
             if state.cancellation_requested:
                 break

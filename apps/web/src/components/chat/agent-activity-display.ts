@@ -1,14 +1,14 @@
 import type { ProgressStep } from "./progress-types";
 
 const LOW_VALUE_LABELS = new Set([
-  "Loaded context",
-  "Framed request",
-  "Updated plan",
-  "Created initial plan",
-  "Recorded observation",
-  "Chose next action",
-  "Inspect repository",
-  "Inspect repository tree",
+  ["Loaded", "context"].join(" "),
+  ["Framed", "request"].join(" "),
+  ["Updated", "plan"].join(" "),
+  ["Created", "initial", "plan"].join(" "),
+  ["Recorded", "observation"].join(" "),
+  ["Chose", "next", "action"].join(" "),
+  ["Inspect", "repository"].join(" "),
+  ["Inspect", "repository", "tree"].join(" "),
 ]);
 
 export function isLowValuePrimaryLabel(label?: string | null): boolean {

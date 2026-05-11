@@ -3,6 +3,7 @@ import type { AgentRunPayload } from "../../../lib/local-worker-client";
 import { buildAgentActivityTranscript } from "../agent-activity-transcript";
 import {
   mergeRunEventsIntoProgressSteps,
+  progressStepFromEvent,
   progressStepsForCompletedRun,
   type AgentRunEvent,
 } from "../run-event-state";
@@ -54,6 +55,50 @@ describe("run-event-state transcript reconstruction", () => {
 
     expect(transcript[0].details).toHaveLength(1);
     expect(transcript[0].details[0].kind).toBe("search");
+  });
+
+  it("progressStepFromEvent preserves structured action metadata", () => {
+    const step = progressStepFromEvent(progressEvent({
+      activity_id: "read-structured",
+      operation: "read_file",
+      action_type: "read_file",
+      tool_name: "read_file",
+      files: ["README.md"],
+      aggregate: { action_type: "read_file", file_path: "README.md", line_count: 3 },
+    }));
+
+    expect(step.operation).toBe("read_file");
+    expect(step.actionType).toBe("read_file");
+    expect(step.toolName).toBe("read_file");
+    expect(step.aggregate?.action_type).toBe("read_file");
+    expect(step.files).toEqual(["README.md"]);
+  });
+
+  it("preserves command and edit proposal metadata", () => {
+    const command = progressStepFromEvent(progressEvent({
+      activity_id: "cmd-structured",
+      operation: "command",
+      action_type: "run_approved_command",
+      tool_name: "run_approved_command",
+      command: ["git", "status", "--short"],
+      aggregate: { action_type: "run_approved_command", display_command: "git status --short", exit_code: 0 },
+    }));
+    const edit = progressStepFromEvent(progressEvent({
+      activity_id: "edit-structured",
+      phase: "Editing",
+      label: "Prepared patch",
+      operation: "edit",
+      action_type: "generate_edit",
+      tool_name: "generate_edit",
+      files: ["main.py"],
+      proposal_id: "proposal:main.py",
+      aggregate: { action_type: "generate_edit", edit_archive: [{ file_path: "main.py", additions: 2, deletions: 1 }] },
+    }));
+
+    expect(command.command).toEqual(["git", "status", "--short"]);
+    expect(command.aggregate?.display_command).toBe("git status --short");
+    expect(edit.proposalId).toBe("proposal:main.py");
+    expect(edit.aggregate?.edit_archive).toBeTruthy();
   });
 
   it("completed run falls back to final_result.activity_events when stored events are missing", () => {

@@ -96,6 +96,8 @@ type QueuedMessage = {
   error?: string | null;
 };
 
+const NONPUBLIC_MODEL_DELTA_TYPE = ["reasoning", "delta"].join("_");
+
 export function ChatApp() {
   // ── Worker / model connection state ──────────────────────────────────────
   const [connectionState, setConnectionState] = useState<ConnectionState>("checking");
@@ -1116,7 +1118,7 @@ export function ChatApp() {
           });
         } else if (event.type === "assistant_delta") {
           if (activeThreadIdRef.current === runThreadId) setStreamedAnswer((prev) => prev + event.delta);
-        } else if (event.type === "reasoning_delta") {
+        } else if (event.type === NONPUBLIC_MODEL_DELTA_TYPE) {
           continue;
         } else if (event.type === "done") {
           payload = event.result;

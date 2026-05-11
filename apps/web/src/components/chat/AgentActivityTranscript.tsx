@@ -8,7 +8,6 @@ import type {
   AgentTranscriptSection,
 } from "./agent-activity-types";
 import { buildAgentActivityTranscript } from "./agent-activity-transcript";
-import { hasTechnicalLogSteps } from "./agent-activity-display";
 
 type Props = {
   steps: ProgressStep[];
@@ -51,7 +50,10 @@ function DetailItemRow({ item }: { item: AgentActivityDetailItem }) {
 
   if (item.kind === "search") {
     icon = "⟳";
-    desc = item.query ? `search: ${item.query}` : item.label;
+    desc = item.query ? `searched for ${item.query}` : item.label;
+    if (typeof item.resultCount === "number") {
+      desc += ` (${item.resultCount} result${item.resultCount === 1 ? "" : "s"})`;
+    }
   } else if (item.kind === "read_file") {
     icon = "↳";
     desc = item.files.length > 0 ? item.files.join(", ") : item.label;
@@ -142,7 +144,6 @@ function TranscriptSectionView({ section }: { section: AgentTranscriptSection })
 }
 
 export function AgentActivityTranscript({ steps, done }: Props) {
-  const [showTechnicalLog, setShowTechnicalLog] = useState(false);
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -158,7 +159,6 @@ export function AgentActivityTranscript({ steps, done }: Props) {
   if (sections.length === 0) return null;
 
   const totalMs = runDurationMs(steps, done, now);
-  const hasHiddenTechnicalSteps = hasTechnicalLogSteps(steps);
 
   return (
     <section className="agent-transcript" aria-label="Agent activity">
@@ -174,31 +174,6 @@ export function AgentActivityTranscript({ steps, done }: Props) {
           {sections.map((section) => (
             <TranscriptSectionView key={section.id} section={section} />
           ))}
-        </div>
-      )}
-      {hasHiddenTechnicalSteps && (
-        <div className="agent-transcript-log">
-          <button
-            type="button"
-            className="agent-transcript-log-toggle"
-            onClick={() => setShowTechnicalLog((v) => !v)}
-          >
-            {showTechnicalLog ? "Hide technical log" : "Show technical log"}
-          </button>
-          {showTechnicalLog && (
-            <div className="agent-transcript-log-events">
-              {steps.map((step, index) => (
-                <div
-                  className="agent-log-event"
-                  key={`log-${step.activityId || step.id || index}`}
-                >
-                  <span>{step.phase || "Step"}</span>
-                  <strong>{step.label || step.message || step.eventType || "Event"}</strong>
-                  <small>{step.status || "done"}</small>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       )}
     </section>

@@ -1854,49 +1854,6 @@ select {
   overflow-wrap: anywhere;
 }
 
-/* Technical log */
-.agent-transcript-log {
-  display: grid;
-  gap: 6px;
-}
-
-.agent-transcript-log-toggle {
-  justify-self: start;
-  border: none;
-  background: none;
-  color: var(--muted);
-  padding: 0 2px;
-  font-size: 0.7rem;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.agent-transcript-log-toggle:hover {
-  color: var(--foreground);
-}
-
-.agent-transcript-log-events {
-  display: grid;
-  gap: 4px;
-  padding: 7px 8px;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  font-size: 0.7rem;
-}
-
-.agent-log-event {
-  display: grid;
-  grid-template-columns: minmax(70px, auto) minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: baseline;
-}
-
-.agent-log-event strong {
-  color: var(--foreground);
-  overflow-wrap: anywhere;
-}
-
 /* ── End Agent Activity Transcript ──────────────────────────────── */
 
 .changed-files-archive {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -39,7 +40,9 @@ from repooperator_worker.agent_core.planner import (
     edit_requested,
     emit_target_resolution,
     known_context_files,
+    likely_feature_context_files,
     likely_edit_file_queries,
+    normalize_search_query,
     pending_commit_context,
     project_summary_files,
     propose_next_action_with_model as planner_propose_next_action_with_model,
@@ -55,6 +58,18 @@ from repooperator_worker.services.event_service import append_run_event, get_run
 from repooperator_worker.services.json_safe import json_safe, safe_agent_response_payload, safe_repr
 from repooperator_worker.services.skills_service import enabled_skill_context
 from repooperator_worker.services.active_repository import get_active_repository
+
+
+@dataclass(frozen=True)
+class LoopBudget:
+    max_loop_iterations: int
+    max_file_reads: int
+    max_commands: int
+    max_edits: int = 6
+    reason: str = "default"
+
+
+HARD_MAX_LOOP_ITERATIONS = 18
 
 def run_controller_graph(
     request: AgentRunRequest,
@@ -159,6 +174,11 @@ def classify(state: AgentCoreState, request: AgentRunRequest) -> None:
     state.request_understanding = ru
     state.classifier_result = request_understanding_to_classifier_result(ru, request)
     frame = build_task_frame(request, state)
+    budget = determine_loop_budget(frame, request, state.context_packet)
+    state.max_loop_iterations = budget.max_loop_iterations
+    state.max_file_reads = budget.max_file_reads
+    state.max_commands = budget.max_commands
+    state.max_edits = budget.max_edits
     state.recommendation_context = json_safe({"task_frame": frame, "context_packet": state.context_packet})
     append_activity_event(
         run_id=state.run_id,
@@ -169,7 +189,35 @@ def classify(state: AgentCoreState, request: AgentRunRequest) -> None:
         label="Framed request",
         status="completed",
         observation=f"Goal framed with {len(frame.mentioned_files)} mentioned file(s) and {len(frame.likely_capabilities)} likely capability hint(s).",
-        aggregate={"task_frame": json_safe(frame)},
+        aggregate={"task_frame": json_safe(frame), "loop_budget": json_safe(budget)},
+    )
+
+
+def determine_loop_budget(frame: TaskFrame, request: AgentRunRequest, context_packet: dict[str, Any] | None = None) -> LoopBudget:
+    del request, context_packet
+    explicit_file = bool(frame.mentioned_files)
+    edit_like = edit_requested(frame)
+    requested_outputs = {str(item).strip().lower() for item in frame.requested_outputs}
+    tool_hints = {str(item).strip() for item in frame.likely_needed_tools}
+    repo_wide = "analyze_repository" in tool_hints or "repository_review" in requested_outputs or ("code_review" in requested_outputs and not explicit_file)
+
+    if repo_wide:
+        return _bounded_loop_budget(16, 32, 6, reason="repo-wide review")
+    if edit_like and explicit_file:
+        return _bounded_loop_budget(8, 12, 4, reason="feature/edit with explicit file")
+    if edit_like:
+        return _bounded_loop_budget(12, 16, 4, reason="feature/edit discovery")
+    if explicit_file:
+        return _bounded_loop_budget(5, 8, 3, reason="explicit file question")
+    return _bounded_loop_budget(6, 8, 3, reason="project summary")
+
+
+def _bounded_loop_budget(max_loop_iterations: int, max_file_reads: int, max_commands: int, *, reason: str) -> LoopBudget:
+    return LoopBudget(
+        max_loop_iterations=min(max_loop_iterations, HARD_MAX_LOOP_ITERATIONS),
+        max_file_reads=max_file_reads,
+        max_commands=max_commands,
+        reason=reason,
     )
 
 
@@ -182,10 +230,15 @@ def create_initial_plan(state: AgentCoreState) -> None:
     ]
 
 
-def should_continue(state: AgentCoreState, *, started: float, max_wall_clock_seconds: int) -> bool:
+def should_continue(state: AgentCoreState, *, started: float, max_wall_clock_seconds: int, request: AgentRunRequest | None = None) -> bool:
     if state.stop_reason or state.cancellation_requested:
         return False
     if state.loop_iteration >= state.max_loop_iterations:
+        if request and _should_extend_for_unread_feature_entrypoint(state, request):
+            state.max_loop_iterations = min(HARD_MAX_LOOP_ITERATIONS, state.max_loop_iterations + 2)
+            if state.loop_iteration < state.max_loop_iterations:
+                state.loop_iteration += 1
+                return True
         state.stop_reason = "max_loop_iterations"
         return False
     if len(state.files_read) >= state.max_file_reads:
@@ -199,6 +252,16 @@ def should_continue(state: AgentCoreState, *, started: float, max_wall_clock_sec
         return False
     state.loop_iteration += 1
     return True
+
+
+def _should_extend_for_unread_feature_entrypoint(state: AgentCoreState, request: AgentRunRequest) -> bool:
+    if state.max_loop_iterations >= HARD_MAX_LOOP_ITERATIONS:
+        return False
+    frame = build_task_frame(request, state)
+    if not edit_requested(frame) or frame.mentioned_files:
+        return False
+    context_files = likely_feature_context_files(request)
+    return "main.py" in context_files and "main.py" not in state.files_read
 
 
 def check_cancel(state: AgentCoreState, request: AgentRunRequest) -> None:
@@ -276,7 +339,7 @@ def controller_choose_next_action(state: AgentCoreState, request: AgentRunReques
         )
 
     planned = planner_propose_next_action_with_model(request, state, frame, model_client_factory=OpenAICompatibleModelClient)
-    if planned:
+    if planned and not _repeats_ineffective_action(state, planned):
         return planned
 
     unrun_preview = _latest_unrun_read_only_preview(state)
@@ -339,6 +402,16 @@ def controller_choose_next_action(state: AgentCoreState, request: AgentRunReques
             return AgentAction(type="final_answer", reason_summary="Report the proposed edit without claiming it was applied.")
         if not _has_action(state, "inspect_repo_tree"):
             return AgentAction(type="inspect_repo_tree", reason_summary="Inspect repository before locating edit targets.")
+        if not frame.mentioned_files:
+            context_files = likely_feature_context_files(request)
+            unread_context = [path for path in context_files if path not in state.files_read]
+            if unread_context and (not state.files_read or _zero_result_search_count(state) > 0 or not _has_action(state, "search_files")):
+                return AgentAction(
+                    type="read_file",
+                    reason_summary="Read likely feature implementation context before asking for edit targets.",
+                    target_files=unread_context[:3],
+                    expected_output="Project entrypoint and documentation evidence for the requested feature.",
+                )
         edit_queries = likely_edit_file_queries(frame)
         if not _has_search_for(state, edit_queries):
             return AgentAction(
@@ -369,6 +442,53 @@ def controller_choose_next_action(state: AgentCoreState, request: AgentRunReques
             payload={"missing_files": unresolved},
         )
     return AgentAction(type="final_answer", reason_summary="Enough evidence is available for a grounded answer.")
+
+
+def _repeats_ineffective_action(state: AgentCoreState, action: AgentAction) -> bool:
+    signature = _action_signature(action)
+    if not signature:
+        return False
+    ineffective = 0
+    for previous, result in zip(state.actions_taken, state.action_results):
+        if _action_signature(previous) != signature:
+            continue
+        if _is_ineffective_result(previous, result):
+            ineffective += 1
+    return ineffective >= 1
+
+
+def _action_signature(action: AgentAction) -> tuple[str, str] | None:
+    if action.type == "search_text":
+        return (action.type, normalize_search_query(action.payload.get("query") or ""))
+    if action.type == "search_files":
+        queries = [normalize_search_query(item) for item in action.payload.get("queries") or [] if normalize_search_query(item)]
+        text_queries = [normalize_search_query(item) for item in action.payload.get("text_queries") or [] if normalize_search_query(item)]
+        return (action.type, "|".join([*queries, *text_queries]))
+    if action.type == "read_file":
+        return (action.type, "|".join(sorted(action.target_files)))
+    if action.command:
+        return (action.type, shlex.join(action.command))
+    return None
+
+
+def _is_ineffective_result(action: AgentAction, result: ActionResult) -> bool:
+    if result.status in {"failed", "skipped", "timed_out"}:
+        return True
+    if action.type == "search_files":
+        return not bool(result.payload.get("candidates"))
+    if action.type == "search_text":
+        return not bool(result.payload.get("matches"))
+    return False
+
+
+def _zero_result_search_count(state: AgentCoreState) -> int:
+    count = 0
+    for action, result in zip(state.actions_taken, state.action_results):
+        if action.type not in {"search_files", "search_text"}:
+            continue
+        if _is_ineffective_result(action, result):
+            count += 1
+    return count
 
 
 def observe_result(state: AgentCoreState, action: AgentAction, result: ActionResult, request: AgentRunRequest) -> None:
@@ -445,9 +565,6 @@ def build_final_answer_text(
         return f"Run cancelled. Completed work before stopping: {completed}"
     if state.pending_approval:
         return _format_command_preview(list(state.pending_approval.get("command") or []), state.pending_approval)
-    if state.stop_reason in {"failed", "timed_out", "max_loop_iterations", "max_file_reads", "max_commands"}:
-        suffix = "; ".join(state.observations[-3:])
-        return f"I stopped because {state.stop_reason}. Completed observations: {suffix or 'none'}"
     repository_review = _repository_review_response(state)
     if repository_review:
         return repository_review.response
@@ -457,6 +574,8 @@ def build_final_answer_text(
     command_result = _latest_command_result(state)
     if command_result:
         return _format_command_result(command_result, pending_commit=pending_commit_context(build_task_frame(request, state)))
+    if state.stop_reason in {"failed", "timed_out", "max_loop_iterations", "max_file_reads", "max_commands"}:
+        return _build_evidence_limited_answer(state, request)
     contents: dict[str, str] = {}
     for result in state.action_results:
         contents.update(result.payload.get("contents") or {})
@@ -485,6 +604,48 @@ def build_final_answer_text(
         observation="Prepared the final answer from gathered evidence.",
     )
     return answer
+
+
+def _build_evidence_limited_answer(state: AgentCoreState, request: AgentRunRequest) -> str:
+    frame = build_task_frame(request, state)
+    checked: list[str] = []
+    if state.files_read:
+        checked.append("read " + ", ".join(f"`{path}`" for path in state.files_read[-6:]))
+    if state.commands_run:
+        checked.append("ran " + ", ".join(f"`{cmd}`" for cmd in state.commands_run[-3:]))
+    recent_observations = [item for item in state.observations[-4:] if item]
+    if recent_observations:
+        checked.append("observed " + "; ".join(recent_observations))
+
+    missing: list[str] = []
+    if edit_requested(frame):
+        context_files = likely_feature_context_files(request)
+        if "main.py" in context_files and "main.py" not in state.files_read:
+            missing.append("`main.py` should be read before choosing an implementation target")
+        if not current_edit_target_files(state, frame, request):
+            missing.append("the exact file or component that should own the requested feature is still not confirmed")
+        if not _latest_edit_proposal(state):
+            missing.append("no proposal-only edit was generated")
+    elif not state.files_read and not state.commands_run:
+        missing.append("no repository file or command evidence was gathered")
+
+    lines = ["I do not have enough confirmed evidence to give a final implementation answer yet."]
+    lines.append("Checked: " + (("; ".join(checked)) if checked else "no completed repository evidence."))
+    if missing:
+        lines.append("Missing evidence: " + "; ".join(_dedupe_text(missing)) + ".")
+    if edit_requested(frame):
+        lines.append("Next safe step: confirm the target file or let me continue by reading the likely entrypoint and then preparing a proposal-only patch.")
+    else:
+        lines.append("Next safe step: confirm the specific file or workflow to inspect next, or let me continue gathering repository evidence.")
+    return "\n".join(lines)
+
+
+def _dedupe_text(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out
 
 
 def build_final_response(state: AgentCoreState, request: AgentRunRequest) -> AgentRunResponse:

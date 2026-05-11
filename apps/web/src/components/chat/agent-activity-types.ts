@@ -15,6 +15,7 @@ export type SearchDetailItem = {
   query?: string | null;
   label: string;
   status: string;
+  resultCount?: number | null;
 };
 
 export type ReadFileDetailItem = {

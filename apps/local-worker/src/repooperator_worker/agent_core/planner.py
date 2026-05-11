@@ -30,7 +30,7 @@ PLANNER_ACTION_TYPES = set(get_default_tool_registry().allowed_action_types())
 
 NEXT_ACTION_PROMPT = """\
 You are RepoOperator's bounded next-action planner. Return JSON only.
-Choose one safe primitive action from the available tool specs. Do not use hidden reasoning.
+Choose one safe primitive action from the available tool specs. Do not include non-public deliberation.
 Schema:
 {
   "action_type": "one of available_actions",
@@ -58,7 +58,7 @@ Schema:
 }
 Prefer gathering missing evidence before answering. Commands are policy-previewed later; never request direct shell execution.
 Use search_text for content/regex grep-like searches instead of shell commands.
-visible_work_note is for the user-facing work trace only. Do not include chain-of-thought or private reasoning. Summarize the decision for the user in 1-2 sentences.
+visible_work_note is for the user-facing work trace only. Do not include non-public deliberation. Summarize the decision for the user in 1-2 sentences.
 """
 
 
@@ -547,7 +547,40 @@ def _contains_nonpublic_reasoning_marker(text: str) -> bool:
 
 def likely_edit_file_queries(frame: TaskFrame) -> list[str]:
     queries = list(frame.mentioned_files)
-    return _dedupe(queries) or ["*.cs"]
+    return _dedupe(queries) or ["*.py", "*.js", "*.ts", "*.tsx", "*.jsx", "*.cs", "*.go", "*.rs", "*.java", "*.kt", "*.swift", "*.rb", "*.php"]
+
+
+def likely_feature_context_files(request: AgentRunRequest) -> list[str]:
+    repo = resolve_project_path(request.project_path).resolve()
+    priority = [
+        "README.md",
+        "readme.md",
+        "main.py",
+        "app.py",
+        "server.py",
+        "src/main.py",
+        "src/app.py",
+        "index.js",
+        "index.ts",
+        "src/index.js",
+        "src/index.ts",
+        "src/index.tsx",
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt",
+    ]
+    files: list[str] = []
+    seen: set[str] = set()
+    for path in priority:
+        target = repo / path
+        if not target.is_file() or not is_supported_text_file(target):
+            continue
+        marker = str(target.resolve()).lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        files.append(path)
+    return files[:4]
 
 
 def candidate_files_from_results(state: AgentCoreState, *, edit_related: bool = False) -> list[str]:
@@ -665,19 +698,23 @@ def _has_resolution_event(state: AgentCoreState) -> bool:
 
 
 def _has_search_for(state: AgentCoreState, queries: list[str]) -> bool:
-    wanted = {item.lower() for item in queries}
+    wanted = {normalize_search_query(item) for item in queries if normalize_search_query(item)}
     for action in state.actions_taken:
         if action.type != "search_files":
             continue
-        previous = {str(item).lower() for item in action.payload.get("queries") or []}
+        previous = {normalize_search_query(item) for item in action.payload.get("queries") or [] if normalize_search_query(item)}
         if wanted & previous or not wanted:
             return True
     return False
 
 
 def _has_search_text_for(state: AgentCoreState, query: str) -> bool:
-    wanted = query.lower()
-    return any(action.type == "search_text" and str(action.payload.get("query") or "").lower() == wanted for action in state.actions_taken)
+    wanted = normalize_search_query(query)
+    return any(action.type == "search_text" and normalize_search_query(action.payload.get("query") or "") == wanted for action in state.actions_taken)
+
+
+def normalize_search_query(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
 def _has_action(state: AgentCoreState, action_type: str) -> bool:

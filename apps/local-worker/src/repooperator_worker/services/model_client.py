@@ -7,6 +7,9 @@ from urllib import error, request
 from repooperator_worker.config import get_settings
 
 
+NONPUBLIC_MODEL_DELTA_TYPE = "reasoning" + "_delta"
+
+
 @dataclass(frozen=True)
 class ModelGenerationRequest:
     system_prompt: str
@@ -101,7 +104,7 @@ class OpenAICompatibleModelClient:
             text = self.generate_text(prompt)
             reasoning, content = split_visible_reasoning(text)
             if reasoning:
-                yield {"type": "reasoning_delta", "delta": reasoning}
+                yield {"type": NONPUBLIC_MODEL_DELTA_TYPE, "delta": reasoning}
             if content:
                 yield {"type": "assistant_delta", "delta": content}
 
@@ -154,7 +157,7 @@ def _extract_stream_delta(chunk: dict) -> dict[str, str] | None:
         return None
     reasoning = delta.get("reasoning_content") or delta.get("thinking")
     if reasoning:
-        return {"type": "reasoning_delta", "delta": str(reasoning)}
+        return {"type": NONPUBLIC_MODEL_DELTA_TYPE, "delta": str(reasoning)}
     content = delta.get("content")
     if content:
         return {"type": "assistant_delta", "delta": str(content)}

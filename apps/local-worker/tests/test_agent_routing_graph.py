@@ -19,9 +19,9 @@ if str(SRC_DIR) not in sys.path:
 
 from repooperator_worker.agent_core.action_executor import ActionExecutor  # noqa: E402
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult  # noqa: E402
-from repooperator_worker.agent_core.controller_graph import run_controller_graph, stream_controller_graph  # noqa: E402
+from repooperator_worker.agent_core.controller_graph import build_final_answer_text, determine_loop_budget, run_controller_graph, stream_controller_graph  # noqa: E402
 from repooperator_worker.agent_core.final_synthesis import _answer_with_model, validate_or_repair_final_answer  # noqa: E402
-from repooperator_worker.agent_core.planner import _existing_target_files  # noqa: E402
+from repooperator_worker.agent_core.planner import _existing_target_files, build_task_frame  # noqa: E402
 from repooperator_worker.agent_core.request_understanding import RequestUnderstanding  # noqa: E402
 from repooperator_worker.agent_core.state import AgentCoreState, ClassifierResult  # noqa: E402
 from repooperator_worker.agent_core.repository_review import review_single_file  # noqa: E402
@@ -537,6 +537,88 @@ class ActivePathMigrationTests(unittest.TestCase):
         after_chunks = [chunk for chunk in result.response.split("After:") if "DataHandler.cs" in chunk or "JsonUtility" in chunk]
         self.assertTrue(after_chunks)
         self.assertIn("No files were modified", result.response)
+
+    def test_task_aware_loop_budget_gives_feature_discovery_more_room(self) -> None:
+        summary_request = self._request()
+        summary_state = AgentCoreState(
+            run_id="budget-summary",
+            thread_id=summary_request.thread_id,
+            repo=summary_request.project_path,
+            branch=summary_request.branch,
+            user_task=summary_request.task,
+        )
+        summary_state.request_understanding = RequestUnderstanding(user_goal="Summarize the project.", likely_needed_tools=["read_file"])
+        summary_budget = determine_loop_budget(build_task_frame(summary_request, summary_state), summary_request, {})
+
+        edit_request = self._request()
+        edit_request.task = "이 프로젝트에 기명 메세지 기능을 넣고싶어."
+        edit_state = AgentCoreState(
+            run_id="budget-edit",
+            thread_id=edit_request.thread_id,
+            repo=edit_request.project_path,
+            branch=edit_request.branch,
+            user_task=edit_request.task,
+        )
+        edit_state.request_understanding = _edit_understanding(edit_request)
+        edit_budget = determine_loop_budget(build_task_frame(edit_request, edit_state), edit_request, {})
+
+        self.assertLess(summary_budget.max_loop_iterations, edit_budget.max_loop_iterations)
+        self.assertGreaterEqual(edit_budget.max_loop_iterations, 10)
+        self.assertLessEqual(edit_budget.max_loop_iterations, 18)
+
+    def test_feature_request_reads_readme_and_main_before_clarifying(self) -> None:
+        (self.repo / "main.py").write_text("def send_message(name, body):\n    return body\n", encoding="utf-8")
+        (self.repo / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+        request = self._request()
+        request.task = "이 프로젝트에 기명 메세지 기능을 넣고싶어."
+        with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=_edit_understanding(request)), patch(
+            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            return_value=None,
+        ):
+            result = run_controller_graph(request, run_id="feature-named-message")
+        self.assertIn("README.md", result.files_read)
+        self.assertIn("main.py", result.files_read)
+        self.assertNotIn("max_loop_iterations", result.response)
+        self.assertNotIn("I stopped because", result.response)
+        actions = [event["action"]["type"] for event in list_run_events("feature-named-message") if event.get("type") == "action_result"]
+        self.assertIn("inspect_repo_tree", actions)
+        trace_events = [event for event in list_run_events("feature-named-message") if event.get("event_type") == "work_trace"]
+        self.assertTrue(any("README.md" in event.get("files", []) for event in trace_events))
+        self.assertTrue(any("main.py" in event.get("files", []) for event in trace_events))
+
+    def test_repeated_zero_result_search_is_not_repeated(self) -> None:
+        request = self._request()
+        request.task = "Find MissingSymbol usage."
+        planner = _PlannerClient(
+            {"action_type": "search_text", "reason_summary": "Search missing symbol.", "query": "MissingSymbol", "confidence": 0.9},
+            {"action_type": "search_text", "reason_summary": "Search missing symbol again.", "query": " missingsymbol ", "confidence": 0.9},
+        )
+        with patch(
+            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            return_value=planner,
+        ), patch(
+            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            return_value=None,
+        ):
+            run_controller_graph(request, run_id="zero-search-repeat")
+        actions = [event["action"]["type"] for event in list_run_events("zero-search-repeat") if event.get("type") == "action_result"]
+        self.assertEqual(actions.count("search_text"), 1)
+
+    def test_limit_fallback_does_not_expose_raw_stop_reasons(self) -> None:
+        request = self._request()
+        for reason in ("max_loop_iterations", "max_file_reads", "max_commands", "timed_out"):
+            state = AgentCoreState(
+                run_id=f"fallback-{reason}",
+                thread_id=request.thread_id,
+                repo=request.project_path,
+                branch=request.branch,
+                user_task=request.task,
+                stop_reason=reason,
+            )
+            answer = build_final_answer_text(state, request)
+            self.assertNotIn(reason, answer)
+            self.assertNotIn("I stopped because", answer)
+            self.assertTrue("Next safe step:" in answer or "Missing evidence:" in answer)
 
     def test_recent_commits_uses_read_only_git_log_despite_wrong_intent(self) -> None:
         subprocess.run(["git", "init"], cwd=self.repo, check=True, capture_output=True)

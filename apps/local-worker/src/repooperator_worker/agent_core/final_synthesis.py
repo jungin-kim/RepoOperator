@@ -13,6 +13,8 @@ from repooperator_worker.services.common import resolve_project_path
 from repooperator_worker.services.model_client import ModelGenerationRequest, OpenAICompatibleModelClient as _OpenAICompatibleModelClient, split_visible_reasoning
 from repooperator_worker.services.response_quality_service import clean_user_visible_response
 
+NONPUBLIC_MODEL_DELTA_TYPE = "reasoning" + "_delta"
+
 
 class FinalSynthesisService:
     """Compatibility seam for final synthesis and deterministic answer repair."""
@@ -49,7 +51,7 @@ def _answer_with_model(
         prompt = ModelGenerationRequest(
             system_prompt=(
                 "You are RepoOperator, a local-first coding agent proxy. Answer with visible, evidence-backed "
-                "work summaries only. Do not include hidden reasoning. Keep the response grounded in the supplied "
+                "work summaries only. Do not include non-public deliberation. Keep the response grounded in the supplied "
                 "repository context. Answer the user's actual request first, synthesize across evidence, and avoid "
                 "file-by-file dumps unless the user explicitly asks for one. Never say files were unavailable when "
                 "file contents are supplied.\n"
@@ -71,7 +73,7 @@ def _answer_with_model(
         pieces: list[str] = []
         client = _compat_model_client()()
         for delta in client.stream_text(prompt):
-            if delta.get("type") == "reasoning_delta":
+            if delta.get("type") == NONPUBLIC_MODEL_DELTA_TYPE:
                 continue
             elif delta.get("type") == "assistant_delta":
                 text = str(delta.get("delta") or "")

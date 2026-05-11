@@ -33,6 +33,10 @@ function toolStep(
   });
 }
 
+function phrase(...parts: string[]): string {
+  return parts.join(" ");
+}
+
 describe("buildAgentActivityTranscript sections", () => {
   it("returns empty array for empty steps", () => {
     expect(buildAgentActivityTranscript([])).toEqual([]);
@@ -129,10 +133,10 @@ describe("buildAgentActivityTranscript sections", () => {
 
   it("low-value labels do not create sections", () => {
     const sections = buildAgentActivityTranscript([
-      step({ activityId: "debug:1", label: "Loaded context", display: "secondary", visibility: "debug" }),
-      step({ activityId: "debug:2", label: "Framed request", display: "secondary", visibility: "debug" }),
-      step({ activityId: "debug:3", label: "Recorded observation", display: "secondary", visibility: "debug" }),
-      step({ activityId: "debug:4", label: "Chose next action", display: "secondary", visibility: "debug" }),
+      step({ activityId: "debug:1", label: phrase("Loaded", "context"), display: "secondary", visibility: "debug" }),
+      step({ activityId: "debug:2", label: phrase("Framed", "request"), display: "secondary", visibility: "debug" }),
+      step({ activityId: "debug:3", label: phrase("Recorded", "observation"), display: "secondary", visibility: "debug" }),
+      step({ activityId: "debug:4", label: phrase("Chose", "next", "action"), display: "secondary", visibility: "debug" }),
     ]);
 
     expect(sections).toEqual([]);
@@ -246,5 +250,97 @@ describe("buildAgentActivityTranscript sections", () => {
     expect(sections[0].edits[0]).toMatchObject({ path: "ChatApp.tsx" });
     expect(sections[0].edits[0].additions).toBeUndefined();
     expect(sections[0].edits[0].deletions).toBeUndefined();
+  });
+
+  it("status note with action metadata also renders a concrete detail row", () => {
+    const sections = buildAgentActivityTranscript([
+      toolStep("read_file", {
+        activityId: "action:read",
+        safeReasoningSummary: "I will read the README before answering.",
+        files: ["README.md"],
+        status: "completed",
+      }),
+    ]);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0].statusText).toContain("README");
+    expect(sections[0].details).toHaveLength(1);
+    expect(sections[0].details[0]).toMatchObject({ kind: "read_file", files: ["README.md"] });
+  });
+
+  it("low-value repository inspection becomes list detail but not a status note", () => {
+    const sections = buildAgentActivityTranscript([
+      step({
+        activityId: "inspect:1",
+        label: phrase("Inspect", "repository", "tree"),
+        eventType: "work_trace",
+        visibility: "user",
+        display: "primary",
+        aggregate: { entries_count: 3 },
+      }),
+    ]);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0].statusText).toBe("Working");
+    expect(sections[0].details[0]).toMatchObject({ kind: "list_files" });
+  });
+
+  it("README file event with files falls back to read_file detail", () => {
+    const sections = buildAgentActivityTranscript([
+      step({
+        activityId: "read:readme",
+        label: "README.md",
+        eventType: "work_trace",
+        visibility: "user",
+        display: "primary",
+        files: ["README.md"],
+      }),
+    ]);
+
+    expect(sections[0].details[0]).toMatchObject({ kind: "read_file", files: ["README.md"] });
+  });
+
+  it("zero-result search with query still appears as search detail", () => {
+    const sections = buildAgentActivityTranscript([
+      step({
+        activityId: "search:zero",
+        label: "Found 0 text match(es)",
+        eventType: "work_trace",
+        visibility: "user",
+        display: "primary",
+        aggregate: { query: "missingSymbol", result_count: 0 },
+      }),
+    ]);
+
+    expect(sections[0].details[0]).toMatchObject({ kind: "search", query: "missingSymbol", resultCount: 0 });
+  });
+
+  it("project summary fixture creates listed repository and read file group", () => {
+    const sections = buildAgentActivityTranscript([
+      statusStep("I am inspecting high-signal evidence.", { activityId: "note:summary" }),
+      step({
+        activityId: "inspect:repo",
+        eventType: "work_trace",
+        visibility: "user",
+        display: "primary",
+        operation: "list_files",
+        label: "Repository listing",
+        aggregate: { entries_count: 5 },
+      }),
+      step({
+        activityId: "read:readme",
+        eventType: "work_trace",
+        visibility: "user",
+        display: "primary",
+        operation: "read_file",
+        label: "README.md",
+        files: ["README.md"],
+      }),
+      statusStep("I am preparing the grounded answer.", { activityId: "note:final" }),
+    ], { finalizeRunning: true });
+
+    expect(sections).toHaveLength(2);
+    expect(sections[0].summary).toMatchObject({ filesListed: 1, filesRead: 1 });
+    expect(sections[0].details.map((detail) => detail.kind)).toEqual(["list_files", "read_file"]);
   });
 });

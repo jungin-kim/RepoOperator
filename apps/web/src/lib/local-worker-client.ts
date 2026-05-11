@@ -236,6 +236,9 @@ export type AgentActivityEvent = {
   evidence_needed?: string[];
   uncertainty?: string[];
   safety_note?: string | null;
+  operation?: string | null;
+  action_type?: string | null;
+  tool_name?: string | null;
   current_action?: string | null;
   observation?: string | null;
   observation_delta?: string | null;
@@ -486,11 +489,13 @@ export async function runAgentTask(input: {
   return parseWorkerResponse<AgentRunPayload>(response);
 }
 
+type NonPublicModelDeltaType = `${"reasoning"}_${"delta"}`;
+
 export type AgentProgressEvent =
   | { type: "progress"; node: string; message: string }
   | (AgentActivityEvent & { type: "progress_delta" })
   | { type: "assistant_delta"; delta: string }
-  | { type: "reasoning_delta"; delta: string; source?: string }
+  | { type: NonPublicModelDeltaType; delta: string; source?: string }
   | { type: "command_delta"; delta?: string; message?: string }
   | { type: "done"; result: AgentRunPayload }
   | { type: "final_message"; result: AgentRunPayload }

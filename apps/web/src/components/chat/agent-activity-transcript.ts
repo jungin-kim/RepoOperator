@@ -21,8 +21,20 @@ function aggregateOf(step: ProgressStep): Record<string, unknown> {
 
 function getActionType(step: ProgressStep): string | null {
   const agg = aggregateOf(step);
-  const actionType = stringValue(agg.action_type) || stringValue(agg.tool);
+  const actionType =
+    stringValue(agg.action_type)
+    || stringValue(agg.tool)
+    || step.actionType
+    || step.toolName;
   if (actionType) return actionType;
+
+  const operation = stringValue(agg.operation) || step.operation;
+  if (operation === "read_file") return "read_file";
+  if (operation === "search") return agg.query ? "search_text" : "search_files";
+  if (operation === "list_files") return "inspect_repo_tree";
+  if (operation === "command") return "run_approved_command";
+  if (operation === "edit") return "generate_edit";
+  if (operation === "final_answer") return "final_answer";
 
   if (step.eventType === "file_read" || isReadEvent(step, agg)) return "read_file";
   if (step.eventType === "file_edit" || isEditEvent(step, agg)) return "generate_edit";
@@ -43,10 +55,14 @@ function hasSearchAggregate(agg: Record<string, unknown>): boolean {
 }
 
 function hasListAggregate(step: ProgressStep, agg: Record<string, unknown>): boolean {
+  const label = String(step.label || "").toLowerCase();
+  const current = String(step.currentAction || "").toLowerCase();
   return Boolean(
     typeof agg.entries_count === "number"
     || nonEmptyString(agg.path)
-    || String(step.label || "").toLowerCase() === "inspect repository tree"
+    || label === "inspect repository tree"
+    || current.includes("inspect repository tree")
+    || current.includes("listing top-level repository")
   );
 }
 
@@ -61,9 +77,13 @@ function hasCommandAggregate(step: ProgressStep, agg: Record<string, unknown>): 
 }
 
 function isReadEvent(step: ProgressStep, agg: Record<string, unknown>): boolean {
+  const files = step.files || [];
+  const label = String(step.label || "").trim().toLowerCase();
   return (
-    String(step.phase || "").toLowerCase().includes("reading")
-    && (Boolean(step.files?.length) || Boolean(nonEmptyString(agg.file_path)))
+    (String(step.phase || "").toLowerCase().includes("reading")
+      && (Boolean(files.length) || Boolean(nonEmptyString(agg.file_path))))
+    || (files.length > 0 && files.some((file) => file.toLowerCase().endsWith(label)) && /\.[a-z0-9]+$/.test(label))
+    || Boolean(nonEmptyString(agg.file_path))
   );
 }
 
@@ -188,7 +208,8 @@ function makeDetailItem(
 
   if (SEARCH_TYPES.has(actionType)) {
     const query = extractSearchQuery(step);
-    return { kind: "search", id, query, label: query || step.label || "Search repository", status };
+    const resultCount = numberValue(aggregateOf(step).result_count);
+    return { kind: "search", id, query, label: query || step.label || "Search repository", status, resultCount: resultCount ?? null };
   }
   if (READ_TYPES.has(actionType)) {
     return { kind: "read_file", id, files: extractReadFiles(step), label: step.label || "Read files", status };
@@ -364,24 +385,34 @@ export function buildAgentActivityTranscript(
       finalizePreviousSectionForNext(currentSection);
       currentSection = createSection(step, statusText, options);
       sections.push(currentSection);
+      if (actionType && !SKIP_TYPES.has(actionType) && isPrimaryActionStep(step)) {
+        appendActionToSection(currentSection, step, actionType, options);
+      }
       continue;
     }
 
     if (!actionType || !isPrimaryActionStep(step)) continue;
 
-    if (actionType && EDIT_TYPES.has(actionType)) {
-      currentSection = ensureSection(currentSection, sections, step, options);
-      upsertEditItems(currentSection, step, options);
-      updateSectionState(currentSection, options);
-      continue;
-    }
-
     currentSection = ensureSection(currentSection, sections, step, options);
-    upsertDetailItem(currentSection, makeDetailItem(step, actionType, options), step);
-    updateSectionState(currentSection, options);
+    appendActionToSection(currentSection, step, actionType, options);
   }
 
   return finalizeSections(sections, options);
+}
+
+function appendActionToSection(
+  section: AgentTranscriptSection,
+  step: ProgressStep,
+  actionType: string,
+  options: { finalizeRunning?: boolean },
+) {
+  if (EDIT_TYPES.has(actionType)) {
+    upsertEditItems(section, step, options);
+    updateSectionState(section, options);
+    return;
+  }
+  upsertDetailItem(section, makeDetailItem(step, actionType, options), step);
+  updateSectionState(section, options);
 }
 
 function sectionStatusText(step: ProgressStep, actionType: string | null): string | null {

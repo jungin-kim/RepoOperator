@@ -252,16 +252,26 @@ class ToolOrchestrator:
         phase = _tool_phase(action.type, result.status if result else None)
         files = list((result.files_read if result else None) or action.target_files or [])
         command = action.command or (result.command_result.get("command") if result and result.command_result else None)
-        aggregate: dict[str, Any] = {"tool": tool_name, "action_type": action.type}
-        if result and result.command_result:
-            if result.command_result.get("exit_code") is not None:
-                aggregate["exit_code"] = result.command_result.get("exit_code")
-            if result.command_result.get("display_command"):
-                aggregate["display_command"] = result.command_result.get("display_command")
+        activity_id = f"action:{action.action_id}"
+        operation = _tool_operation(action.type)
+        related_search_query = _related_search_query(action, result)
+        proposal_id = _proposal_id(action, result)
+        aggregate = _tool_aggregate(
+            action,
+            result,
+            tool_name=tool_name,
+            operation=operation,
+            status=status,
+            activity_id=activity_id,
+            files=files,
+            command=command,
+            related_search_query=related_search_query,
+            proposal_id=proposal_id,
+        )
         append_work_trace(
             run_id=self.run_id,
             request=self.request,
-            activity_id=f"action:{action.action_id}",
+            activity_id=activity_id,
             phase=phase,
             label=_tool_label(action.type),
             status=status,
@@ -270,8 +280,15 @@ class ToolOrchestrator:
             observation=observation,
             next_action=result.next_recommended_action if result else action.expected_output,
             safety_note=_tool_safety_note(action.type, result),
+            operation=operation,
+            action_type=action.type,
+            tool_name=tool_name,
             related_files=files,
+            related_search_query=related_search_query,
             command=command,
+            proposal_id=proposal_id,
+            started_at=action.created_at,
+            duration_ms=result.duration_ms if result else None,
             aggregate=aggregate,
         )
 
@@ -314,6 +331,191 @@ def _trace_status(status: str) -> str:
     if status in {"success", "skipped"}:
         return "completed"
     return status
+
+
+def _tool_operation(action_type: str) -> str:
+    if action_type == "inspect_repo_tree":
+        return "list_files"
+    if action_type == "analyze_repository":
+        return "analyze_repository"
+    if action_type in {"search_files", "search_text"}:
+        return "search"
+    if action_type == "read_file":
+        return "read_file"
+    if action_type in {"preview_command", "inspect_git_state", "run_approved_command"}:
+        return "command"
+    if action_type == "generate_edit":
+        return "edit"
+    if action_type == "final_answer":
+        return "final_answer"
+    return action_type
+
+
+def _tool_aggregate(
+    action: AgentAction,
+    result: ToolResult | None,
+    *,
+    tool_name: str,
+    operation: str,
+    status: str,
+    activity_id: str,
+    files: list[str],
+    command: list[str] | str | None,
+    related_search_query: str | None,
+    proposal_id: str | None,
+) -> dict[str, Any]:
+    payload = result.payload if result else {}
+    aggregate: dict[str, Any] = {
+        "tool": tool_name,
+        "tool_name": tool_name,
+        "action_type": action.type,
+        "operation": operation,
+        "status": status,
+        "activity_id": activity_id,
+        "visibility": "user",
+        "display": "primary",
+    }
+    if files:
+        aggregate["files"] = files
+    if command:
+        aggregate["command"] = command
+    if related_search_query:
+        aggregate["query"] = related_search_query
+    if proposal_id:
+        aggregate["proposal_id"] = proposal_id
+
+    if action.type == "inspect_repo_tree":
+        entries = [str(item) for item in payload.get("entries") or [] if str(item)]
+        aggregate["entries_count"] = len(entries)
+        aggregate["top_level_entries"] = entries[:80]
+        aggregate.setdefault("path", ".")
+    elif action.type == "analyze_repository":
+        aggregate["entries_count"] = len(files)
+        aggregate["files_read_count"] = len(files)
+    elif action.type == "search_files":
+        queries = [str(item) for item in payload.get("queries") or action.payload.get("queries") or [] if str(item)]
+        text_queries = [str(item) for item in payload.get("text_queries") or action.payload.get("text_queries") or [] if str(item)]
+        candidates = [str(item) for item in payload.get("candidates") or [] if str(item)]
+        aggregate.update({
+            "queries": queries,
+            "text_queries": text_queries,
+            "result_count": len(candidates),
+            "candidates": candidates[:20],
+        })
+        if queries and not aggregate.get("query"):
+            aggregate["query"] = queries[0] if len(queries) == 1 else ", ".join(queries[:6])
+    elif action.type == "search_text":
+        query = str(payload.get("query") or action.payload.get("query") or "").strip()
+        matches = payload.get("matches") or []
+        files_with_matches = [str(item) for item in payload.get("files_with_matches") or [] if str(item)]
+        if query:
+            aggregate["query"] = query
+        aggregate.update({
+            "result_count": len(matches) if isinstance(matches, list) else 0,
+            "files_searched": payload.get("files_searched"),
+            "files_with_matches": files_with_matches[:20],
+            "truncated": bool(payload.get("truncated")),
+        })
+    elif action.type == "read_file":
+        contents = payload.get("contents") or {}
+        if isinstance(contents, dict):
+            line_counts = {str(path): len(str(content).splitlines()) for path, content in contents.items()}
+            aggregate["line_counts"] = line_counts
+            if len(line_counts) == 1:
+                only_path = next(iter(line_counts))
+                aggregate["file_path"] = only_path
+                aggregate["line_count"] = line_counts[only_path]
+        if payload.get("skipped_files"):
+            aggregate["skipped_files"] = [str(item) for item in payload.get("skipped_files") or [] if str(item)]
+    elif action.type in {"preview_command", "inspect_git_state", "run_approved_command"}:
+        command_result = result.command_result if result else None
+        if command_result:
+            display_command = command_result.get("display_command")
+            if display_command:
+                aggregate["display_command"] = display_command
+            if command_result.get("exit_code") is not None:
+                aggregate["exit_code"] = command_result.get("exit_code")
+                aggregate["returncode"] = command_result.get("exit_code")
+            for key in ("read_only", "needs_approval", "blocked", "approval_id"):
+                if command_result.get(key) is not None:
+                    aggregate[key] = command_result.get(key)
+    elif action.type == "generate_edit":
+        edit_archive = _edit_archive_from_payload(payload)
+        aggregate["applied"] = bool(payload.get("applied"))
+        aggregate["proposal_count"] = len(edit_archive)
+        aggregate["edit_archive"] = edit_archive
+        aggregate["diff_available"] = any(bool(item.get("diff_available")) for item in edit_archive)
+        additions = sum(int(item.get("additions") or 0) for item in edit_archive)
+        deletions = sum(int(item.get("deletions") or 0) for item in edit_archive)
+        if edit_archive:
+            aggregate["additions"] = additions
+            aggregate["deletions"] = deletions
+            aggregate["files"] = [str(item.get("file_path") or item.get("file") or "") for item in edit_archive if item.get("file_path") or item.get("file")]
+        aggregate["safety_note"] = "proposal-only/no files modified"
+
+    return json_safe(aggregate)
+
+
+def _related_search_query(action: AgentAction, result: ToolResult | None) -> str | None:
+    if action.type == "search_text":
+        query = ""
+        if result:
+            query = str(result.payload.get("query") or "")
+        query = query or str(action.payload.get("query") or "")
+        return query.strip() or None
+    if action.type == "search_files":
+        payload = result.payload if result else action.payload
+        queries = [str(item).strip() for item in payload.get("queries") or [] if str(item).strip()]
+        text_queries = [str(item).strip() for item in payload.get("text_queries") or [] if str(item).strip()]
+        combined = [*queries, *text_queries]
+        return ", ".join(combined[:8]) if combined else None
+    return None
+
+
+def _proposal_id(action: AgentAction, result: ToolResult | None) -> str | None:
+    if action.type != "generate_edit":
+        return None
+    edit_archive = _edit_archive_from_payload(result.payload if result else {})
+    files = [str(item.get("file_path") or item.get("file") or "") for item in edit_archive if item.get("file_path") or item.get("file")]
+    return "proposal:" + ",".join(files[:4]) if files else None
+
+
+def _edit_archive_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    archive: list[dict[str, Any]] = []
+    for proposal in payload.get("edit_proposals") or []:
+        if not isinstance(proposal, dict):
+            continue
+        file_path = str(proposal.get("file") or proposal.get("file_path") or "").strip()
+        if not file_path:
+            continue
+        diff = str(proposal.get("diff_summary") or proposal.get("unified_diff") or "")
+        additions, deletions = _diff_counts(diff)
+        archive.append(
+            {
+                "file_path": file_path,
+                "file": file_path,
+                "status": "proposed" if not payload.get("applied") else "applied",
+                "summary": str(proposal.get("summary") or ""),
+                "additions": additions,
+                "deletions": deletions,
+                "diff_available": bool(diff.strip()),
+                "proposal_id": "proposal:" + file_path,
+            }
+        )
+    return archive
+
+
+def _diff_counts(diff: str) -> tuple[int, int]:
+    additions = 0
+    deletions = 0
+    for line in (diff or "").splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    return additions, deletions
 
 
 def _tool_phase(action_type: str, result_status: str | None = None) -> str:

@@ -35,6 +35,9 @@ export type MockProgressEvent = {
   evidence_needed?: string[];
   uncertainty?: string[];
   safety_note?: string;
+  operation?: string;
+  action_type?: string;
+  tool_name?: string;
   related_search_query?: string;
   files?: string[];
   command?: string | string[];
@@ -110,6 +113,9 @@ export function buildProgressEvents(runId: string, threadId: string, events: Moc
     evidence_needed: ev.evidence_needed,
     uncertainty: ev.uncertainty,
     safety_note: ev.safety_note,
+    operation: ev.operation,
+    action_type: ev.action_type,
+    tool_name: ev.tool_name,
     related_search_query: ev.related_search_query,
     files: ev.files,
     command: ev.command,

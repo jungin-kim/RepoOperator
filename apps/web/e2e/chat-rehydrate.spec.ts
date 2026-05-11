@@ -36,6 +36,7 @@ const THREAD_ID = "thread_test_001";
 const USER_MSG = "이 레포가 뭐 하는 프로젝트인지 알아내줘.";
 const FINAL_RESPONSE = "This repository is a local-first coding agent proxy.";
 const WORK_NOTE = "I’m inspecting the repository structure to find the best entry evidence.";
+const FEATURE_RESPONSE = "I checked README.md and main.py. The next safe step is to confirm where named messages should be owned before preparing a proposal-only patch.";
 
 const PROGRESS_EVENTS = [
   { phase: "Thinking", label: "Loaded context", status: "completed" as const, sequence: 1, visibility: "debug", display: "secondary" },
@@ -53,27 +54,111 @@ const PROGRESS_EVENTS = [
   },
   {
     phase: "Searching",
-    label: "Searching file contents",
+    label: "Inspecting repository structure",
     status: "completed" as const,
     sequence: 4,
-    activity_id: "activity-search-1",
+    activity_id: "activity-inspect-1",
     event_type: "work_trace",
     visibility: "user",
     display: "primary",
-    related_search_query: "repooperator-active-thread",
-    aggregate: { action_type: "search_text", query: "repooperator-active-thread" },
+    operation: "list_files",
+    action_type: "inspect_repo_tree",
+    tool_name: "inspect_repo_tree",
+    aggregate: {
+      action_type: "inspect_repo_tree",
+      operation: "list_files",
+      entries_count: 3,
+      top_level_entries: ["README.md", "main.py", "requirements.txt"],
+    },
   },
   {
     phase: "Reading files",
-    label: "Reading repository files",
+    label: "README.md",
     status: "running" as const,
     sequence: 5,
     activity_id: "activity-read-1",
     event_type: "work_trace",
     visibility: "user",
     display: "primary",
-    files: ["apps/web/src/components/chat/ChatApp.tsx"],
-    aggregate: { action_type: "read_file" },
+    operation: "read_file",
+    action_type: "read_file",
+    tool_name: "read_file",
+    files: ["README.md"],
+    aggregate: { action_type: "read_file", operation: "read_file", file_path: "README.md", line_count: 12 },
+  },
+  {
+    phase: "Searching",
+    label: "Searched text",
+    status: "completed" as const,
+    sequence: 6,
+    activity_id: "activity-search-zero",
+    event_type: "work_trace",
+    visibility: "user",
+    display: "primary",
+    operation: "search",
+    action_type: "search_text",
+    tool_name: "search_text",
+    related_search_query: "named message",
+    aggregate: { action_type: "search_text", operation: "search", query: "named message", result_count: 0 },
+  },
+];
+
+const FEATURE_PROGRESS_EVENTS = [
+  { phase: "Thinking", label: "Loaded context", status: "completed" as const, sequence: 1, visibility: "debug", display: "secondary" },
+  {
+    phase: "Decision",
+    label: "Feature discovery",
+    status: "completed" as const,
+    sequence: 2,
+    activity_id: "feature-note-1",
+    event_type: "work_trace",
+    visibility: "user",
+    display: "primary",
+    safe_reasoning_summary: "I’ll inspect the project docs and likely entrypoint before choosing an edit target.",
+  },
+  {
+    phase: "Searching",
+    label: "Inspecting repository structure",
+    status: "completed" as const,
+    sequence: 3,
+    activity_id: "feature-inspect",
+    event_type: "work_trace",
+    visibility: "user",
+    display: "primary",
+    operation: "list_files",
+    action_type: "inspect_repo_tree",
+    tool_name: "inspect_repo_tree",
+    aggregate: { action_type: "inspect_repo_tree", operation: "list_files", entries_count: 3 },
+  },
+  {
+    phase: "Reading files",
+    label: "README.md",
+    status: "completed" as const,
+    sequence: 4,
+    activity_id: "feature-read-readme",
+    event_type: "work_trace",
+    visibility: "user",
+    display: "primary",
+    operation: "read_file",
+    action_type: "read_file",
+    tool_name: "read_file",
+    files: ["README.md"],
+    aggregate: { action_type: "read_file", operation: "read_file", file_path: "README.md", line_count: 8 },
+  },
+  {
+    phase: "Reading files",
+    label: "main.py",
+    status: "completed" as const,
+    sequence: 5,
+    activity_id: "feature-read-main",
+    event_type: "work_trace",
+    visibility: "user",
+    display: "primary",
+    operation: "read_file",
+    action_type: "read_file",
+    tool_name: "read_file",
+    files: ["main.py"],
+    aggregate: { action_type: "read_file", operation: "read_file", file_path: "main.py", line_count: 24 },
   },
 ];
 
@@ -88,10 +173,10 @@ function activeThreadKey(repo = DEFAULT_REPO) {
   return `repooperator-active-thread:${repoIdentityKey(repo)}`;
 }
 
-function buildThread(overrides: { messages?: unknown[] } = {}) {
+function buildThread(overrides: { id?: string; title?: string; messages?: unknown[] } = {}) {
   return {
-    id: THREAD_ID,
-    title: "mock/repo",
+    id: overrides.id ?? THREAD_ID,
+    title: overrides.title ?? "mock/repo",
     repo: DEFAULT_REPO,
     messages: overrides.messages ?? [
       {
@@ -143,10 +228,10 @@ async function setStorageForThread(page: Page, threadId: string, runId?: string,
   );
 }
 
-async function revealCompletedWorkLog(page: Page) {
-  const showWorkLog = page.getByRole("button", { name: /Show work log/i });
-  if (await showWorkLog.isVisible().catch(() => false)) {
-    await showWorkLog.click();
+async function revealCompletedActivity(page: Page) {
+  const summary = page.locator("button.agent-section-summary").first();
+  if (await summary.isVisible().catch(() => false)) {
+    await summary.click();
   }
 }
 
@@ -193,6 +278,7 @@ test("A: active thread survives navigation away and back during active run", asy
   await expect(page.getByTestId("stop-run-button")).toBeVisible();
   await expect(page.getByText("Loaded context")).toHaveCount(0);
   await expect(page.getByText("Framed request")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /technical log/i })).toHaveCount(0);
 
   // No duplicate assistant messages for this run
   const assistantMessages = page.locator('[data-testid="assistant-message"]');
@@ -258,8 +344,9 @@ test("B: active run completes while user is on debug page and rehydrates on retu
   await page.getByRole("link", { name: "Back to app" }).click();
   await expect(page.getByText(USER_MSG)).toBeVisible({ timeout: 5000 });
   await expect(page.getByText(FINAL_RESPONSE, { exact: false })).toBeVisible({ timeout: 8000 });
-  await revealCompletedWorkLog(page);
+  await revealCompletedActivity(page);
   await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expect(page.getByText("Work log:")).toHaveCount(0);
   await expect(page.locator(".agent-transcript-section")).toHaveCount(1);
   await expect(page.getByTestId("stop-run-button")).toHaveCount(0);
 
@@ -327,6 +414,60 @@ test("B1: completed run rehydrates final answer and progress from backend events
   expect(count).toBeLessThanOrEqual(1);
 });
 
+test("B2: feature edit run rehydrates README and main.py activity without raw loop limits", async ({ page }) => {
+  const featureRunId = "run_feature_001";
+  const featureThreadId = "thread_feature_001";
+  const featureTask = "이 프로젝트에 기명 메세지 기능을 넣고싶어.";
+  const finalResult = buildFinalResult(featureRunId, featureThreadId, FEATURE_RESPONSE, FEATURE_PROGRESS_EVENTS);
+  const completedRun = buildMockRunRecord({
+    runId: featureRunId,
+    threadId: featureThreadId,
+    repo: DEFAULT_REPO,
+    status: "completed",
+    finalResponse: FEATURE_RESPONSE,
+    progressEvents: FEATURE_PROGRESS_EVENTS,
+  });
+  completedRun.final_result = finalResult;
+  const events = [
+    ...buildProgressEvents(featureRunId, featureThreadId, FEATURE_PROGRESS_EVENTS),
+    {
+      id: `${featureRunId}-final`,
+      run_id: featureRunId,
+      thread_id: featureThreadId,
+      type: "final_message",
+      event_type: "final_message",
+      result: finalResult,
+      sequence: 20,
+      timestamp: new Date().toISOString(),
+    },
+  ];
+
+  await setupBaseRoutes(page);
+  await mockListThreads(page, [
+    buildThread({
+      id: featureThreadId,
+      messages: [
+        { id: "msg-feature-user", role: "user", content: featureTask, timestamp: new Date().toISOString() },
+      ],
+    }),
+  ]);
+  await mockOpenRepository(page, DEFAULT_REPO);
+  await mockGetActiveRuns(page, []);
+  await mockGetAgentRun(page, completedRun);
+  await mockGetAgentRunEvents(page, featureRunId, events);
+
+  await setStorageForThread(page, featureThreadId, featureRunId);
+  await page.goto("/app");
+
+  await expect(page.getByText(FEATURE_RESPONSE, { exact: false })).toBeVisible({ timeout: 8000 });
+  await expect(page.getByText("max_loop_iterations")).toHaveCount(0);
+  await revealCompletedActivity(page);
+  const featureTranscript = page.locator(".agent-transcript-section").first();
+  await expect(featureTranscript.locator(".agent-detail-desc", { hasText: "README.md" })).toBeVisible();
+  await expect(featureTranscript.locator(".agent-detail-desc", { hasText: "main.py" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /technical log/i })).toHaveCount(0);
+});
+
 test("C: transcript replacement hides low-value labels and expands structured detail rows", async ({ page }) => {
   const runRecord = buildMockRunRecord({
     runId: RUN_ID,
@@ -359,10 +500,10 @@ test("C: transcript replacement hides low-value labels and expands structured de
 
   const group = page.locator(".agent-transcript-section").first();
   await expect(group).toBeVisible();
-  await group.locator(".agent-section-summary").click();
-  await expect(group.locator(".agent-detail-item")).toHaveCount(2);
-  await expect(group.getByText("repooperator-active-thread", { exact: false })).toBeVisible();
-  await expect(group.getByText("apps/web/src/components/chat/ChatApp.tsx", { exact: false })).toBeVisible();
+  await expect(group.locator(".agent-detail-item")).toHaveCount(3);
+  await expect(group.getByText("README.md", { exact: false })).toBeVisible();
+  await expect(group.getByText("named message", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: /technical log/i })).toHaveCount(0);
 });
 
 // ── Scenario C: Delayed assistant_delta does not make UI look stuck ────────────

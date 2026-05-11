@@ -16,6 +16,9 @@ export type ProgressStep = {
   evidenceNeeded?: string[];
   uncertainty?: string[];
   safetyNote?: string | null;
+  operation?: string | null;
+  actionType?: string | null;
+  toolName?: string | null;
   currentAction?: string | null;
   observation?: string | null;
   observationDelta?: string | null;

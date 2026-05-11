@@ -15,7 +15,6 @@ import {
 } from "./ProposalCard";
 import type { ProgressStep } from "./progress-types";
 import { AgentActivityTranscript } from "./AgentActivityTranscript";
-import { progressStepSummary } from "./agent-activity-display";
 
 export type ChatMessage = {
   id: string;
@@ -479,12 +478,6 @@ export function ChatMessages({
         lines.push(
           `- ${record.file_path} +${record.additions} -${record.deletions} (${record.status})${record.summary ? `: ${record.summary}` : ""}`,
         );
-      }
-    }
-    if (message.progressSteps?.length) {
-      lines.push("Work log:");
-      for (const step of message.progressSteps) {
-        lines.push(`- ${progressStepSummary(step)}${step.detail ? ` - ${step.detail}` : ""}`);
       }
     }
     if (message.metadata?.selected_target_file) {
