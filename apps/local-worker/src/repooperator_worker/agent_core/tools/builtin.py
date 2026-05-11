@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shlex
+import tomllib
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,7 @@ class InspectRepoTreeTool(BaseTool):
     spec = ToolSpec(
         name="inspect_repo_tree",
         description="List top-level repository entries to orient repository inspection.",
+        operation="list_files",
         input_schema={"type": "object", "properties": {}, "additionalProperties": True},
         read_only=True,
         concurrency_safe=True,
@@ -77,6 +80,7 @@ class ReadFileTool(BaseTool):
     spec = ToolSpec(
         name="read_file",
         description="Read supported text files inside the repository, skipping binary/cache files.",
+        operation="read_file",
         input_schema={
             "type": "object",
             "properties": {"target_files": {"type": "array", "items": {"type": "string"}, "maxItems": 8}},
@@ -160,6 +164,7 @@ class SearchFilesTool(BaseTool):
     spec = ToolSpec(
         name="search_files",
         description="Find ranked repo-contained text files by path, basename, extension, symbol, or text evidence.",
+        operation="search",
         input_schema={
             "type": "object",
             "properties": {
@@ -224,6 +229,7 @@ class SearchTextTool(BaseTool):
     spec = ToolSpec(
         name="search_text",
         description="Search text content inside supported repo files without invoking shell grep or rg.",
+        operation="search",
         input_schema={
             "type": "object",
             "properties": {
@@ -300,6 +306,7 @@ class AnalyzeRepositoryTool(BaseTool):
     spec = ToolSpec(
         name="analyze_repository",
         description="Run the repository-wide review pipeline and return summarized evidence.",
+        operation="analyze_repository",
         input_schema={"type": "object", "properties": {"classifier": {"type": "object"}}, "additionalProperties": True},
         read_only=True,
         concurrency_safe=False,
@@ -325,6 +332,7 @@ class PreviewCommandTool(BaseTool):
     spec = ToolSpec(
         name="preview_command",
         description="Classify a local command through the command policy without executing it.",
+        operation="command",
         input_schema={
             "type": "object",
             "properties": {"command": {"type": "array", "items": {"type": "string"}}},
@@ -386,6 +394,7 @@ class InspectGitStateTool(PreviewCommandTool):
     spec = ToolSpec(
         name="inspect_git_state",
         description="Preview or classify a Git state/history command through command policy before execution.",
+        operation="command",
         input_schema=PreviewCommandTool.spec.input_schema,
         read_only=True,
         concurrency_safe=True,
@@ -396,6 +405,7 @@ class RunApprovedCommandTool(BaseTool):
     spec = ToolSpec(
         name="run_approved_command",
         description="Execute a command only after command policy proves it is read-only or has explicit approval.",
+        operation="command",
         input_schema={
             "type": "object",
             "properties": {
@@ -461,6 +471,7 @@ class GenerateEditTool(BaseTool):
     spec = ToolSpec(
         name="generate_edit",
         description="Prepare a validated proposal-only patch for already identified text files without writing files.",
+        operation="edit",
         input_schema={
             "type": "object",
             "properties": {"target_files": {"type": "array", "items": {"type": "string"}, "maxItems": 4}},
@@ -478,15 +489,26 @@ class GenerateEditTool(BaseTool):
     def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         target_files = [str(item) for item in payload.get("target_files") or []]
         proposals: list[dict[str, Any]] = []
+        proposal_errors: list[str] = []
         for relative_path in target_files[:4]:
             target = validate_repo_file(context.request.project_path, relative_path)
             if not is_supported_text_file(target):
                 continue
             content = target.read_text(encoding="utf-8", errors="replace")
-            proposal = model_generate_edit_proposal(relative_path, content, context.request.task, payload)
+            raw_proposal = model_generate_edit_proposal(relative_path, content, context.request.task, payload)
+            if raw_proposal is None:
+                proposal_errors.append(f"{relative_path}: no model proposal was returned")
+                continue
+            proposal, reason = validate_edit_proposal_detailed(relative_path, content, raw_proposal, context.request.task)
             if proposal is None:
-                proposed = propose_content_update(relative_path, content, context.request.task)
-                proposal = build_fallback_edit_proposal(relative_path, content, proposed, context.request.task)
+                repaired = repair_edit_proposal(relative_path, content, raw_proposal, context.request.task, invalid_reason=reason)
+                if repaired is None:
+                    proposal_errors.append(f"{relative_path}: {reason or 'proposal validation failed'}")
+                    continue
+                proposal, repair_reason = validate_edit_proposal_detailed(relative_path, content, repaired, context.request.task)
+                if proposal is None:
+                    proposal_errors.append(f"{relative_path}: {repair_reason or reason or 'proposal validation failed'}")
+                    continue
             if proposal and proposal.get("proposed_content") != content:
                 proposals.append(
                     {
@@ -516,12 +538,13 @@ class GenerateEditTool(BaseTool):
                 aggregate={"applied": False, "proposal_count": len(proposals)},
             )
         status = "success" if proposals else "skipped"
+        error_text = "; ".join(proposal_errors[:4])
         return ToolResult(
             tool_name=self.spec.name,
             status=status,
-            observation="Prepared a proposed edit. No file was written." if proposals else "No safe edit proposal could be generated.",
+            observation="Prepared a proposed edit. No file was written." if proposals else f"No safe edit proposal could be generated. {error_text}".strip(),
             files_read=target_files,
-            payload={"edit_proposals": proposals, "applied": False},
+            payload={"edit_proposals": proposals, "applied": False, **({"proposal_error": error_text} if error_text and not proposals else {})},
             next_recommended_action="write_file" if proposals else None,
         )
 
@@ -530,6 +553,7 @@ class AskClarificationTool(BaseTool):
     spec = ToolSpec(
         name="ask_clarification",
         description="Stop the loop and ask the user for a precise missing file, scope, approval, or workflow detail.",
+        operation="clarification",
         input_schema={"type": "object", "properties": {"question": {"type": "string"}}, "additionalProperties": True},
         read_only=True,
         concurrency_safe=True,
@@ -548,6 +572,7 @@ class FinalAnswerTool(BaseTool):
     spec = ToolSpec(
         name="final_answer",
         description="Stop tool execution so final synthesis can answer from gathered evidence.",
+        operation="final_answer",
         input_schema={"type": "object", "properties": {}, "additionalProperties": True},
         read_only=True,
         concurrency_safe=True,
@@ -751,47 +776,48 @@ def model_generate_edit_proposal(relative_path: str, content: str, task: str, co
         payload = parse_json_object(raw)
     except Exception:
         return None
-    return validate_edit_proposal(relative_path, content, payload, task)
+    return payload if isinstance(payload, dict) else None
 
 
 def validate_edit_proposal(relative_path: str, original: str, payload: dict[str, Any], task: str) -> dict[str, Any] | None:
+    proposal, _reason = validate_edit_proposal_detailed(relative_path, original, payload, task)
+    return proposal
+
+
+def validate_edit_proposal_detailed(relative_path: str, original: str, payload: dict[str, Any], task: str) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(payload, dict):
-        return None
+        return None, "proposal payload is not an object"
     if str(payload.get("file") or relative_path) != relative_path:
-        return None
+        return None, "proposal file does not match target file"
     proposed = str(payload.get("proposed_content") or "")
     if not proposed.strip() or proposed == original or len(proposed) > max(200_000, len(original) * 5):
-        return None
+        return None, "proposed content is empty, unchanged, or implausibly large"
+    common_reason = common_proposal_validation_error(relative_path, original, proposed, task)
+    if common_reason:
+        return None, common_reason
     original_structure = extract_source_structure(relative_path, original)
     proposed_structure = extract_source_structure(relative_path, proposed)
     risk_notes = [str(item) for item in payload.get("risk_notes") or []]
     risk_text = " ".join(risk_notes).lower()
     missing_classes = sorted(set(original_structure["classes"]) - set(proposed_structure["classes"]))
     if missing_classes and not mentions_removal_justification(task, risk_text, missing_classes):
-        return None
+        return None, f"proposal removes existing class declarations without justification: {', '.join(missing_classes)}"
     missing_public = sorted(set(original_structure["public_members"]) - set(proposed_structure["public_members"]))
     if missing_public and not mentions_removal_justification(task, risk_text, missing_public):
-        return None
+        return None, f"proposal removes public declarations without justification: {', '.join(missing_public)}"
     missing_fields = sorted(set(original_structure["serialized_or_public_fields"]) - set(proposed_structure["serialized_or_public_fields"]))
     if missing_fields and not mentions_removal_justification(task, risk_text, missing_fields):
-        return None
+        return None, f"proposal removes public or serialized fields without justification: {', '.join(missing_fields)}"
     missing_lifecycle = sorted(set(original_structure["unity_lifecycle_methods"]) - set(proposed_structure["unity_lifecycle_methods"]))
     for method in missing_lifecycle:
         if method == "Update" and method_body_is_empty(original, method):
             continue
         if not mentions_removal_justification(task, risk_text, [method]):
-            return None
+            return None, f"proposal removes lifecycle method without justification: {method}"
     if relative_path.lower().endswith(".cs") and not csharp_roughly_valid(proposed):
-        return None
-    hardening = "BinaryFormatter" in original or "binaryformatter" in task.lower()
-    if hardening and "BinaryFormatter" in proposed:
-        return None
-    if hardening and not ("JsonUtility" in proposed or "System.Text.Json" in proposed or "Newtonsoft.Json" in proposed):
-        return None
-    if hardening and not ("File.Exists" in proposed and ("catch" in proposed or "try" in proposed)):
-        return None
+        return None, "proposal has unbalanced C# braces"
     if unsafe_bitwise_change(original, proposed):
-        return None
+        return None, "proposal appears to change bitwise logic into boolean logic"
     diff = str(payload.get("unified_diff") or summarize_diff(original, proposed))
     return {
         "file": relative_path,
@@ -807,99 +833,174 @@ def validate_edit_proposal(relative_path: str, original: str, payload: dict[str,
             "unity_lifecycle_methods": missing_lifecycle,
         },
         "preserved_members": proposed_structure,
-    }
+    }, None
 
 
-def build_fallback_edit_proposal(relative_path: str, original: str, proposed: str, task: str) -> dict[str, Any] | None:
-    if proposed == original:
-        return None
-    payload = {
-        "file": relative_path,
-        "summary": fallback_summary(relative_path, original, proposed, task),
-        "proposed_content": proposed,
-        "unified_diff": summarize_diff(original, proposed),
-        "risk_notes": fallback_risk_notes(original, proposed),
-        "preserves_existing_behavior": preserves_named_members(original, proposed),
-    }
-    return validate_edit_proposal(relative_path, original, payload, task)
+def common_proposal_validation_error(relative_path: str, original: str, proposed: str, task: str) -> str | None:
+    suffix = Path(relative_path).suffix.lower()
+    if re.search(r"^\s*```", proposed, flags=re.MULTILINE):
+        return "source content contains markdown fences"
+    lowered = proposed.lower()
+    commentary_markers = (
+        "here is the",
+        "i changed",
+        "i updated",
+        "as requested",
+        "the rest of the file",
+        "omitted for brevity",
+        "truncated",
+        "[truncated]",
+    )
+    if any(marker in lowered for marker in commentary_markers):
+        return "source content contains model commentary or truncation markers"
+    if suffix in {".py", ".js", ".ts", ".tsx", ".jsx", ".cs", ".java", ".kt", ".go", ".rs", ".c", ".cpp", ".h", ".hpp"}:
+        balanced = balanced_delimiters(proposed)
+        if balanced:
+            return balanced
+    if suffix == ".py":
+        try:
+            ast.parse(proposed)
+        except SyntaxError as exc:
+            return f"Python syntax error: {exc.msg}"
+    if suffix == ".json":
+        try:
+            json.loads(proposed)
+        except json.JSONDecodeError as exc:
+            return f"JSON parse error: {exc.msg}"
+    if suffix == ".toml":
+        try:
+            tomllib.loads(proposed)
+        except tomllib.TOMLDecodeError as exc:
+            return f"TOML parse error: {exc}"
+    if suffix in {".yaml", ".yml"}:
+        yaml_error = yaml_parse_error(proposed)
+        if yaml_error:
+            return yaml_error
+    original_declarations = primary_declarations(relative_path, original)
+    proposed_declarations = primary_declarations(relative_path, proposed)
+    missing = sorted(set(original_declarations) - set(proposed_declarations))
+    if missing and not mentions_removal_justification(task, "", missing):
+        return "proposal removes primary declarations without justification: " + ", ".join(missing[:6])
+    original_lines = max(1, len(original.splitlines()))
+    proposed_lines = len(proposed.splitlines())
+    if original_lines >= 20 and proposed_lines < original_lines * 0.45 and not mentions_removal_justification(task, "", list(original_declarations)):
+        return "proposal deletes a large portion of the file without justification"
+    return None
 
 
-def propose_content_update(relative_path: str, content: str, task: str) -> str:
-    name = Path(relative_path).name.lower()
-    task_text = task or ""
-    proposed = content
-    explicit_border_edit = Path(relative_path).name in task_text or "&&" in task_text or "&" in task_text
-    if name == "border.cs" and explicit_border_edit:
-        proposed = replace_boolean_ampersands(proposed)
-        proposed = re.sub(
-            r"\n\s*(?:private|public|protected|internal)?\s*void\s+Update\s*\(\s*\)\s*\{\s*\}",
-            "",
-            proposed,
-            flags=re.MULTILINE,
+def repair_edit_proposal(
+    relative_path: str,
+    original: str,
+    payload: dict[str, Any],
+    task: str,
+    *,
+    invalid_reason: str | None,
+) -> dict[str, Any] | None:
+    proposed = str(payload.get("proposed_content") or "")
+    stripped = strip_markdown_fences(proposed)
+    if stripped != proposed:
+        repaired = {**payload, "proposed_content": stripped, "summary": str(payload.get("summary") or "Repair proposal formatting.")}
+        if validate_edit_proposal(relative_path, original, repaired, task):
+            return repaired
+    try:
+        raw = OpenAICompatibleModelClient().generate_text(
+            ModelGenerationRequest(
+                system_prompt=(
+                    "Repair this RepoOperator edit proposal. Return JSON only. "
+                    "The proposed_content must be complete source for the target file, contain no markdown fences, "
+                    "preserve unrelated declarations, and fix the validation error."
+                ),
+                user_prompt=json.dumps(
+                    {
+                        "task": task,
+                        "file": relative_path,
+                        "original_content": original[:80_000],
+                        "invalid_proposal": json_safe(payload),
+                        "validation_error": invalid_reason,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
         )
-    if name == "datahandler.cs" or "BinaryFormatter" in content:
-        proposed = propose_json_save_handler(content)
-    return proposed
+    except Exception:
+        return None
+    repaired_payload = parse_json_object(raw)
+    return repaired_payload if repaired_payload else None
 
 
-def propose_json_save_handler(content: str) -> str:
-    without_binary_formatter = re.sub(r"^\s*using\s+System\.Runtime\.Serialization\.Formatters\.Binary;\s*\n", "", content, flags=re.MULTILINE)
-    without_file_stream = re.sub(r"^\s*using\s+System\.Runtime\.Serialization;\s*\n", "", without_binary_formatter, flags=re.MULTILINE)
-    if "BinaryFormatter" not in without_file_stream and ".dat" not in without_file_stream:
-        return without_file_stream
-    if "class DataHandler" not in without_file_stream:
-        return without_file_stream.replace("BinaryFormatter", "JsonUtility")
-    preserved_methods = "\n\n".join(extract_methods(without_file_stream, ["Awake", "Start"]))
-    preserved_members = extract_class_member_lines(without_file_stream)
-    preserved_block = (preserved_members + "\n\n" + preserved_methods).strip()
-    preserved_block = f"\n{preserved_block}\n\n" if preserved_block else "\n"
-    return f"""using System;
-using System.IO;
-using UnityEngine;
+def strip_markdown_fences(content: str) -> str:
+    stripped = (content or "").strip()
+    if not stripped.startswith("```"):
+        return content
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines) + ("\n" if content.endswith("\n") else "")
 
-public class DataHandler : MonoBehaviour
-{{{preserved_block}
-    private string SavePath => Path.Combine(Application.persistentDataPath, "playerData.json");
 
-    public void Save(PlayerData data)
-    {{
-        string json = JsonUtility.ToJson(data);
-        File.WriteAllText(SavePath, json);
-    }}
+def balanced_delimiters(content: str) -> str | None:
+    pairs = {")": "(", "]": "[", "}": "{"}
+    opens = set(pairs.values())
+    stack: list[str] = []
+    in_string: str | None = None
+    escaped = False
+    for char in content:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == in_string:
+                in_string = None
+            continue
+        if char in {"'", '"'}:
+            in_string = char
+            continue
+        if char in opens:
+            stack.append(char)
+        elif char in pairs:
+            if not stack or stack.pop() != pairs[char]:
+                return f"unbalanced delimiter: {char}"
+    if stack:
+        return "unbalanced delimiters"
+    return None
 
-    public PlayerData Load()
-    {{
-        if (!File.Exists(SavePath))
-        {{
-            return new PlayerData();
-        }}
 
-        try
-        {{
-            string json = File.ReadAllText(SavePath);
-            PlayerData data = JsonUtility.FromJson<PlayerData>(json);
-            return data ?? new PlayerData();
-        }}
-        catch (Exception)
-        {{
-            return new PlayerData();
-        }}
-    }}
-}}
-"""
+def yaml_parse_error(content: str) -> str | None:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return None
+    try:
+        yaml.safe_load(content)
+    except Exception as exc:  # noqa: BLE001
+        return f"YAML parse error: {exc}"
+    return None
+
+
+def primary_declarations(relative_path: str, content: str) -> set[str]:
+    suffix = Path(relative_path).suffix.lower()
+    declarations: set[str] = set()
+    if suffix == ".py":
+        declarations.update(re.findall(r"^\s*(?:class|def)\s+([A-Za-z_][A-Za-z0-9_]*)\b", content, flags=re.MULTILINE))
+    elif suffix in {".js", ".ts", ".tsx", ".jsx"}:
+        declarations.update(re.findall(r"\b(?:export\s+)?(?:function|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b", content))
+        declarations.update(re.findall(r"\b(?:export\s+)?const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=", content))
+    elif suffix in {".java", ".kt", ".cs", ".go", ".rs", ".c", ".cpp", ".h", ".hpp"}:
+        declarations.update(re.findall(r"\b(?:class|interface|struct|enum|func|fn)\s+([A-Za-z_][A-Za-z0-9_]*)\b", content))
+    return declarations
 
 
 def summarize_code_change(content: str) -> str:
-    markers: list[str] = []
-    if "BinaryFormatter" in content:
-        markers.append("uses BinaryFormatter")
-    if "JsonUtility" in content:
-        markers.append("uses JsonUtility")
-    if re.search(r"(?<!&)&(?!&)", content):
-        markers.append("contains single ampersand boolean checks")
-    if re.search(r"void\s+Update\s*\(\s*\)\s*\{\s*\}", content, flags=re.MULTILINE):
-        markers.append("has an empty Update method")
-    return ", ".join(markers) if markers else f"{len(content.splitlines())} line(s)"
+    declarations = sorted(primary_declarations("source.py", content))
+    if declarations:
+        return f"{len(content.splitlines())} line(s), declarations: {', '.join(declarations[:6])}"
+    imports = re.findall(r"^\s*(?:import|from|using)\s+([A-Za-z0-9_.]+)", content, flags=re.MULTILINE)
+    if imports:
+        return f"{len(content.splitlines())} line(s), imports: {', '.join(imports[:6])}"
+    return f"{len(content.splitlines())} line(s)"
 
 
 def summarize_diff(before: str, after: str, *, limit: int = 4000) -> str:
@@ -956,7 +1057,7 @@ def extract_source_structure(relative_path: str, content: str) -> dict[str, list
         }
     classes = re.findall(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b", content)
     methods = re.findall(
-        r"\b(?:public|private|protected|internal)?\s*(?:static\s+)?(?:void|bool|int|string|float|double|PlayerData|[A-Za-z_][A-Za-z0-9_<>,\[\]]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        r"\b(?:public|private|protected|internal)?\s*(?:static\s+)?(?:void|bool|int|string|float|double|[A-Za-z_][A-Za-z0-9_<>,\[\]]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
         content,
     )
     field_pattern = re.compile(
@@ -972,10 +1073,8 @@ def extract_source_structure(relative_path: str, content: str) -> dict[str, list
         prefix = content[max(0, match.start() - 80):match.start()]
         if visibility == "public" or "[SerializeField]" in prefix:
             serialized_or_public.append(name)
-    lifecycle_names = {"Awake", "Start", "Update", "FixedUpdate", "LateUpdate", "OnEnable", "OnDisable", "OnDestroy"}
-    lifecycle = [name for name in methods if name in lifecycle_names]
     public_methods = re.findall(
-        r"\bpublic\s+(?:static\s+)?(?:void|bool|int|string|float|double|PlayerData|[A-Za-z_][A-Za-z0-9_<>,\[\]]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        r"\bpublic\s+(?:static\s+)?(?:void|bool|int|string|float|double|[A-Za-z_][A-Za-z0-9_<>,\[\]]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
         content,
     )
     public_fields = [
@@ -987,7 +1086,7 @@ def extract_source_structure(relative_path: str, content: str) -> dict[str, list
         "classes": _dedupe_strings(classes),
         "methods": _dedupe_strings(methods),
         "fields": _dedupe_strings(fields),
-        "unity_lifecycle_methods": _dedupe_strings(lifecycle),
+        "unity_lifecycle_methods": [],
         "public_members": _dedupe_strings([*public_methods, *public_fields]),
         "serialized_or_public_fields": _dedupe_strings(serialized_or_public),
     }
@@ -1027,35 +1126,6 @@ def unsafe_bitwise_change(original: str, proposed: str) -> bool:
     return False
 
 
-def replace_boolean_ampersands(content: str) -> str:
-    updated: list[str] = []
-    for line in content.splitlines():
-        stripped = line.strip()
-        likely_boolean_context = stripped.startswith(("if ", "if(", "while ", "while(", "return ")) or re.search(r"\bbool\b", stripped)
-        likely_bitwise_context = re.search(r"\b(int|long|uint|ulong|short|byte)\b", stripped) or re.search(r"\b(mask|flag|flags|bits?)\b", stripped, re.IGNORECASE)
-        if likely_boolean_context and not likely_bitwise_context:
-            line = re.sub(r"(?<!&)&(?!&)", "&&", line)
-        updated.append(line)
-    return "\n".join(updated) + ("\n" if content.endswith("\n") else "")
-
-
-def extract_methods(content: str, names: list[str]) -> list[str]:
-    methods: list[str] = []
-    for name in names:
-        match = re.search(
-            rf"((?:public|private|protected|internal)?\s*void\s+{re.escape(name)}\s*\([^)]*\)\s*\{{)",
-            content,
-        )
-        if not match:
-            continue
-        start = match.start(1)
-        brace = content.find("{", match.start(1))
-        end = find_matching_brace(content, brace)
-        if end != -1:
-            methods.append(content[start : end + 1].strip())
-    return methods
-
-
 def find_matching_brace(content: str, start: int) -> int:
     if start < 0:
         return -1
@@ -1069,48 +1139,6 @@ def find_matching_brace(content: str, start: int) -> int:
             if balance == 0:
                 return index
     return -1
-
-
-def extract_class_member_lines(content: str) -> str:
-    class_match = re.search(r"\bclass\s+DataHandler\b[^{]*\{", content)
-    if not class_match:
-        return ""
-    body_start = class_match.end()
-    lines = []
-    for line in content[body_start:].splitlines():
-        stripped = line.strip()
-        if not stripped or stripped == "}":
-            continue
-        if "(" in stripped or "{" in stripped or "}" in stripped:
-            continue
-        if any(skip in stripped for skip in ("BinaryFormatter", "FileStream", "formatter")):
-            continue
-        if stripped.endswith(";"):
-            lines.append(line.rstrip())
-    return "\n".join(lines[:12])
-
-
-def preserves_named_members(original: str, proposed: str) -> bool:
-    names = re.findall(r"\b(?:void|PlayerData|public|private|protected|internal)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", original)
-    essential = [name for name in names if name not in {"Save", "Load"}]
-    return all(re.search(rf"\b{name}\s*\(", proposed) for name in essential)
-
-
-def fallback_summary(relative_path: str, original: str, proposed: str, task: str) -> str:
-    if "BinaryFormatter" in original and "BinaryFormatter" not in proposed:
-        return "Replace BinaryFormatter persistence with JsonUtility JSON persistence and corrupt-file fallback."
-    if Path(relative_path).name.lower() == "border.cs":
-        return "Use short-circuit boolean checks where safe and remove an empty Unity Update method."
-    return "Prepared a validated proposal from the requested file content."
-
-
-def fallback_risk_notes(original: str, proposed: str) -> list[str]:
-    notes: list[str] = []
-    if "BinaryFormatter" in original and "BinaryFormatter" not in proposed:
-        notes.append("Existing binary save files will not be migrated by this proposal.")
-    if not preserves_named_members(original, proposed):
-        notes.append("Some existing methods may need manual review before applying.")
-    return notes
 
 
 def is_stale_duplicate_copy(relative_path: Path) -> bool:

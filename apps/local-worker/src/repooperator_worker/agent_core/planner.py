@@ -24,7 +24,6 @@ from repooperator_worker.services.model_client import ModelGenerationRequest, Op
 SOURCE_SUFFIXES = {".cs", ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".kt", ".swift", ".go", ".rs", ".rb", ".php", ".c", ".cpp", ".h", ".hpp"}
 TEXT_SUFFIXES = SOURCE_SUFFIXES | {".md", ".txt", ".rst", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".gradle"}
 SEARCH_SKIP_DIRS = {".git", ".claude", "node_modules", "runtime", ".next", "dist", "build", "out", "coverage", ".venv", "venv", "__pycache__"}
-EDIT_DISCOVERY_TEXT_SIGNALS = ["Save", "Load", "BinaryFormatter", "JsonUtility", "persistentDataPath", "PlayerData"]
 PLANNER_ACTION_TYPES = set(get_default_tool_registry().allowed_action_types())
 
 
@@ -176,7 +175,7 @@ def validate_model_next_action(payload: dict[str, Any], request: AgentRunRequest
                     reason_summary="Find validated edit targets before preparing a patch.",
                     target_symbols=target_symbols,
                     expected_output="Ranked repo-contained candidate files.",
-                    payload=_action_payload_with_note({"queries": queries, "text_queries": text_queries or EDIT_DISCOVERY_TEXT_SIGNALS, "file_globs": file_globs, "source": "model_planner"}, visible_work_note),
+                    payload=_action_payload_with_note({"queries": queries, "text_queries": text_queries, "file_globs": file_globs, "source": "model_planner"}, visible_work_note),
                 )
             return None
         if not state.files_read and unread:
@@ -351,8 +350,11 @@ def files_from_recent_context(request: AgentRunRequest) -> list[str]:
 
 def symbol_tokens(text: str) -> list[str]:
     symbols: list[str] = []
+    generic_request_words = {"Add", "Fix", "Update", "Change", "Refactor", "Implement", "Explain", "Analyze", "Review", "Summarize"}
     for match in re.finditer(r"\b([A-Z][A-Za-z0-9_]{2,})\b", text or ""):
         token = match.group(1)
+        if token in generic_request_words:
+            continue
         if "." not in token and token not in symbols:
             symbols.append(token)
     return symbols[:8]

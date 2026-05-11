@@ -82,7 +82,7 @@ class AgentLoop:
             if result.status == "waiting_approval":
                 state.stop_reason = "waiting_approval"
                 break
-            if result.status in {"failed", "cancelled", "timed_out"}:
+            if result.status in {"cancelled", "timed_out"}:
                 state.stop_reason = result.status
                 break
 

@@ -10,12 +10,24 @@ from repooperator_worker.services.json_safe import json_safe
 
 
 ToolStatus = Literal["success", "skipped", "failed", "waiting_approval", "cancelled", "timed_out"]
+ToolOperation = Literal[
+    "list_files",
+    "search",
+    "read_file",
+    "analyze_repository",
+    "command",
+    "edit",
+    "final_answer",
+    "clarification",
+    "custom",
+]
 
 
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
     description: str
+    operation: ToolOperation
     input_schema: dict[str, Any]
     read_only: bool
     concurrency_safe: bool
@@ -27,6 +39,7 @@ class ToolSpec:
             {
                 "name": self.name,
                 "description": self.description,
+                "operation": self.operation,
                 "input_schema": self.input_schema,
                 "read_only": self.read_only,
                 "concurrency_safe": self.concurrency_safe,

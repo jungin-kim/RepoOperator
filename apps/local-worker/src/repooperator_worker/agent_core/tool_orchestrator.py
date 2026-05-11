@@ -253,7 +253,7 @@ class ToolOrchestrator:
         files = list((result.files_read if result else None) or action.target_files or [])
         command = action.command or (result.command_result.get("command") if result and result.command_result else None)
         activity_id = f"action:{action.action_id}"
-        operation = _tool_operation(action.type)
+        operation = _tool_operation(self.registry, action.type)
         related_search_query = _related_search_query(action, result)
         proposal_id = _proposal_id(action, result)
         aggregate = _tool_aggregate(
@@ -333,7 +333,11 @@ def _trace_status(status: str) -> str:
     return status
 
 
-def _tool_operation(action_type: str) -> str:
+def _tool_operation(registry: ToolRegistry, action_type: str) -> str:
+    try:
+        return str(registry.get(action_type).spec.operation)
+    except Exception:
+        pass
     if action_type == "inspect_repo_tree":
         return "list_files"
     if action_type == "analyze_repository":

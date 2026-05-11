@@ -30,6 +30,8 @@ class ToolRegistry:
         name = tool.spec.name
         if name in self._tools:
             raise ValueError(f"Tool {name!r} is already registered.")
+        if not getattr(tool.spec, "operation", None):
+            raise ValueError(f"Tool {name!r} must declare an operation.")
         self._tools[name] = tool
 
     def get(self, name: str) -> Tool:
@@ -47,6 +49,7 @@ class ToolRegistry:
                 {
                     "name": spec.name,
                     "description": spec.description,
+                    "operation": spec.operation,
                     "input_schema": spec.input_schema,
                     "read_only": spec.read_only,
                     "concurrency_safe": spec.concurrency_safe,

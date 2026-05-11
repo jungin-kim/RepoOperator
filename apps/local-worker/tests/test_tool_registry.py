@@ -40,10 +40,13 @@ class ToolRegistryTests(unittest.TestCase):
         json.dumps(specs, ensure_ascii=False)
         by_name = {item["name"]: item for item in specs}
         self.assertTrue(by_name["read_file"]["read_only"])
+        self.assertEqual(by_name["read_file"]["operation"], "read_file")
         self.assertTrue(by_name["search_files"]["concurrency_safe"])
+        self.assertEqual(by_name["search_files"]["operation"], "search")
         self.assertTrue(by_name["search_text"]["read_only"])
         self.assertTrue(by_name["run_approved_command"]["requires_approval_by_default"])
         self.assertIn("input_schema", by_name["generate_edit"])
+        self.assertTrue(all(item.get("operation") for item in specs))
 
     def test_planner_action_types_come_from_registry(self) -> None:
         self.assertEqual(PLANNER_ACTION_TYPES, set(get_default_tool_registry().allowed_action_types()))

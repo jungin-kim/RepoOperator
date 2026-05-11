@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult
 
@@ -26,6 +26,19 @@ class ClassifierResult:
     needs_clarification: bool = False
     clarification_question: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentSubtask:
+    id: str
+    title: str
+    goal: str
+    status: Literal["pending", "running", "completed", "blocked", "failed"] = "pending"
+    planned_operations: list[str] = field(default_factory=list)
+    completed_operations: list[str] = field(default_factory=list)
+    evidence_files: list[str] = field(default_factory=list)
+    attempts: int = 0
+    blocker: str | None = None
 
 
 @dataclass
@@ -61,3 +74,8 @@ class AgentCoreState:
     max_file_reads: int = 40
     max_commands: int = 8
     max_edits: int = 6
+    subtasks: list[AgentSubtask] = field(default_factory=list)
+    current_subtask_id: str | None = None
+    zero_result_queries: list[str] = field(default_factory=list)
+    failed_action_signatures: list[str] = field(default_factory=list)
+    strategy_shifts: list[str] = field(default_factory=list)

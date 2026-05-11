@@ -138,11 +138,13 @@ def validate_or_repair_final_answer(answer: str, state: AgentCoreState, request:
     lowered = text.lower()
     file_contents = collect_file_contents(state)
     edit_proposal = _latest_edit_proposal(state)
+    if _needs_general_final_answer_repair(text, state):
+        return repair_final_answer(text, state, request, file_contents)
     if edit_proposal and not edit_proposal.get("applied"):
         proposal_only = "proposed patch only" in lowered or "no files were modified" in lowered
         false_write = any(
             phrase in lowered
-            for phrase in ("applied", "modified the file", "changed the file", "wrote", "saved", "수정했습니다", "적용했습니다")
+            for phrase in ("applied", "modified the file", "i modified", "changed the file", "wrote", "saved", "수정했습니다", "적용했습니다")
         )
         if false_write and not proposal_only:
             return _format_edit_proposal(edit_proposal)
@@ -167,6 +169,81 @@ def validate_or_repair_final_answer(answer: str, state: AgentCoreState, request:
     if not state.files_read and not state.commands_run and len(state.observations) <= 1 and _makes_repo_claim(text):
         return synthesize_answer_from_evidence(request, state, file_contents, "\n".join(state.observations[-6:]))
     return text
+
+
+def _needs_general_final_answer_repair(answer: str, state: AgentCoreState) -> bool:
+    lowered = (answer or "").lower()
+    if not answer.strip():
+        return True
+    internal_markers = (
+        "the user asks",
+        "the user is asking",
+        "i need to",
+        "need clarification",
+        "i should ask",
+        "we need to",
+        "private reasoning",
+    )
+    if any(marker in lowered for marker in internal_markers):
+        return True
+    raw_stop_markers = ("max_loop_iterations", "max_file_reads", "max_commands", "timed_out")
+    if any(marker in lowered for marker in raw_stop_markers):
+        return True
+    if _looks_like_malformed_mixed_language(answer):
+        return True
+    if _looks_like_raw_metadata_dump(answer):
+        return True
+    if "technical log" in lowered or "work log" in lowered:
+        return True
+    return False
+
+
+def repair_final_answer(answer: str, state: AgentCoreState, request: AgentRunRequest, file_contents: dict[str, str]) -> str:
+    repo_observation = "\n".join(state.observations[-6:])
+    try:
+        raw = _compat_model_client()().generate_text(
+            ModelGenerationRequest(
+                system_prompt=(
+                    "Repair the assistant final answer. Return only a clean user-facing answer in the same language as the user. "
+                    "Ground it in the supplied evidence. Do not include internal planning, raw loop limits, technical logs, work logs, "
+                    "or claims that files were modified unless files_changed is non-empty."
+                ),
+                user_prompt=json.dumps(
+                    {
+                        "task": request.task,
+                        "draft_answer": answer[:4000],
+                        "files_read": state.files_read,
+                        "files_changed": state.files_changed,
+                        "observations": state.observations[-8:],
+                        "evidence_files": {path: content[:20_000] for path, content in file_contents.items()},
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        _reasoning, visible = split_visible_reasoning(raw)
+        cleaned, _ = clean_user_visible_response(visible, user_task=request.task)
+        if cleaned.strip() and not _needs_general_final_answer_repair(cleaned, state):
+            return cleaned.strip()
+    except Exception:
+        pass
+    return synthesize_answer_from_evidence(request, state, file_contents, repo_observation)
+
+
+def _looks_like_malformed_mixed_language(answer: str) -> bool:
+    return bool(re.search(r"[�]{2,}|[A-Za-z]{2,}[가-힣]{2,}[A-Za-z]{2,}|[\u0400-\u04ff\u0600-\u06ff]{8,}", answer or ""))
+
+
+def _looks_like_raw_metadata_dump(answer: str) -> bool:
+    text = answer or ""
+    lowered = text.lower()
+    if lowered.count('"scripts"') + lowered.count('"dependencies"') + lowered.count('"devdependencies"') >= 2:
+        return True
+    if len(re.findall(r"https?://img\.shields\.io|badge\.svg|!\[[^\]]*\]\(", text, flags=re.IGNORECASE)) >= 2:
+        return True
+    if text.count('",') > 20 and any(marker in lowered for marker in ("package.json", '"name"', '"version"')):
+        return True
+    return False
 
 
 def _is_placeholder_answer(answer: str) -> bool:
@@ -348,18 +425,16 @@ def extract_classes(text: str) -> list[str]:
 
 
 def project_conclusion(signals: dict[str, Any]) -> str:
-    text = " ".join(str(item.get("paragraph") or item.get("summary") or "") for item in signals["files"])
-    lowered = text.lower()
-    if "satellite" in lowered or "orbit" in lowered:
-        return "satellite/orbit simulation project"
-    if "repooperator" in lowered:
-        return "local-first repository coding agent proxy"
-    if "unity" in lowered or any(path["basename"].endswith(".cs") for path in signals["files"]):
-        return "Unity/C# project"
     if any(path["basename"] == "package.json" for path in signals["files"]):
         return "JavaScript/TypeScript project"
     if any(path["basename"] in {"pyproject.toml", "main.py"} or path["basename"].endswith(".py") for path in signals["files"]):
         return "Python project"
+    if any(path["basename"].endswith(".cs") for path in signals["files"]):
+        return "C# project"
+    if any(path["basename"] == "go.mod" or path["basename"].endswith(".go") for path in signals["files"]):
+        return "Go project"
+    if any(path["basename"] == "Cargo.toml" or path["basename"].endswith(".rs") for path in signals["files"]):
+        return "Rust project"
     return "software project"
 
 

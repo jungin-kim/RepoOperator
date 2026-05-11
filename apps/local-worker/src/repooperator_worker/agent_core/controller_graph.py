@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import time
 from dataclasses import dataclass
@@ -18,7 +19,6 @@ from repooperator_worker.agent_core.final_synthesis import (
 from repooperator_worker.agent_core.final_response import build_agent_response
 from repooperator_worker.agent_core.hooks import HookManager
 from repooperator_worker.agent_core.planner import (
-    EDIT_DISCOVERY_TEXT_SIGNALS,
     TaskFrame,
     _format_command_result,
     _format_edit_proposal,
@@ -50,6 +50,20 @@ from repooperator_worker.agent_core.planner import (
 )
 from repooperator_worker.agent_core.state import AgentCoreState
 from repooperator_worker.agent_core.steering import consume_steering_for_state
+from repooperator_worker.agent_core.task_policy import (
+    action_operation,
+    block_current_subtask,
+    ensure_subtasks,
+    first_batch_files,
+    group_inventory,
+    minimum_evidence_missing_for_task,
+    next_evidence_gathering_action,
+    next_recovery_action,
+    record_ineffective_action,
+    repository_file_inventory,
+    should_ask_clarification_now,
+    update_subtasks_after_action,
+)
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
@@ -179,6 +193,7 @@ def classify(state: AgentCoreState, request: AgentRunRequest) -> None:
     state.max_file_reads = budget.max_file_reads
     state.max_commands = budget.max_commands
     state.max_edits = budget.max_edits
+    ensure_subtasks(state, request, frame)
     state.recommendation_context = json_safe({"task_frame": frame, "context_packet": state.context_packet})
     append_activity_event(
         run_id=state.run_id,
@@ -222,6 +237,9 @@ def _bounded_loop_budget(max_loop_iterations: int, max_file_reads: int, max_comm
 
 
 def create_initial_plan(state: AgentCoreState) -> None:
+    if state.subtasks:
+        state.plan = [f"{item.title}: {item.status}" for item in state.subtasks]
+        return
     state.plan = [
         "Frame the user's goal",
         "Resolve missing evidence",
@@ -287,7 +305,16 @@ def check_cancel(state: AgentCoreState, request: AgentRunRequest) -> None:
 
 def controller_choose_next_action(state: AgentCoreState, request: AgentRunRequest) -> AgentAction:
     frame = build_task_frame(request, state)
+    ensure_subtasks(state, request, frame)
     state.recommendation_context = json_safe({"task_frame": frame, "context_packet": state.context_packet})
+
+    if state.actions_taken and state.action_results:
+        previous_action = state.actions_taken[-1]
+        previous_result = state.action_results[-1]
+        if _is_ineffective_result(previous_action, previous_result):
+            recovery = next_recovery_action(state, request, frame, previous_action, previous_result)
+            if recovery and not _repeats_ineffective_action(state, recovery):
+                return recovery
 
     resolved = resolve_target_files(request, frame.mentioned_files, preferred=known_context_files(request, state))
     unread = [path for path in resolved if path not in state.files_read]
@@ -322,6 +349,16 @@ def controller_choose_next_action(state: AgentCoreState, request: AgentRunReques
             expected_output="File contents for grounded answer.",
         )
 
+    if frame.mentioned_files and resolved and all(path in state.files_read for path in resolved) and not edit_requested(frame):
+        return AgentAction(type="final_answer", reason_summary="Answer from the explicitly requested file evidence.")
+
+    if unresolved and _has_search_for(state, unresolved):
+        return AgentAction(
+            type="ask_clarification",
+            reason_summary="Ask a precise file clarification after repository search did not find targets.",
+            payload={"missing_files": unresolved},
+        )
+
     if frame.mentioned_symbols and not state.files_read and not _has_search_for(state, frame.mentioned_symbols):
         return AgentAction(
             type="search_files",
@@ -331,11 +368,19 @@ def controller_choose_next_action(state: AgentCoreState, request: AgentRunReques
             payload={"queries": frame.mentioned_symbols},
         )
 
-    if unresolved and _has_search_for(state, unresolved):
+    evidence_action = next_evidence_gathering_action(state, request, frame)
+    if evidence_action and not _repeats_ineffective_action(state, evidence_action):
+        return evidence_action
+
+    if should_ask_clarification_now(state, request, frame):
+        missing = minimum_evidence_missing_for_task(state, request, frame)
+        checked = _checked_evidence_summary(state)
+        question = _clarification_question(missing, checked, frame)
+        block_current_subtask(state, question)
         return AgentAction(
             type="ask_clarification",
-            reason_summary="Ask a precise file clarification after repository search did not find targets.",
-            payload={"missing_files": unresolved},
+            reason_summary="Ask a precise clarification after safe evidence gathering did not resolve the target.",
+            payload={"question": question, "missing_evidence": missing, "checked_evidence": checked},
         )
 
     planned = planner_propose_next_action_with_model(request, state, frame, model_client_factory=OpenAICompatibleModelClient)
@@ -400,27 +445,15 @@ def controller_choose_next_action(state: AgentCoreState, request: AgentRunReques
                     payload={"task_frame": json_safe(frame), "current_edit_targets": edit_targets},
                 )
             return AgentAction(type="final_answer", reason_summary="Report the proposed edit without claiming it was applied.")
-        if not _has_action(state, "inspect_repo_tree"):
-            return AgentAction(type="inspect_repo_tree", reason_summary="Inspect repository before locating edit targets.")
-        if not frame.mentioned_files:
-            context_files = likely_feature_context_files(request)
-            unread_context = [path for path in context_files if path not in state.files_read]
-            if unread_context and (not state.files_read or _zero_result_search_count(state) > 0 or not _has_action(state, "search_files")):
-                return AgentAction(
-                    type="read_file",
-                    reason_summary="Read likely feature implementation context before asking for edit targets.",
-                    target_files=unread_context[:3],
-                    expected_output="Project entrypoint and documentation evidence for the requested feature.",
-                )
-        edit_queries = likely_edit_file_queries(frame)
-        if not _has_search_for(state, edit_queries):
-            return AgentAction(
-                type="search_files",
-                reason_summary="Search repository for likely edit targets.",
-                expected_output="Repo-relative candidate paths.",
-                payload={"queries": edit_queries, "text_queries": EDIT_DISCOVERY_TEXT_SIGNALS},
-            )
-        return AgentAction(type="ask_clarification", reason_summary="Ask which file to edit after search did not find a safe target.")
+        missing = minimum_evidence_missing_for_task(state, request, frame)
+        checked = _checked_evidence_summary(state)
+        question = _clarification_question(missing, checked, frame)
+        block_current_subtask(state, question)
+        return AgentAction(
+            type="ask_clarification",
+            reason_summary="Ask which implementation area to change after evidence gathering did not find a safe target.",
+            payload={"question": question, "missing_evidence": missing, "checked_evidence": checked},
+        )
 
     if not state.files_read and not _has_action(state, "inspect_repo_tree"):
         return AgentAction(type="inspect_repo_tree", reason_summary="Inspect repository inventory before answering.")
@@ -491,7 +524,43 @@ def _zero_result_search_count(state: AgentCoreState) -> int:
     return count
 
 
+def _checked_evidence_summary(state: AgentCoreState) -> list[str]:
+    checked: list[str] = []
+    if any(action.type == "inspect_repo_tree" for action in state.actions_taken):
+        checked.append("repository structure")
+    searched: list[str] = []
+    for action in state.actions_taken:
+        if action.type == "search_files":
+            searched.extend(str(item) for item in [*(action.payload.get("queries") or []), *(action.payload.get("text_queries") or [])] if str(item))
+        elif action.type == "search_text":
+            query = str(action.payload.get("query") or "")
+            if query:
+                searched.append(query)
+    if searched:
+        checked.append("searches: " + ", ".join(_dedupe_text(searched[:8])))
+    if state.files_read:
+        checked.append("files read: " + ", ".join(state.files_read[-8:]))
+    return checked
+
+
+def _clarification_question(missing: list[str], checked: list[str], frame: TaskFrame) -> str:
+    missing_text = "; ".join(missing) if missing else "the remaining target or scope"
+    checked_text = "; ".join(checked) if checked else "no repository evidence could be gathered"
+    if edit_requested(frame):
+        return (
+            "I could not identify a safe implementation target from the repository evidence. "
+            f"Checked: {checked_text}. Missing: {missing_text}. "
+            "Please name the file, module, route, handler, or component that should own the change."
+        )
+    return (
+        "I need one more detail before I can answer accurately. "
+        f"Checked: {checked_text}. Missing: {missing_text}. "
+        "Please narrow the file, module, or workflow to inspect next."
+    )
+
+
 def observe_result(state: AgentCoreState, action: AgentAction, result: ActionResult, request: AgentRunRequest) -> None:
+    record_ineffective_action(state, action, result)
     if result.files_read:
         for path in result.files_read:
             if path not in state.files_read:
@@ -527,9 +596,12 @@ def observe_result(state: AgentCoreState, action: AgentAction, result: ActionRes
             state.final_response = response.response
         elif isinstance(response, dict):
             state.final_response = str(response.get("response") or "")
+    update_subtasks_after_action(state, action, result, action_operation(action.type))
 
 
 def update_plan(state: AgentCoreState, action: AgentAction, result: ActionResult, request: AgentRunRequest) -> None:
+    if state.subtasks:
+        state.plan = [f"{item.title}: {item.status}" for item in state.subtasks]
     if result.status == "waiting_approval":
         state.plan.append("Wait for user approval before running the command")
     elif result.next_recommended_action:
@@ -571,9 +643,17 @@ def build_final_answer_text(
     edit_proposal = _latest_edit_proposal(state)
     if edit_proposal:
         return _format_edit_proposal(edit_proposal)
+    proposal_error = _latest_proposal_error(state)
+    if proposal_error:
+        return (
+            "I could not prepare a validated proposal-only patch. "
+            f"Reason: {proposal_error}. No files were modified."
+        )
     command_result = _latest_command_result(state)
     if command_result:
         return _format_command_result(command_result, pending_commit=pending_commit_context(build_task_frame(request, state)))
+    if _is_broad_analysis_request(build_task_frame(request, state)) and state.files_read:
+        return _format_broad_analysis_answer(state, request)
     if state.stop_reason in {"failed", "timed_out", "max_loop_iterations", "max_file_reads", "max_commands"}:
         return _build_evidence_limited_answer(state, request)
     contents: dict[str, str] = {}
@@ -638,6 +718,71 @@ def _build_evidence_limited_answer(state: AgentCoreState, request: AgentRunReque
     else:
         lines.append("Next safe step: confirm the specific file or workflow to inspect next, or let me continue gathering repository evidence.")
     return "\n".join(lines)
+
+
+def _latest_proposal_error(state: AgentCoreState) -> str | None:
+    for result in reversed(state.action_results):
+        error = result.payload.get("proposal_error")
+        if error:
+            return str(error)
+    return None
+
+
+def _is_broad_analysis_request(frame: TaskFrame) -> bool:
+    text = " ".join([frame.user_goal, *frame.requested_outputs]).lower()
+    return any(term in text for term in ("all", "every", "whole", "entire", "directory structure", "source tree", "codebase", "전체", "모든")) and any(
+        term in text for term in ("source", "file", "module", "project", "repo", "directory", "folder", "파일", "모듈", "구조")
+    )
+
+
+def _format_broad_analysis_answer(state: AgentCoreState, request: AgentRunRequest) -> str:
+    contents: dict[str, str] = {}
+    for result in state.action_results:
+        contents.update(result.payload.get("contents") or {})
+    inventory = repository_file_inventory(request)
+    groups = group_inventory(inventory)
+    analyzed = list(contents.keys())
+    remaining_groups: list[str] = []
+    for group, files in groups.items():
+        remaining = [path for path in files if path not in analyzed]
+        if remaining:
+            remaining_groups.append(f"- {group}: {len(remaining)} remaining ({', '.join(remaining[:6])})")
+    role_lines = ["| File | Role |", "| --- | --- |"]
+    for path, content in contents.items():
+        role_lines.append(f"| `{path}` | {_file_role_summary(path, content)} |")
+    analyzed_text = ", ".join(f"`{path}`" for path in analyzed) or "none"
+    remaining_text = "\n".join(remaining_groups) if remaining_groups else "- No remaining readable groups found in the current inventory."
+    return "\n".join(
+        [
+            "I analyzed the first bounded batch of repository files.",
+            "",
+            f"Analyzed batch: {analyzed_text}",
+            "",
+            "File role table:",
+            *role_lines,
+            "",
+            "Remaining groups/files:",
+            remaining_text,
+            "",
+            "Next safe continuation: read the next bounded batch from the remaining groups and extend the same table.",
+        ]
+    )
+
+
+def _file_role_summary(path: str, content: str) -> str:
+    name = Path(path).name.lower()
+    suffix = Path(path).suffix.lower()
+    if name.startswith("readme") or suffix in {".md", ".rst", ".txt"}:
+        return "documentation or project overview"
+    if suffix in {".json", ".toml", ".yaml", ".yml", ".gradle", ".xml"} or name in {"makefile", "dockerfile"}:
+        return "configuration/build metadata"
+    functions = re.findall(r"^\s*(?:def|function)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", content, flags=re.MULTILINE)
+    classes = re.findall(r"^\s*(?:class|interface|struct)\s+([A-Za-z_][A-Za-z0-9_]*)\b", content, flags=re.MULTILINE)
+    exported = re.findall(r"\bexport\s+(?:function|class|const)\s+([A-Za-z_][A-Za-z0-9_]*)", content)
+    names = [*functions[:3], *classes[:3], *exported[:3]]
+    if names:
+        return "source module defining " + ", ".join(_dedupe_text(names[:5]))
+    return "source or support file"
 
 
 def _dedupe_text(items: list[str]) -> list[str]:

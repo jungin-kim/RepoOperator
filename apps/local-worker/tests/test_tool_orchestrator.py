@@ -219,6 +219,7 @@ class LargePayloadTool(BaseTool):
     spec = ToolSpec(
         name="large_payload",
         description="Return large payload for truncation tests.",
+        operation="custom",
         input_schema={"type": "object"},
         read_only=True,
         concurrency_safe=True,
