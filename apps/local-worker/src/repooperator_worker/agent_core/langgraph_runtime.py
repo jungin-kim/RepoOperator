@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import re
 import shlex
 import time
 from typing import Annotated, Any, Iterator, TypedDict
@@ -15,6 +16,8 @@ from langgraph.types import Command, interrupt
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult
 from repooperator_worker.agent_core.change_set import (
     ChangeSetProposal,
+    change_set_from_payload,
+    EditMode,
     plan_change_set,
     proposal_from_edit_result,
     validate_change_set as validate_change_set_model,
@@ -146,6 +149,12 @@ class RepoOperatorGraphState(TypedDict, total=False):
     worker_reports: Annotated[list[dict[str, Any]], append_items]
     proposal_errors: Annotated[list[str], append_items]
     attempts: Annotated[list[dict[str, Any]], append_items]
+    edit_mode: EditMode
+    proposal_id: str | None
+    proposal_status: str | None
+    apply_status: str | None
+    applied_change_set_id: str | None
+    post_apply_validation_status: str | None
     supervisor_mode: bool
     current_worker_role: str | None
     pending_action: dict[str, Any] | None
@@ -199,6 +208,9 @@ def build_repooperator_state_graph() -> StateGraph:
     graph.add_node("repair_change_set", repair_change_set_node)
     graph.add_node("ask_clarification", ask_clarification_node)
     graph.add_node("await_approval", await_approval_node)
+    graph.add_node("await_change_approval", await_approval_node)
+    graph.add_node("apply_change_set", apply_change_set_node)
+    graph.add_node("post_apply_validation", post_apply_validation_node)
     graph.add_node("final_synthesis", final_synthesis_node)
 
     graph.add_edge(START, "load_context")
@@ -220,6 +232,9 @@ def build_repooperator_state_graph() -> StateGraph:
             "repair_change_set": "repair_change_set",
             "ask_clarification": "ask_clarification",
             "await_approval": "await_approval",
+            "await_change_approval": "await_change_approval",
+            "apply_change_set": "apply_change_set",
+            "post_apply_validation": "post_apply_validation",
             "final_synthesis": "final_synthesis",
             END: END,
         },
@@ -238,12 +253,16 @@ def build_repooperator_state_graph() -> StateGraph:
             "repair_change_set": "repair_change_set",
             "route_next": "route_next",
             "await_approval": "await_approval",
+            "await_change_approval": "await_change_approval",
             "final_synthesis": "final_synthesis",
         },
     )
     graph.add_edge("repair_change_set", "route_next")
     graph.add_edge("ask_clarification", "final_synthesis")
     graph.add_edge("await_approval", "route_next")
+    graph.add_edge("await_change_approval", "route_next")
+    graph.add_edge("apply_change_set", "post_apply_validation")
+    graph.add_edge("post_apply_validation", "final_synthesis")
     graph.add_edge("final_synthesis", END)
     return graph
 
@@ -503,6 +522,12 @@ def initial_graph_state(
         "worker_reports": [],
         "proposal_errors": [],
         "attempts": [],
+        "edit_mode": "explanation_only",
+        "proposal_id": None,
+        "proposal_status": None,
+        "apply_status": None,
+        "applied_change_set_id": None,
+        "post_apply_validation_status": None,
         "supervisor_mode": False,
         "current_worker_role": None,
         "pending_action": None,
@@ -546,8 +571,10 @@ def understand_request_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     request = _request(state)
     core = _core_state_from_graph(state)
     _controller().classify(core, request)
+    task_frame = _controller().build_task_frame(request, core)
     update = _updates_from_core(state, core)
-    update["task_frame_snapshot"] = task_frame_to_snapshot(_controller().build_task_frame(request, core))
+    update["task_frame_snapshot"] = task_frame_to_snapshot(task_frame)
+    update["edit_mode"] = _edit_mode_for_request(task_frame)
     update["budgets"] = {
         "max_loop_iterations": core.max_loop_iterations,
         "max_file_reads": core.max_file_reads,
@@ -700,6 +727,8 @@ def route_after_change_plan(state: RepoOperatorGraphState) -> str:
     errors = list((proposal.get("validation") or {}).get("errors") or state.get("proposal_errors") or [])
     if (errors or (latest and latest.status == "failed")) and int(state.get("repair_attempts") or 0) < 1:
         return "repair_change_set"
+    if isinstance(proposal, dict) and proposal.get("changes") and str(proposal.get("status")) == "valid" and not proposal.get("applied"):
+        return "await_change_approval"
     return route_to_final_or_continue(state)
 
 
@@ -711,6 +740,8 @@ def route_after_approval(state: RepoOperatorGraphState) -> str:
 
 def route_after_interrupt_resume(state: RepoOperatorGraphState) -> str:
     if _pending_action(state):
+        if _pending_action(state).type == "apply_change_set":
+            return "apply_change_set"
         return "execute_tool"
     if state.get("stop_reason") == "approval_denied":
         return "final_synthesis"
@@ -805,6 +836,9 @@ def plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     return _with_checkpoint_bump(
         {
             "change_set_proposal": proposal,
+            "proposal_id": proposal.get("proposal_id"),
+            "proposal_status": proposal.get("status"),
+            "apply_status": "not_applied",
             "proposed_changes": [proposal],
             "routing_stage": "after_change_plan",
             "events_to_emit": [
@@ -832,6 +866,14 @@ def generate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     latest = _latest_result(state)
     proposal = _change_set_from_latest_result(state, latest) or state.get("change_set_proposal") or {}
+    if isinstance(proposal, dict) and proposal.get("changes"):
+        typed = change_set_from_payload(proposal)
+        validation_model = validate_change_set_model(typed, repo=str(state.get("repo") or _request(state).project_path))
+        typed.validation = validation_model
+        typed.status = validation_model.status
+        typed.validation_status = validation_model.status
+        typed.proposal_error = "; ".join(validation_model.errors) if validation_model.errors else None
+        proposal = typed.model_dump()
     validation = {
         "kind": "change_set",
         "status": (proposal.get("status") if proposal else None) or (latest.status if latest else "skipped"),
@@ -839,9 +881,28 @@ def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         "proposal_files": [str(item.get("path")) for item in proposal.get("changes") or [] if isinstance(item, dict)],
         "errors": list((proposal.get("validation") or {}).get("errors") or []),
     }
+    pending_approval = None
+    stop_reason = state.get("stop_reason")
+    final_response = state.get("final_response") or ""
+    if validation["status"] == "valid" and proposal.get("changes") and not proposal.get("applied"):
+        proposal_id = str(proposal.get("proposal_id") or "")
+        pending_approval = {
+            "kind": "change_set_apply",
+            "proposal_id": proposal_id,
+            "change_set_proposal": json_safe(proposal),
+            "reason": "Applying this validated change set will modify files and requires approval.",
+        }
+        stop_reason = "waiting_approval"
+        final_response = _final_text_for_change_set(state, proposal)
     return _with_checkpoint_bump(
         {
             "change_set_proposal": proposal,
+            "pending_approval": pending_approval if pending_approval is not None else state.get("pending_approval"),
+            "proposal_id": proposal.get("proposal_id") if isinstance(proposal, dict) else None,
+            "proposal_status": validation["status"],
+            "apply_status": "pending" if pending_approval else state.get("apply_status"),
+            "stop_reason": stop_reason,
+            "final_response": final_response,
             "validation_results": [validation],
             "proposal_errors": validation["errors"],
             "routing_stage": "after_change_plan",
@@ -904,6 +965,66 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     payload = _approval_interrupt_payload(state)
     decision = interrupt(payload)
     normalized = _normalize_approval_decision(decision)
+    pending = state.get("pending_approval") or {}
+    if pending.get("kind") == "change_set_apply" or payload.get("kind") == "change_set_apply":
+        proposal_id = str(pending.get("proposal_id") or payload.get("proposal_id") or "")
+        if normalized.get("decision") == "allow":
+            return _with_checkpoint_bump(
+                {
+                    "pending_action": action_to_snapshot(
+                        AgentAction(
+                            type="apply_change_set",
+                            reason_summary="Apply approved ChangeSetProposal.",
+                            expected_output="Files written through approved change-set apply path.",
+                            payload={
+                                "proposal_id": proposal_id,
+                                "approval_decision": normalized,
+                                "change_set_snapshot": state.get("change_set_proposal"),
+                            },
+                        )
+                    ),
+                    "pending_approval": None,
+                    "stop_reason": None,
+                    "routing_stage": "after_interrupt_resume",
+                    "edit_mode": "apply_approved",
+                    "apply_status": "pending",
+                    "approval_decision": normalized,
+                    "events_to_emit": [
+                        _graph_transition_event(
+                            state,
+                            "await_change_approval",
+                            operation="approval_resume",
+                            status="completed",
+                            files=[str(item.get("path")) for item in (state.get("change_set_proposal") or {}).get("changes") or [] if isinstance(item, dict)],
+                            aggregate={"proposal_id": proposal_id, "kind": "change_set_apply"},
+                        )
+                    ],
+                }
+            )
+        proposal = dict(state.get("change_set_proposal") or {})
+        if proposal:
+            proposal.update({"status": "rejected", "apply_status": "rejected"})
+        return _with_checkpoint_bump(
+            {
+                "stop_reason": "approval_denied",
+                "final_response": "The change-set proposal was not applied. No files were modified.",
+                "pending_approval": None,
+                "change_set_proposal": proposal or state.get("change_set_proposal"),
+                "proposal_status": "rejected",
+                "apply_status": "rejected",
+                "routing_stage": "after_approval",
+                "approval_decision": normalized,
+                "events_to_emit": [
+                    _graph_transition_event(
+                        state,
+                        "await_change_approval",
+                        operation="approval_gate",
+                        status="completed",
+                        aggregate={"proposal_id": proposal_id, "decision": "deny"},
+                    )
+                ],
+            }
+        )
     if normalized.get("decision") == "allow":
         command = list((state.get("pending_approval") or {}).get("command") or payload.get("command") or [])
         approval_id = str((state.get("pending_approval") or {}).get("approval_id") or payload.get("approval_id") or "")
@@ -948,6 +1069,57 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     operation="approval_gate",
                     status="completed",
                     command=payload.get("command"),
+                )
+            ],
+        }
+    )
+
+
+def apply_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    update = _execute_pending_action(state, subgraph=None, node_name="apply_change_set")
+    result = result_from_snapshot((update.get("action_results") or [None])[-1])
+    payload = result.payload if result else {}
+    proposal = payload.get("change_set_proposal") if isinstance(payload.get("change_set_proposal"), dict) else state.get("change_set_proposal")
+    files_changed = list(payload.get("files_modified") or []) + list(payload.get("files_created") or []) + list(payload.get("files_deleted") or [])
+    for item in payload.get("files_renamed") or []:
+        if isinstance(item, dict) and item.get("to"):
+            files_changed.append(str(item.get("to")))
+    applied = bool(payload.get("applied"))
+    update.update(
+        {
+            "change_set_proposal": proposal,
+            "files_changed": files_changed,
+            "edit_mode": "applied" if applied else "blocked",
+            "apply_status": "applied" if applied else "failed",
+            "proposal_status": "applied" if applied else "valid",
+            "applied_change_set_id": payload.get("applied_change_set_id"),
+            "stop_reason": None if applied else "failed",
+            "routing_stage": "after_tool_result",
+            "final_response": _final_text_for_applied_change_set(state, payload) if applied else _final_text_for_failed_apply(payload),
+        }
+    )
+    return _with_checkpoint_bump(update)
+
+
+def post_apply_validation_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    status = "not_run"
+    if state.get("apply_status") == "applied":
+        status = "skipped_no_safe_command_selected"
+    proposal = dict(state.get("change_set_proposal") or {})
+    if proposal:
+        proposal["post_apply_validation_status"] = status
+    return _with_checkpoint_bump(
+        {
+            "post_apply_validation_status": status,
+            "change_set_proposal": proposal or state.get("change_set_proposal"),
+            "validation_results": [{"kind": "post_apply", "status": status, "errors": []}],
+            "events_to_emit": [
+                _graph_transition_event(
+                    state,
+                    "post_apply_validation",
+                    operation="post_apply_validation",
+                    status="completed",
+                    validation_result={"status": status, "errors": []},
                 )
             ],
         }
@@ -1145,7 +1317,7 @@ def route_edit_next(state: RepoOperatorGraphState) -> str:
     action = _pending_action(state)
     if not action:
         return END
-    if action.type == "generate_edit":
+    if action.type in {"generate_change_set", "generate_edit"}:
         if not state.get("change_set_proposal"):
             return "locate_targets"
         return "generate_change_set"
@@ -1166,7 +1338,7 @@ def edit_plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def edit_generate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    return _execute_if_action_type(state, {"generate_edit"}, "edit_graph", "generate_change_set")
+    return _execute_if_action_type(state, {"generate_change_set", "generate_edit"}, "edit_graph", "generate_change_set")
 
 
 def edit_validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -1264,6 +1436,14 @@ def final_repair_answer_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def final_build_response_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     request = _request(state)
     core = _core_state_from_graph(state)
+    proposal = state.get("change_set_proposal") if isinstance(state.get("change_set_proposal"), dict) else None
+    if proposal and proposal.get("changes") and proposal.get("status") in {"invalid", "repairable", "blocked"}:
+        validation = proposal.get("validation") if isinstance(proposal.get("validation"), dict) else {}
+        errors = "; ".join(str(item) for item in validation.get("errors") or [proposal.get("proposal_error")] if item)
+        core.final_response = (
+            "I could not prepare a valid ChangeSetProposal. "
+            f"Validation failed: {errors or 'unknown validation error'}. No files were modified."
+        )
     if not core.final_response:
         on_delta = _stream_final_delta(core.run_id) if state.get("stream_final_answer") else None
         packet_context = ""
@@ -1277,6 +1457,8 @@ def final_build_response_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         )
     draft_response = core.final_response
     core.final_response = _controller().validate_or_repair_final_answer(core.final_response, core, request)
+    if _is_explanation_only_edit_request(state) and not state.get("files_changed") and "no files were modified" not in core.final_response.lower():
+        core.final_response = core.final_response.rstrip() + "\n\nNo files were modified."
     if core.final_response != draft_response:
         from repooperator_worker.agent_core.events import append_work_trace
 
@@ -1410,8 +1592,10 @@ def _route_to_final_or_action(state: RepoOperatorGraphState) -> str:
         return "gather_evidence"
     if action.type == "analyze_repository":
         return "analysis_graph"
-    if action.type in {"generate_edit", "validate_edit"}:
+    if action.type in {"generate_change_set", "generate_edit", "validate_change_set", "validate_edit"}:
         return "plan_change_set"
+    if action.type == "apply_change_set":
+        return "apply_change_set"
     if action.type in {"preview_command", "inspect_git_state", "run_approved_command", "request_command_approval"}:
         return "execute_tool"
     return "execute_tool"
@@ -1577,6 +1761,8 @@ def _latest_result(state: RepoOperatorGraphState) -> ActionResult | None:
 def _change_set_from_latest_result(state: RepoOperatorGraphState, result: ActionResult | None) -> dict[str, Any] | None:
     if not result:
         return None
+    if isinstance(result.payload.get("change_set_proposal"), dict):
+        return json_safe(result.payload.get("change_set_proposal"))
     edit_proposals = result.payload.get("edit_proposals") or []
     if edit_proposals:
         plan_summary = str(((state.get("change_set_proposal") or {}).get("plan") or {}).get("summary") or "Prepare proposal-only edits.")
@@ -1588,18 +1774,34 @@ def _change_set_from_latest_result(state: RepoOperatorGraphState, result: Action
         return proposal
     proposal = state.get("change_set_proposal")
     if isinstance(proposal, dict) and proposal.get("changes"):
-        typed = ChangeSetProposal(
-            plan=plan_change_set(list((proposal.get("plan") or {}).get("target_files") or []), str((proposal.get("plan") or {}).get("summary") or "")).plan,
-            changes=[],
-        )
+        typed = change_set_from_payload(proposal)
         validation = validate_change_set_model(typed, repo=str(state.get("repo") or _request(state).project_path))
-        proposal = {**proposal, "validation": validation.model_dump(), "status": validation.status}
+        typed.validation = validation
+        typed.status = validation.status
+        typed.validation_status = validation.status
+        proposal = typed.model_dump()
         return proposal
     return None
 
 
 def _approval_interrupt_payload(state: RepoOperatorGraphState) -> dict[str, Any]:
     approval = state.get("pending_approval") or {}
+    if approval.get("kind") == "change_set_apply":
+        proposal = state.get("change_set_proposal") if isinstance(state.get("change_set_proposal"), dict) else approval.get("change_set_proposal")
+        files = [str(item.get("path")) for item in (proposal or {}).get("changes") or [] if isinstance(item, dict)]
+        proposal_id = str(approval.get("proposal_id") or (proposal or {}).get("proposal_id") or "")
+        return json_safe(
+            {
+                "kind": "change_set_apply",
+                "run_id": state.get("run_id"),
+                "thread_id": state.get("thread_id"),
+                "proposal_id": proposal_id,
+                "change_set_proposal": proposal,
+                "files": files,
+                "risk": approval.get("reason") or "Applying this proposal modifies files and requires approval.",
+                "resume_token": f"{state.get('run_id')}:change_set_apply:{proposal_id}",
+            }
+        )
     command = list(approval.get("command") or [])
     return json_safe(
         {
@@ -1633,16 +1835,28 @@ def _response_with_change_set_payload(response: AgentRunResponse, state: RepoOpe
     validation = proposal.get("validation") if isinstance(proposal.get("validation"), dict) else {}
     validation_status = str(validation.get("status") or proposal.get("status") or "planned")
     errors = [str(item) for item in validation.get("errors") or proposal.get("proposal_errors") or []]
-    archive = [_edit_archive_record_from_change(change, validation_status) for change in proposal.get("changes") or [] if isinstance(change, dict)]
+    archive_status = "applied" if proposal.get("applied") or proposal.get("status") == "applied" or state.get("apply_status") == "applied" else ("rejected" if proposal.get("status") == "rejected" else validation_status)
+    archive = [_edit_archive_record_from_change(change, archive_status) for change in proposal.get("changes") or [] if isinstance(change, dict)]
     archive = [item for item in archive if item]
     first = (proposal.get("changes") or [{}])[0]
-    response_type = "change_proposal" if validation_status == "valid" else "proposal_error"
+    if proposal.get("applied") or proposal.get("status") == "applied" or state.get("apply_status") == "applied":
+        response_type = "edit_applied"
+    elif proposal.get("status") == "rejected" or state.get("apply_status") == "rejected":
+        response_type = "change_proposal"
+    else:
+        response_type = "change_proposal" if validation_status == "valid" else "proposal_error"
     updates: dict[str, Any] = {
         "response_type": response_type,
         "change_set_proposal": json_safe(proposal),
         "edit_archive": archive,
         "proposal_validation_status": validation_status,
         "validation_status": validation_status,
+        "edit_mode": state.get("edit_mode"),
+        "proposal_id": proposal.get("proposal_id"),
+        "proposal_status": proposal.get("status"),
+        "apply_status": state.get("apply_status") or proposal.get("apply_status"),
+        "applied_change_set_id": state.get("applied_change_set_id") or proposal.get("applied_change_set_id"),
+        "post_apply_validation_status": state.get("post_apply_validation_status") or proposal.get("post_apply_validation_status"),
     }
     if errors:
         updates["proposal_error_details"] = "; ".join(errors)
@@ -1683,7 +1897,7 @@ def _edit_archive_record_from_change(change: dict[str, Any], validation_status: 
         "file_path": path,
         "file": path,
         "operation": operation,
-        "status": "proposed" if validation_status == "valid" else "failed",
+        "status": "applied" if validation_status == "applied" else ("rejected" if validation_status == "rejected" else ("proposed" if validation_status == "valid" else "failed")),
         "summary": str(change.get("summary") or ""),
         "additions": additions,
         "deletions": deletions,
@@ -1700,7 +1914,10 @@ def _response_from_interrupted_state(state: dict[str, Any], request: AgentRunReq
     core = _core_state_from_graph(state)
     if not core.stop_reason:
         core.stop_reason = "waiting_approval"
-    return _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"})
+    return _response_with_change_set_payload(
+        _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"}),
+        state,
+    )
 
 
 def _graph_transition_event(
@@ -1936,6 +2153,65 @@ def _frame_is_edit_like(state: RepoOperatorGraphState) -> bool:
         except Exception:
             return False
     return edit_requested(frame)
+
+
+def _edit_mode_for_request(frame: Any) -> EditMode:
+    return "proposal_only" if edit_requested(frame) else "explanation_only"
+
+
+def _is_explanation_only_edit_request(state: RepoOperatorGraphState) -> bool:
+    frame = _task_frame(state)
+    if frame is None:
+        return False
+    text = str(getattr(frame, "user_goal", "") or "")
+    lowered = text.lower()
+    asks_how = bool(re.search(r"\bhow\s+(would|do|can|should)\b", lowered)) or any(term in text for term in ("어떻게", "어떤 식으로"))
+    mentions_change = bool(re.search(r"\b(change|edit|add|fix|implement|refactor|update)\b", lowered)) or any(term in text for term in ("추가", "고쳐", "구현", "수정"))
+    return asks_how and mentions_change
+
+
+def _final_text_for_change_set(state: RepoOperatorGraphState, proposal: dict[str, Any]) -> str:
+    del state
+    changes = [item for item in proposal.get("changes") or [] if isinstance(item, dict)]
+    files = [f"- {str(item.get('operation') or 'modify')}: `{str(item.get('path') or '')}`" for item in changes]
+    validation = proposal.get("validation") if isinstance(proposal.get("validation"), dict) else {}
+    validation_status = str(validation.get("status") or proposal.get("status") or "pending")
+    return "\n".join(
+        [
+            "I prepared a ChangeSetProposal. No files were modified.",
+            "",
+            "Proposed files:",
+            *(files or ["- No files"]),
+            "",
+            f"Validation result: {validation_status}.",
+            "Review the diff and approve Apply changes to write it to disk.",
+        ]
+    )
+
+
+def _final_text_for_applied_change_set(state: RepoOperatorGraphState, payload: dict[str, Any]) -> str:
+    del state
+    modified = [str(item) for item in payload.get("files_modified") or []]
+    created = [str(item) for item in payload.get("files_created") or []]
+    deleted = [str(item) for item in payload.get("files_deleted") or []]
+    renamed = [f"{item.get('from')} -> {item.get('to')}" for item in payload.get("files_renamed") or [] if isinstance(item, dict)]
+    lines = ["Applied the approved ChangeSetProposal. Files were modified."]
+    if modified:
+        lines.append("Modified: " + ", ".join(f"`{path}`" for path in modified))
+    if created:
+        lines.append("Created: " + ", ".join(f"`{path}`" for path in created))
+    if deleted:
+        lines.append("Deleted: " + ", ".join(f"`{path}`" for path in deleted))
+    if renamed:
+        lines.append("Renamed: " + ", ".join(f"`{path}`" for path in renamed))
+    validation = payload.get("validation_result") if isinstance(payload.get("validation_result"), dict) else {}
+    lines.append(f"Validation result: {validation.get('status') or 'valid'} before apply.")
+    return "\n".join(lines)
+
+
+def _final_text_for_failed_apply(payload: dict[str, Any]) -> str:
+    errors = "; ".join(str(item) for item in payload.get("errors") or []) or "unknown apply error"
+    return f"The approved ChangeSetProposal could not be applied. No success was recorded. Error: {errors}"
 
 
 def _with_checkpoint_bump(update: dict[str, Any]) -> dict[str, Any]:

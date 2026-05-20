@@ -194,12 +194,12 @@ def _next_edit_action(state: AgentCoreState, request: AgentRunRequest, frame: An
         return None
     edit_targets = current_edit_target_files(state, frame, request)
     if edit_targets:
-        if not _has_action(state, "generate_edit"):
+        if not (_has_action(state, "generate_change_set") or _has_action(state, "generate_edit")):
             return AgentAction(
-                type="generate_edit",
-                reason_summary="Prepare a proposed patch for validated current edit targets.",
+                type="generate_change_set",
+                reason_summary="Prepare a ChangeSetProposal for validated current edit targets.",
                 target_files=edit_targets,
-                expected_output="Proposed diff and before/after summary.",
+                expected_output="Validated ChangeSetProposal with before/after diff summary.",
                 payload={"task_frame": json_safe(frame), "current_edit_targets": edit_targets},
             )
         return AgentAction(type="final_answer", reason_summary="Report the proposed edit without claiming it was applied.")

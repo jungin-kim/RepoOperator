@@ -344,12 +344,16 @@ def _tool_operation(registry: ToolRegistry, action_type: str) -> str:
         return "analyze_repository"
     if action_type in {"search_files", "search_text"}:
         return "search"
-    if action_type == "read_file":
+    if action_type in {"read_file", "read_many_files"}:
         return "read_file"
     if action_type in {"preview_command", "inspect_git_state", "run_approved_command"}:
         return "command"
-    if action_type == "generate_edit":
+    if action_type in {"generate_change_set", "generate_edit"}:
         return "edit"
+    if action_type == "validate_change_set":
+        return "validation"
+    if action_type in {"apply_change_set", "create_file", "modify_file", "delete_file", "rename_file"}:
+        return "write"
     if action_type == "final_answer":
         return "final_answer"
     return action_type
@@ -420,7 +424,7 @@ def _tool_aggregate(
             "files_with_matches": files_with_matches[:20],
             "truncated": bool(payload.get("truncated")),
         })
-    elif action.type == "read_file":
+    elif action.type in {"read_file", "read_many_files"}:
         contents = payload.get("contents") or {}
         if isinstance(contents, dict):
             line_counts = {str(path): len(str(content).splitlines()) for path, content in contents.items()}
@@ -443,7 +447,7 @@ def _tool_aggregate(
             for key in ("read_only", "needs_approval", "blocked", "approval_id"):
                 if command_result.get(key) is not None:
                     aggregate[key] = command_result.get(key)
-    elif action.type == "generate_edit":
+    elif action.type in {"generate_change_set", "generate_edit"}:
         edit_archive = _edit_archive_from_payload(payload)
         aggregate["applied"] = bool(payload.get("applied"))
         aggregate["proposal_count"] = len(edit_archive)
@@ -456,6 +460,12 @@ def _tool_aggregate(
             aggregate["deletions"] = deletions
             aggregate["files"] = [str(item.get("file_path") or item.get("file") or "") for item in edit_archive if item.get("file_path") or item.get("file")]
         aggregate["safety_note"] = "proposal-only/no files modified"
+    elif action.type == "apply_change_set":
+        aggregate["applied"] = bool(payload.get("applied"))
+        aggregate["files_modified"] = payload.get("files_modified") or []
+        aggregate["files_created"] = payload.get("files_created") or []
+        aggregate["files_deleted"] = payload.get("files_deleted") or []
+        aggregate["files_renamed"] = payload.get("files_renamed") or []
 
     return json_safe(aggregate)
 
@@ -477,8 +487,13 @@ def _related_search_query(action: AgentAction, result: ToolResult | None) -> str
 
 
 def _proposal_id(action: AgentAction, result: ToolResult | None) -> str | None:
-    if action.type != "generate_edit":
+    if action.type not in {"generate_edit", "generate_change_set", "apply_change_set"}:
         return None
+    proposal = (result.payload if result else {}).get("change_set_proposal") if result else None
+    if isinstance(proposal, dict) and proposal.get("proposal_id"):
+        return str(proposal.get("proposal_id"))
+    if result and result.payload.get("proposal_id"):
+        return str(result.payload.get("proposal_id"))
     edit_archive = _edit_archive_from_payload(result.payload if result else {})
     files = [str(item.get("file_path") or item.get("file") or "") for item in edit_archive if item.get("file_path") or item.get("file")]
     return "proposal:" + ",".join(files[:4]) if files else None
@@ -486,6 +501,28 @@ def _proposal_id(action: AgentAction, result: ToolResult | None) -> str | None:
 
 def _edit_archive_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     archive: list[dict[str, Any]] = []
+    change_set = payload.get("change_set_proposal") if isinstance(payload.get("change_set_proposal"), dict) else None
+    if change_set:
+        for change in change_set.get("changes") or []:
+            if not isinstance(change, dict):
+                continue
+            file_path = str(change.get("path") or "").strip()
+            if not file_path:
+                continue
+            archive.append(
+                {
+                    "file_path": file_path,
+                    "file": file_path,
+                    "operation": str(change.get("operation") or "modify"),
+                    "status": "applied" if change_set.get("applied") else "proposed",
+                    "summary": str(change.get("summary") or ""),
+                    "additions": int(change.get("additions") or 0),
+                    "deletions": int(change.get("deletions") or 0),
+                    "diff_available": True,
+                    "proposal_id": str(change_set.get("proposal_id") or "proposal:" + file_path),
+                }
+            )
+        return archive
     for proposal in payload.get("edit_proposals") or []:
         if not isinstance(proposal, dict):
             continue
@@ -527,9 +564,11 @@ def _tool_phase(action_type: str, result_status: str | None = None) -> str:
         return "Safety"
     if action_type in {"search_files", "search_text", "inspect_repo_tree"}:
         return "Searching"
-    if action_type == "read_file":
+    if action_type in {"read_file", "read_many_files"}:
         return "Reading files"
-    if action_type == "generate_edit":
+    if action_type in {"generate_change_set", "generate_edit"}:
+        return "Editing"
+    if action_type in {"apply_change_set", "create_file", "modify_file", "delete_file", "rename_file"}:
         return "Editing"
     if action_type == "final_answer":
         return "Finished"
@@ -542,7 +581,11 @@ def _tool_label(action_type: str) -> str:
         "search_files": "Searching file names",
         "search_text": "Searching file contents",
         "read_file": "Reading repository files",
+        "read_many_files": "Reading repository files",
+        "generate_change_set": "Preparing change-set proposal",
         "generate_edit": "Preparing proposal-only edit",
+        "validate_change_set": "Validating change-set proposal",
+        "apply_change_set": "Applying approved change set",
         "preview_command": "Checking command safety",
         "inspect_git_state": "Checking command safety",
         "run_approved_command": "Running approved command",
@@ -554,10 +597,12 @@ def _tool_label(action_type: str) -> str:
 
 
 def _tool_current_action(action: AgentAction, tool_name: str) -> str:
-    if action.type == "read_file" and action.target_files:
+    if action.type in {"read_file", "read_many_files"} and action.target_files:
         return "Reading " + ", ".join(action.target_files[:6]) + "."
-    if action.type == "generate_edit" and action.target_files:
-        return "Preparing a proposal-only patch for " + ", ".join(action.target_files[:4]) + "."
+    if action.type in {"generate_change_set", "generate_edit"} and action.target_files:
+        return "Preparing a proposal-only change set for " + ", ".join(action.target_files[:4]) + "."
+    if action.type == "apply_change_set":
+        return "Applying the approved change set through the safe file writer."
     if action.type in {"preview_command", "inspect_git_state", "run_approved_command"} and action.command:
         return "Checking command through policy: " + " ".join(action.command)
     return f"Running `{tool_name}`."
@@ -566,8 +611,10 @@ def _tool_current_action(action: AgentAction, tool_name: str) -> str:
 def _tool_safety_note(action_type: str, result: ToolResult | None) -> str | None:
     if result and result.status == "waiting_approval":
         return "This command may change repository state, so approval is required before running it."
-    if action_type == "generate_edit":
+    if action_type in {"generate_change_set", "generate_edit"}:
         return "This action only creates a proposed patch and does not write files."
+    if action_type == "apply_change_set":
+        return "This action writes files only after explicit user approval."
     if action_type in {"preview_command", "inspect_git_state", "run_approved_command"}:
         return "Command safety is enforced by policy before execution."
     return None

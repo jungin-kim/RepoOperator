@@ -24,10 +24,19 @@ class ToolRegistryTests(unittest.TestCase):
                 "search_files",
                 "search_text",
                 "read_file",
+                "read_many_files",
                 "analyze_repository",
                 "preview_command",
                 "inspect_git_state",
                 "run_approved_command",
+                "run_validation_command",
+                "generate_change_set",
+                "validate_change_set",
+                "apply_change_set",
+                "create_file",
+                "modify_file",
+                "delete_file",
+                "rename_file",
                 "generate_edit",
                 "ask_clarification",
                 "final_answer",
@@ -45,7 +54,27 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(by_name["search_files"]["operation"], "search")
         self.assertTrue(by_name["search_text"]["read_only"])
         self.assertTrue(by_name["run_approved_command"]["requires_approval_by_default"])
+        self.assertTrue(by_name["apply_change_set"]["requires_approval_by_default"])
+        self.assertEqual(by_name["apply_change_set"]["operation"], "write")
+        self.assertEqual(by_name["generate_change_set"]["operation"], "edit")
+        self.assertEqual(by_name["validate_change_set"]["operation"], "validation")
+        self.assertFalse(by_name["generate_change_set"]["permission_required"])
+        for name in ("create_file", "modify_file", "delete_file", "rename_file"):
+            self.assertTrue(by_name[name]["permission_required"])
+            self.assertEqual(by_name[name]["side_effect_level"], "write")
         self.assertIn("input_schema", by_name["generate_edit"])
+        required = {
+            "name",
+            "operation",
+            "side_effect_level",
+            "permission_required",
+            "parallel_safe",
+            "workspace_bound",
+            "produces_artifact",
+            "produces_evidence",
+            "can_be_retried",
+        }
+        self.assertTrue(all(required.issubset(item) for item in specs))
         self.assertTrue(all(item.get("operation") for item in specs))
 
     def test_planner_action_types_come_from_registry(self) -> None:

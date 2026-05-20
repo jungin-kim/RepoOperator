@@ -467,6 +467,328 @@ class RunApprovedCommandTool(BaseTool):
         )
 
 
+class RunValidationCommandTool(RunApprovedCommandTool):
+    spec = ToolSpec(
+        name="run_validation_command",
+        description="Run an approved validation command through the command permission path.",
+        operation="command",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "array", "items": {"type": "string"}},
+                "approval_id": {"type": "string"},
+                "remember_for_session": {"type": "boolean"},
+            },
+            "required": ["command"],
+            "additionalProperties": True,
+        },
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="command",
+        permission_required=True,
+        parallel_safe=False,
+        produces_evidence=True,
+    )
+
+
+class ReadManyFilesTool(ReadFileTool):
+    spec = ToolSpec(
+        name="read_many_files",
+        description="Read a bounded batch of supported text files inside the repository.",
+        operation="read_file",
+        input_schema={
+            "type": "object",
+            "properties": {"target_files": {"type": "array", "items": {"type": "string"}, "maxItems": 20}},
+            "required": ["target_files"],
+            "additionalProperties": True,
+        },
+        read_only=True,
+        concurrency_safe=True,
+        max_result_chars=800_000,
+        side_effect_level="read",
+        produces_evidence=True,
+    )
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        updated = {**payload, "target_files": list(payload.get("target_files") or [])[:20]}
+        return super().call(updated, context)
+
+
+class GenerateChangeSetTool(BaseTool):
+    spec = ToolSpec(
+        name="generate_change_set",
+        description="Generate a multi-file ChangeSetProposal without writing files.",
+        operation="edit",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "target_files": {"type": "array", "items": {"type": "string"}},
+                "new_file_paths": {"type": "array", "items": {"type": "string"}},
+                "delete_plan": {"type": "array", "items": {"type": "string"}},
+                "rename_plan": {"type": "array", "items": {"type": "object"}},
+                "change_plan": {"type": "object"},
+                "constraints": {"type": "array", "items": {"type": "string"}},
+                "validation_requirements": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": True,
+        },
+        read_only=False,
+        concurrency_safe=False,
+        max_result_chars=1_200_000,
+        side_effect_level="none",
+        permission_required=False,
+        parallel_safe=False,
+        produces_artifact=True,
+        produces_evidence=True,
+    )
+
+    def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
+        return PermissionDecision.allow("Change-set generation is proposal-only and writes no files.")
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        from repooperator_worker.agent_core.change_set import (
+            ChangePlan,
+            ChangeSetProposal,
+            ProposedFileChange,
+            stable_proposal_id,
+            validate_change_set,
+        )
+
+        repo = resolve_project_path(context.request.project_path).resolve()
+        target_files = [str(item).strip().lstrip("/") for item in payload.get("target_files") or [] if str(item).strip()]
+        evidence_contents: dict[str, str] = {}
+        for relative_path in target_files[:12]:
+            target = validate_repo_file(context.request.project_path, relative_path)
+            if target.is_file() and is_supported_text_file(target):
+                evidence_contents[relative_path] = target.read_text(encoding="utf-8", errors="replace")
+
+        raw_proposal = model_generate_change_set_proposal(
+            task=context.request.task,
+            repo=str(repo),
+            evidence_contents=evidence_contents,
+            payload=payload,
+        )
+        if raw_proposal is None:
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="failed",
+                observation="No safe change-set proposal could be generated.",
+                files_read=list(evidence_contents),
+                payload={"proposal_error": "model returned no change-set proposal", "applied": False},
+            )
+
+        proposal = change_set_from_model_payload(
+            raw_proposal,
+            task=context.request.task,
+            evidence_contents=evidence_contents,
+            payload=payload,
+        )
+        validation = validate_change_set(proposal, repo=context.request.project_path)
+        if validation.status != "valid":
+            repaired = repair_change_set_proposal(
+                raw_proposal,
+                task=context.request.task,
+                evidence_contents=evidence_contents,
+                validation_errors=validation.errors,
+                payload=payload,
+            )
+            if repaired is not None:
+                repaired_proposal = change_set_from_model_payload(
+                    repaired,
+                    task=context.request.task,
+                    evidence_contents=evidence_contents,
+                    payload=payload,
+                )
+                repaired_validation = validate_change_set(repaired_proposal, repo=context.request.project_path)
+                if repaired_validation.status == "valid":
+                    proposal = repaired_proposal
+                    validation = repaired_validation
+
+        proposal.validation = validation
+        proposal.status = validation.status
+        proposal.validation_status = validation.status
+        proposal.proposal_error = "; ".join(validation.errors) if validation.errors else None
+        status = "success" if validation.status == "valid" else "failed"
+        observation = (
+            "Prepared a validated change-set proposal. No file was written."
+            if status == "success"
+            else "Change-set proposal validation failed. No file was written."
+        )
+        return ToolResult(
+            tool_name=self.spec.name,
+            status=status,
+            observation=observation,
+            files_read=list(evidence_contents),
+            payload={"change_set_proposal": proposal.model_dump(), "applied": False, **({"proposal_error": proposal.proposal_error} if proposal.proposal_error else {})},
+            next_recommended_action="await_change_approval" if status == "success" else None,
+        )
+
+
+class ValidateChangeSetTool(BaseTool):
+    spec = ToolSpec(
+        name="validate_change_set",
+        description="Validate a ChangeSetProposal without writing files.",
+        operation="validation",
+        input_schema={"type": "object", "properties": {"change_set_proposal": {"type": "object"}}, "required": ["change_set_proposal"], "additionalProperties": True},
+        read_only=True,
+        concurrency_safe=True,
+        side_effect_level="none",
+        produces_evidence=True,
+    )
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        from repooperator_worker.agent_core.change_set import change_set_from_payload, validate_change_set
+
+        proposal_payload = payload.get("change_set_proposal") if isinstance(payload.get("change_set_proposal"), dict) else payload
+        proposal = change_set_from_payload(proposal_payload)
+        validation = validate_change_set(proposal, repo=context.request.project_path)
+        proposal.validation = validation
+        proposal.status = validation.status
+        proposal.validation_status = validation.status
+        proposal.proposal_error = "; ".join(validation.errors) if validation.errors else None
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success" if validation.status == "valid" else "failed",
+            observation=f"Change-set validation status: {validation.status}.",
+            payload={"change_set_proposal": proposal.model_dump(), "validation": validation.model_dump()},
+        )
+
+
+class ApplyChangeSetTool(BaseTool):
+    spec = ToolSpec(
+        name="apply_change_set",
+        description="Apply an approved persisted ChangeSetProposal to disk through the safe apply path.",
+        operation="write",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "proposal_id": {"type": "string"},
+                "approval_decision": {"type": "object"},
+                "change_set_snapshot": {"type": "object"},
+            },
+            "required": ["proposal_id"],
+            "additionalProperties": True,
+        },
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="write",
+        permission_required=True,
+        parallel_safe=False,
+        workspace_bound=True,
+        produces_artifact=True,
+        produces_evidence=True,
+        can_be_retried=False,
+        max_result_chars=1_200_000,
+    )
+
+    def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
+        decision = payload.get("approval_decision") if isinstance(payload.get("approval_decision"), dict) else {}
+        if str(decision.get("decision") or "").lower() == "allow":
+            return PermissionDecision.allow("User approved applying this change set.")
+        return PermissionDecision.ask("Applying a change set writes files and requires approval.")
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        from repooperator_worker.agent_core.apply_change_set import apply_change_set_for_run
+
+        result = apply_change_set_for_run(
+            run_id=context.run_id,
+            project_path=context.request.project_path,
+            proposal_id=str(payload.get("proposal_id") or ""),
+            approval_decision=payload.get("approval_decision") if isinstance(payload.get("approval_decision"), dict) else {},
+            fallback_change_set=payload.get("change_set_snapshot") if isinstance(payload.get("change_set_snapshot"), dict) else None,
+        )
+        changed = result.files_modified + result.files_created + result.files_deleted + [item["to"] for item in result.files_renamed]
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success" if result.applied else "failed",
+            observation="Applied the approved change set." if result.applied else "Failed to apply the approved change set.",
+            files_changed=changed,
+            payload=result.model_dump(),
+            next_recommended_action="post_apply_validation" if result.applied else None,
+        )
+
+
+class _DirectFileWriteTool(BaseTool):
+    operation_name = "write"
+
+    def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
+        return PermissionDecision.ask("Direct file writes require explicit approval and should normally use apply_change_set.")
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="failed",
+            observation="Direct file mutation tools are registered for audit visibility; normal writes must go through apply_change_set.",
+            payload={"errors": ["use apply_change_set for proposed file writes"]},
+        )
+
+
+class CreateFileTool(_DirectFileWriteTool):
+    spec = ToolSpec(
+        name="create_file",
+        description="Create a file after explicit approval; normal proposed writes use apply_change_set.",
+        operation="write",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": True},
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="write",
+        permission_required=True,
+        parallel_safe=False,
+        can_be_retried=False,
+    )
+
+
+class ModifyFileTool(_DirectFileWriteTool):
+    spec = ToolSpec(
+        name="modify_file",
+        description="Modify a file after explicit approval; normal proposed writes use apply_change_set.",
+        operation="write",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": True},
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="write",
+        permission_required=True,
+        parallel_safe=False,
+        can_be_retried=False,
+    )
+
+
+class DeleteFileTool(_DirectFileWriteTool):
+    spec = ToolSpec(
+        name="delete_file",
+        description="Delete a file after explicit approval; normal proposed writes use apply_change_set.",
+        operation="write",
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}, "justification": {"type": "string"}}, "required": ["path", "justification"], "additionalProperties": True},
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="write",
+        permission_required=True,
+        parallel_safe=False,
+        can_be_retried=False,
+    )
+
+
+class RenameFileTool(_DirectFileWriteTool):
+    spec = ToolSpec(
+        name="rename_file",
+        description="Rename a file after explicit approval; normal proposed writes use apply_change_set.",
+        operation="write",
+        input_schema={"type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}}, "required": ["from", "to"], "additionalProperties": True},
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="write",
+        permission_required=True,
+        parallel_safe=False,
+        can_be_retried=False,
+    )
+
+
 class GenerateEditTool(BaseTool):
     spec = ToolSpec(
         name="generate_edit",
@@ -755,6 +1077,178 @@ Schema:
 }
 Preserve existing class structure and lifecycle methods unless the requested change requires otherwise.
 """
+
+
+CHANGE_SET_PROPOSAL_PROMPT = """\
+You are RepoOperator's change-set generator. Return JSON only.
+Prepare a proposal-only multi-file ChangeSetProposal. Do not claim changes were applied.
+Store complete proposed file content in the JSON, not markdown snippets.
+Schema:
+{
+  "plan": {
+    "summary": "short plan summary",
+    "target_files": [],
+    "operations": ["modify"],
+    "evidence_files": [],
+    "constraints": [],
+    "validation_requirements": []
+  },
+  "changes": [
+    {
+      "path": "repo-relative path",
+      "operation": "modify | create | delete | rename",
+      "rename_to": null,
+      "summary": "short user-visible summary",
+      "proposed_content": "complete replacement content for create/modify",
+      "delete_justification": null,
+      "risk_notes": []
+    }
+  ]
+}
+Rules:
+- Use modify for existing files, create for new files, delete only when explicitly justified, rename only when the target path is clear.
+- proposed_content must be complete source/text with no markdown fences.
+- Never write files; this is only a proposal.
+"""
+
+
+def model_generate_change_set_proposal(
+    *,
+    task: str,
+    repo: str,
+    evidence_contents: dict[str, str],
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    try:
+        raw = OpenAICompatibleModelClient().generate_text(
+            ModelGenerationRequest(
+                system_prompt=CHANGE_SET_PROPOSAL_PROMPT,
+                user_prompt=json.dumps(
+                    {
+                        "task": task,
+                        "repo": repo,
+                        "change_plan": json_safe(payload.get("change_plan") or {}),
+                        "target_files": payload.get("target_files") or [],
+                        "new_file_paths": payload.get("new_file_paths") or [],
+                        "delete_plan": payload.get("delete_plan") or [],
+                        "rename_plan": payload.get("rename_plan") or [],
+                        "constraints": payload.get("constraints") or [],
+                        "coding_style_notes": payload.get("coding_style_notes") or [],
+                        "validation_requirements": payload.get("validation_requirements") or [],
+                        "evidence_files": {path: content[:80_000] for path, content in evidence_contents.items()},
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        parsed = parse_json_object(raw)
+        return parsed if parsed else None
+    except Exception:
+        return None
+
+
+def change_set_from_model_payload(
+    raw_payload: dict[str, Any],
+    *,
+    task: str,
+    evidence_contents: dict[str, str],
+    payload: dict[str, Any],
+):
+    from repooperator_worker.agent_core.change_set import ChangePlan, ChangeSetProposal, ProposedFileChange, stable_proposal_id
+
+    plan_payload = raw_payload.get("plan") if isinstance(raw_payload.get("plan"), dict) else {}
+    changes_payload = raw_payload.get("changes") if isinstance(raw_payload.get("changes"), list) else []
+    target_files = [str(item).strip().lstrip("/") for item in plan_payload.get("target_files") or payload.get("target_files") or [] if str(item).strip()]
+    plan = ChangePlan(
+        summary=str(plan_payload.get("summary") or payload.get("reason_summary") or task),
+        target_files=target_files,
+        operations=[item for item in plan_payload.get("operations") or [] if item in {"modify", "create", "delete", "rename"}],
+        evidence_files=[str(item) for item in plan_payload.get("evidence_files") or evidence_contents.keys()],
+        constraints=[str(item) for item in plan_payload.get("constraints") or payload.get("constraints") or []],
+        validation_requirements=[str(item) for item in plan_payload.get("validation_requirements") or payload.get("validation_requirements") or []],
+    )
+    changes = []
+    for item in changes_payload:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("file") or "").strip().lstrip("/")
+        if not path:
+            continue
+        operation = item.get("operation") if item.get("operation") in {"modify", "create", "delete", "rename"} else ("modify" if path in evidence_contents else "create")
+        original = evidence_contents.get(path)
+        change = ProposedFileChange(
+            path=path,
+            operation=operation,
+            summary=str(item.get("summary") or "Prepare proposed file change."),
+            original_content=original,
+            proposed_content=None if operation == "delete" else str(item.get("proposed_content") or ""),
+            rename_to=item.get("rename_to") if item.get("rename_to") is not None else None,
+            delete_justification=item.get("delete_justification") if item.get("delete_justification") is not None else None,
+            risk_notes=[str(note) for note in item.get("risk_notes") or []],
+        )
+        changes.append(_change_with_diff_counts(change))
+    if not plan.operations:
+        plan.operations = sorted({change.operation for change in changes})  # type: ignore[assignment]
+    if not plan.target_files:
+        plan.target_files = [change.path for change in changes]
+    return ChangeSetProposal(
+        proposal_id=str(raw_payload.get("proposal_id") or stable_proposal_id(plan.summary, plan.target_files)),
+        plan=plan,
+        changes=changes,
+    )
+
+
+def repair_change_set_proposal(
+    raw_payload: dict[str, Any],
+    *,
+    task: str,
+    evidence_contents: dict[str, str],
+    validation_errors: list[str],
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    stripped = json_safe(raw_payload)
+    repaired_any = False
+    for change in stripped.get("changes") or []:
+        if not isinstance(change, dict) or not isinstance(change.get("proposed_content"), str):
+            continue
+        without_fences = strip_markdown_fences(change["proposed_content"])
+        if without_fences != change["proposed_content"]:
+            change["proposed_content"] = without_fences
+            repaired_any = True
+    if repaired_any:
+        return stripped
+    try:
+        raw = OpenAICompatibleModelClient().generate_text(
+            ModelGenerationRequest(
+                system_prompt=(
+                    "Repair this RepoOperator ChangeSetProposal. Return JSON only. "
+                    "Fix the validation errors. All create/modify proposed_content values must be complete files with no markdown fences."
+                ),
+                user_prompt=json.dumps(
+                    {
+                        "task": task,
+                        "invalid_change_set": json_safe(raw_payload),
+                        "validation_errors": validation_errors,
+                        "evidence_files": {path: content[:80_000] for path, content in evidence_contents.items()},
+                        "context": json_safe(payload),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        repaired = parse_json_object(raw)
+        return repaired if repaired else None
+    except Exception:
+        return None
+
+
+def _change_with_diff_counts(change):
+    before = "" if change.operation == "create" else str(change.original_content or "")
+    after = "" if change.operation == "delete" else str(change.proposed_content or "")
+    diff = summarize_diff(before, after, limit=1_000_000)
+    change.additions = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    change.deletions = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
+    return change
 
 
 def model_generate_edit_proposal(relative_path: str, content: str, task: str, context: dict[str, Any] | None = None) -> dict[str, Any] | None:

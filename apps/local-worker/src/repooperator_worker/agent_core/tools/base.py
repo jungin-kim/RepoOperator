@@ -17,6 +17,8 @@ ToolOperation = Literal[
     "analyze_repository",
     "command",
     "edit",
+    "validation",
+    "write",
     "final_answer",
     "clarification",
     "custom",
@@ -33,6 +35,13 @@ class ToolSpec:
     concurrency_safe: bool
     requires_approval_by_default: bool = False
     max_result_chars: int = 100_000
+    side_effect_level: Literal["none", "read", "write", "command"] = "none"
+    permission_required: bool = False
+    parallel_safe: bool = True
+    workspace_bound: bool = True
+    produces_artifact: bool = False
+    produces_evidence: bool = False
+    can_be_retried: bool = True
 
     def model_dump(self) -> dict[str, Any]:
         return json_safe(
@@ -45,6 +54,13 @@ class ToolSpec:
                 "concurrency_safe": self.concurrency_safe,
                 "requires_approval_by_default": self.requires_approval_by_default,
                 "max_result_chars": self.max_result_chars,
+                "side_effect_level": self.side_effect_level,
+                "permission_required": self.permission_required,
+                "parallel_safe": self.parallel_safe,
+                "workspace_bound": self.workspace_bound,
+                "produces_artifact": self.produces_artifact,
+                "produces_evidence": self.produces_evidence,
+                "can_be_retried": self.can_be_retried,
             }
         )
 
@@ -110,9 +126,9 @@ class BaseTool:
     def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
         if self.spec.read_only:
             return PermissionDecision.allow("Read-only tool.")
-        if self.spec.name == "generate_edit":
-            return PermissionDecision.allow("Edit generation is proposal-only and writes no files.")
-        if self.spec.requires_approval_by_default:
+        if self.spec.name in {"generate_edit", "generate_change_set", "validate_change_set"}:
+            return PermissionDecision.allow("Change-set proposal tools are non-mutating and write no files.")
+        if self.spec.requires_approval_by_default or self.spec.permission_required:
             return PermissionDecision.ask("Tool requires approval by default.")
         return PermissionDecision.allow("Tool allowed by default policy.")
 

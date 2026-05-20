@@ -208,15 +208,25 @@ export type AgentRunPayload = {
   activity_events?: AgentActivityEvent[];
   edit_archive?: EditArchiveRecord[];
   change_set_proposal?: ChangeSetProposalPayload | null;
+  edit_mode?: string | null;
+  proposal_id?: string | null;
+  proposal_status?: string | null;
+  apply_status?: string | null;
+  applied_change_set_id?: string | null;
+  post_apply_validation_status?: string | null;
   loop_iteration?: number;
   stop_reason?: string | null;
 };
 
 export type ChangeSetProposalPayload = {
+  proposal_id?: string;
   plan?: {
     summary?: string;
     target_files?: string[];
     operations?: string[];
+    evidence_files?: string[];
+    constraints?: string[];
+    validation_requirements?: string[];
   };
   changes?: Array<{
     path: string;
@@ -224,7 +234,12 @@ export type ChangeSetProposalPayload = {
     summary?: string;
     original_content?: string | null;
     proposed_content?: string | null;
+    rename_to?: string | null;
+    delete_justification?: string | null;
     risk_notes?: string[];
+    additions?: number;
+    deletions?: number;
+    validation_status?: string | null;
   }>;
   status?: string;
   validation?: {
@@ -233,6 +248,11 @@ export type ChangeSetProposalPayload = {
     warnings?: string[];
   } | null;
   proposal_error?: string | null;
+  applied?: boolean;
+  apply_status?: string | null;
+  applied_change_set_id?: string | null;
+  post_apply_validation_status?: string | null;
+  applied_at?: string | null;
 };
 
 export type AgentActivityEvent = {
@@ -690,6 +710,30 @@ export async function writeRepositoryFile(input: {
     body: JSON.stringify(input),
   });
   return parseWorkerResponse<FileWritePayload>(response);
+}
+
+export async function applyChangeSet(input: {
+  run_id: string;
+  proposal_id: string;
+}): Promise<AgentRunPayload> {
+  const response = await fetch(`/api/worker/agent/runs/${encodeURIComponent(input.run_id)}/change-set/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proposal_id: input.proposal_id, decision: "allow" }),
+  });
+  return parseWorkerResponse<AgentRunPayload>(response);
+}
+
+export async function rejectChangeSet(input: {
+  run_id: string;
+  proposal_id: string;
+}): Promise<AgentRunPayload> {
+  const response = await fetch(`/api/worker/agent/runs/${encodeURIComponent(input.run_id)}/change-set/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proposal_id: input.proposal_id, decision: "deny" }),
+  });
+  return parseWorkerResponse<AgentRunPayload>(response);
 }
 
 export async function generateApplySummary(input: {

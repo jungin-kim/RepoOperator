@@ -237,6 +237,12 @@ class AgentRunResponse(BaseModel):
     activity_events: list[dict] = []
     edit_archive: list[dict] = []
     change_set_proposal: dict | None = None
+    edit_mode: str | None = None
+    proposal_id: str | None = None
+    proposal_status: str | None = None
+    apply_status: str | None = None
+    applied_change_set_id: str | None = None
+    post_apply_validation_status: str | None = None
     loop_iteration: int = 0
     stop_reason: str | None = None
 

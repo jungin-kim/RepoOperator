@@ -1551,13 +1551,13 @@ export function ChatApp() {
     }
   }
 
-  function handleProposalStatusChange(id: string, status: ProposalStatus, _message?: string) {
+  function handleProposalStatusChange(id: string, status: ProposalStatus, _message?: string, result?: AgentRunPayload) {
     let appliedProposal: ChangeProposal | null = null;
     let proposalMetadata: AgentRunPayload | undefined;
     const nextMessages = messages.map((msg) => {
       if (msg.proposal?.id === id) {
         appliedProposal = msg.proposal;
-        proposalMetadata = msg.metadata;
+        proposalMetadata = result ?? msg.metadata;
         const updatedArchive = msg.metadata?.edit_archive?.map((record) => ({
           ...record,
           status,
@@ -1572,8 +1572,19 @@ export function ChatApp() {
         }));
         return {
           ...msg,
-          proposal: { ...msg.proposal, status },
-          metadata: msg.metadata
+          content: result?.response ?? msg.content,
+          proposal: {
+            ...msg.proposal,
+            status,
+            appliedAt: result?.change_set_proposal?.applied_at ?? msg.proposal.appliedAt,
+            changeSetProposal: result?.change_set_proposal ?? msg.proposal.changeSetProposal,
+          },
+          metadata: result
+            ? {
+                ...result,
+                edit_archive: result.edit_archive?.length ? result.edit_archive : updatedArchive ?? msg.metadata?.edit_archive,
+              }
+            : msg.metadata
             ? {
                 ...msg.metadata,
                 edit_archive: updatedArchive ?? msg.metadata.edit_archive,
@@ -1586,7 +1597,7 @@ export function ChatApp() {
     setMessages(nextMessages);
     updateActiveThread(nextMessages);
 
-    if (status === "applied" && appliedProposal && repoResult) {
+    if (status === "applied" && appliedProposal && repoResult && !result) {
       void appendApplySummary(appliedProposal, proposalMetadata, nextMessages);
     }
   }

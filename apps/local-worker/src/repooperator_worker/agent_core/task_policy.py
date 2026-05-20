@@ -66,7 +66,7 @@ def minimum_evidence_missing_for_task(state: AgentCoreState, request: AgentRunRe
             missing.append("repository structure")
         if not _has_likely_implementation_evidence(state):
             missing.append("likely implementation area")
-        if _has_action(state, "generate_edit") and not _latest_valid_edit_proposal(state):
+        if (_has_action(state, "generate_change_set") or _has_action(state, "generate_edit")) and not _latest_valid_edit_proposal(state):
             missing.append("validated proposal-only change")
     return _dedupe(missing)
 
@@ -171,7 +171,7 @@ def next_recovery_action(
                 ["Repo-relative candidate paths"],
             )
 
-    if failed_action.type == "generate_edit":
+    if failed_action.type in {"generate_change_set", "generate_edit"}:
         if result.payload.get("proposal_error"):
             return AgentAction(type="final_answer", reason_summary="Report why no validated proposal could be prepared.")
         return next_evidence_gathering_action(state, request, frame)
@@ -263,14 +263,18 @@ def action_operation(action_type: str) -> str:
         return "list_files"
     if action_type in {"search_files", "search_text"}:
         return "search"
-    if action_type == "read_file":
+    if action_type in {"read_file", "read_many_files"}:
         return "read_file"
     if action_type == "analyze_repository":
         return "analyze_repository"
     if action_type in {"preview_command", "inspect_git_state", "run_approved_command"}:
         return "command"
-    if action_type == "generate_edit":
+    if action_type in {"generate_change_set", "generate_edit"}:
         return "edit"
+    if action_type == "validate_change_set":
+        return "validation"
+    if action_type in {"apply_change_set", "create_file", "modify_file", "delete_file", "rename_file"}:
+        return "write"
     if action_type == "ask_clarification":
         return "clarification"
     if action_type == "final_answer":
@@ -648,9 +652,9 @@ def _edit_requested(frame: Any) -> bool:
     tools = {str(item) for item in getattr(frame, "likely_needed_tools", []) or []}
     outputs = {str(item).lower() for item in getattr(frame, "requested_outputs", []) or []}
     goal = str(getattr(frame, "user_goal", "") or "").lower()
-    if "generate_edit" in tools or any("edit" in item or "patch" in item or "change" in item for item in outputs):
+    if "generate_change_set" in tools or "generate_edit" in tools or any("edit" in item or "patch" in item or "change" in item for item in outputs):
         return True
-    return bool(re.search(r"\b(add|implement|fix|refactor|change|update|support|repair)\b", goal))
+    return bool(re.search(r"\b(add|implement|fix|refactor|change|update|support)\b", goal)) or any(term in goal for term in ("추가", "고쳐", "구현", "수정"))
 
 
 def _followup_requested(frame: Any) -> bool:
@@ -668,7 +672,7 @@ def _evidence_attempts_exhausted(state: AgentCoreState, request: AgentRunRequest
 
 
 def _latest_valid_edit_proposal(state: AgentCoreState) -> bool:
-    return any(result.payload.get("edit_proposals") for result in state.action_results)
+    return any(result.payload.get("change_set_proposal") or result.payload.get("edit_proposals") for result in state.action_results)
 
 
 def _is_ineffective_result(action: AgentAction, result: ActionResult) -> bool:
@@ -684,7 +688,7 @@ def _is_ineffective_result(action: AgentAction, result: ActionResult) -> bool:
 def _subtask_has_completed_enough(subtask: AgentSubtask, action: AgentAction, result: ActionResult, operation: str) -> bool:
     if result.status not in {"success", "skipped"}:
         return False
-    if action.type == "generate_edit":
+    if action.type in {"generate_change_set", "generate_edit"}:
         return bool(result.payload.get("edit_proposals") or result.payload.get("proposal_error"))
     return operation in subtask.planned_operations
 

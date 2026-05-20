@@ -372,11 +372,11 @@ def wait_for_approval(run_id: str, approval: dict[str, Any]) -> dict[str, Any]:
         pass
     append_activity(
         run_id,
-        phase="Commands",
-        label="Waiting for command approval",
+        phase="Editing" if approval.get("kind") == "change_set_apply" else "Commands",
+        label="Waiting for change-set approval" if approval.get("kind") == "change_set_apply" else "Waiting for command approval",
         status="waiting",
         event_type="approval_waiting",
-        detail=str(approval.get("reason") or "Command requires approval."),
+        detail=str(approval.get("reason") or ("Change set requires approval." if approval.get("kind") == "change_set_apply" else "Command requires approval.")),
     )
     return meta
 
@@ -436,6 +436,15 @@ def _is_waiting_for_approval(response: AgentRunResponse) -> bool:
 
 def _approval_resume_payload(response: AgentRunResponse, request: AgentRunRequest) -> dict[str, Any]:
     payload = dict(response.command_approval or {})
+    if response.change_set_proposal and response.stop_reason == "waiting_approval":
+        payload.update(
+            {
+                "kind": "change_set_apply",
+                "proposal_id": response.change_set_proposal.get("proposal_id"),
+                "change_set_proposal": response.change_set_proposal,
+                "reason": "Applying this validated change set will modify files and requires approval.",
+            }
+        )
     payload.update(
         {
             "runtime": "langgraph" if response.agent_flow == "langgraph" else "legacy",
@@ -484,11 +493,13 @@ def _safe_final_result(response: AgentRunResponse, *, run_id: str) -> dict[str, 
 
 def _record_response_events(run_id: str, request: AgentRunRequest, response: AgentRunResponse) -> None:
     if _is_waiting_for_approval(response):
+        phase = "Editing" if response.change_set_proposal else "Commands"
+        label = "Waiting for change-set approval" if response.change_set_proposal else "Waiting for command approval"
         append_activity(
             run_id,
             request=request,
-            phase="Commands",
-            label="Waiting for command approval",
+            phase=phase,
+            label=label,
             detail=response.stop_reason or response.response_type,
             status="waiting",
             event_type="approval_waiting",
@@ -531,7 +542,7 @@ def _record_response_events(run_id: str, request: AgentRunRequest, response: Age
             run_id,
             request=request,
             phase="Editing",
-            label=f"Modified {Path(file_path).name or file_path}",
+            label=f"{'Applied' if record.get('status') == 'applied' else 'Proposed'} {Path(file_path).name or file_path}",
             detail=f"+{record.get('additions', 0)} -{record.get('deletions', 0)}",
             status="completed",
             event_type="file_edit",

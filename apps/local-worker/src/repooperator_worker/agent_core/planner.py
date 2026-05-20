@@ -148,7 +148,7 @@ def validate_model_next_action(payload: dict[str, Any], request: AgentRunRequest
     expected = str(payload.get("expected_output") or "")
     visible_work_note = validate_visible_work_note(payload.get("visible_work_note"))
 
-    if action_type in {"read_file", "generate_edit"}:
+    if action_type in {"read_file", "generate_edit", "generate_change_set"}:
         resolved = resolve_target_files(request, target_files, preferred=known_context_files(request, state))
         if not resolved:
             queries = _dedupe([*target_files, *target_symbols, *search_queries, *file_globs])
@@ -183,7 +183,7 @@ def validate_model_next_action(payload: dict[str, Any], request: AgentRunRequest
         unread_valid = [path for path in valid_edit_targets if path not in state.files_read]
         if unread_valid:
             return AgentAction(type="read_file", reason_summary="Read target files before preparing an edit proposal.", target_files=unread_valid, expected_output="File contents for edit proposal.", payload=_action_payload_with_note({}, visible_work_note))
-        return AgentAction(type="generate_edit", reason_summary=reason, target_files=list(valid_edit_targets), expected_output=expected, payload=_action_payload_with_note({"source": "model_planner", "current_edit_targets": list(valid_edit_targets)}, visible_work_note))
+        return AgentAction(type="generate_change_set", reason_summary=reason, target_files=list(valid_edit_targets), expected_output=expected, payload=_action_payload_with_note({"source": "model_planner", "current_edit_targets": list(valid_edit_targets)}, visible_work_note))
 
     if action_type == "search_files":
         queries = _dedupe([*search_queries, *target_files, *file_globs, *target_symbols])
@@ -462,6 +462,8 @@ def pending_commit_context(frame: TaskFrame) -> bool:
 
 
 def edit_requested(frame: TaskFrame) -> bool:
+    if explanation_only_requested(frame.user_goal, frame.requested_outputs):
+        return False
     tool_hints = {str(item).strip() for item in frame.likely_needed_tools}
     caps = {str(item).strip() for item in frame.likely_capabilities}
     requested_outputs = {_normalise_marker(item) for item in frame.requested_outputs}
@@ -472,7 +474,9 @@ def edit_requested(frame: TaskFrame) -> bool:
         "implementation_" + "im" + "provement",
     }
     structured_edit = (
-        "generate_edit" in tool_hints
+        "generate_change_set" in tool_hints
+        or "generate_edit" in tool_hints
+        or "weak_tool:generate_change_set" in caps
         or "weak_tool:generate_edit" in caps
         or "weak_edit" in caps
         or bool(requested_outputs & structured_edit_outputs)
@@ -485,7 +489,17 @@ def edit_requested_text(text: str) -> bool:
     # RequestUnderstanding facts. Do not expand this into language-specific
     # request routing; prefer likely_needed_tools/requested_outputs instead.
     lowered = (text or "").lower()
-    return bool(re.search(r"\b(edit|patch)\b", lowered))
+    return bool(re.search(r"\b(edit|patch|add|fix|implement|refactor|change|update|support)\b", lowered)) or any(
+        term in text for term in ("추가", "고쳐", "구현", "수정")
+    )
+
+
+def explanation_only_requested(text: str, requested_outputs: list[str] | None = None) -> bool:
+    lowered = (text or "").lower().strip()
+    outputs = " ".join(str(item).lower() for item in requested_outputs or [])
+    asks_how = bool(re.search(r"\bhow\s+(would|do|can|should)\b", lowered)) or any(term in text for term in ("어떻게", "어떤 식으로"))
+    asks_apply = bool(re.search(r"\b(apply|generate patch|prepare patch)\b", lowered)) or any(term in text for term in ("해줘", "적용", "패치"))
+    return asks_how and not asks_apply and "patch" not in outputs and "diff" not in outputs
 
 
 def validate_visible_work_note(value: Any) -> dict[str, Any] | None:

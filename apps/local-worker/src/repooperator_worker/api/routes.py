@@ -589,6 +589,38 @@ def agent_run_cancel(run_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/agent/runs/{run_id}/change-set/apply")
+def agent_run_apply_change_set(run_id: str, payload: dict) -> dict:
+    try:
+        return resume_approval(
+            run_id,
+            {
+                "decision": payload.get("decision") or "allow",
+                "kind": "change_set_apply",
+                "proposal_id": payload.get("proposal_id"),
+            },
+        )
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@router.post("/agent/runs/{run_id}/change-set/reject")
+def agent_run_reject_change_set(run_id: str, payload: dict) -> dict:
+    try:
+        return resume_approval(
+            run_id,
+            {
+                "decision": payload.get("decision") or "deny",
+                "kind": "change_set_apply",
+                "proposal_id": payload.get("proposal_id"),
+            },
+        )
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
 @router.post("/agent/queue")
 def agent_queue_create(payload: dict) -> dict:
     try:

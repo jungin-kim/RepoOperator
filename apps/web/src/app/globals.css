@@ -2512,6 +2512,57 @@ select {
   border-bottom: 1px solid var(--border);
 }
 
+.proposal-file-list {
+  display: grid;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.proposal-file-row {
+  display: grid;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.proposal-file-row:last-child {
+  border-bottom: 0;
+}
+
+.proposal-file-row-selected {
+  background: rgba(31, 106, 83, 0.08);
+}
+
+.proposal-file-op,
+.proposal-file-validation {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.proposal-file-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+.proposal-file-stats {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
 .proposal-status-badge {
   flex-shrink: 0;
   padding: 2px 8px;
@@ -2534,6 +2585,7 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   padding: 5px 14px;
   font-size: 0.77rem;
   font-weight: 600;
@@ -2541,6 +2593,20 @@ select {
   letter-spacing: 0.03em;
   background: rgba(0, 0, 0, 0.02);
   border-bottom: 1px solid var(--border);
+}
+
+.proposal-risk-note,
+.proposal-validation-errors {
+  margin: 0;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.proposal-validation-errors {
+  color: #a34539;
+  background: rgba(192, 57, 43, 0.06);
 }
 
 .proposal-diff-toggle {

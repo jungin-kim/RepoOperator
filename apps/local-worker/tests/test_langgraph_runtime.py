@@ -115,6 +115,9 @@ class LangGraphRuntimeTests(unittest.TestCase):
             "repair_change_set",
             "ask_clarification",
             "await_approval",
+            "await_change_approval",
+            "apply_change_set",
+            "post_apply_validation",
             "final_synthesis",
             "supervisor",
         }
@@ -156,6 +159,9 @@ class LangGraphRuntimeTests(unittest.TestCase):
         self.assertEqual(route_after_understanding(state), "gather_evidence")
 
         state["pending_action"] = AgentAction(type="generate_edit", reason_summary="Prepare patch.", target_files=["app.py"])
+        self.assertEqual(route_after_understanding(state), "plan_change_set")
+
+        state["pending_action"] = AgentAction(type="generate_change_set", reason_summary="Prepare change set.", target_files=["app.py"])
         self.assertEqual(route_after_understanding(state), "plan_change_set")
 
         state["pending_action"] = AgentAction(type="final_answer", reason_summary="Finish.")
@@ -397,6 +403,83 @@ class LangGraphRuntimeTests(unittest.TestCase):
         self.assertEqual(response.change_set_proposal["status"], "valid")
         self.assertEqual(response.edit_archive[0]["operation"], "create")
         self.assertIn("+def helper", response.edit_archive[0]["diff"])
+
+    def test_change_set_apply_resume_writes_after_approval_only(self) -> None:
+        request = self._request("Apply app.py proposal")
+        original = (self.repo / "app.py").read_text(encoding="utf-8")
+        proposal = ChangeSetProposal(
+            plan=ChangePlan(summary="Modify app.py", target_files=["app.py"], operations=["modify"]),
+            changes=[
+                ProposedFileChange(
+                    path="app.py",
+                    operation="modify",
+                    summary="Return two.",
+                    original_content=original,
+                    proposed_content="def main():\n    return 2\n",
+                )
+            ],
+        )
+        validation = validate_change_set(proposal, repo=str(self.repo))
+        proposal.validation = validation
+        proposal.status = validation.status
+        proposal.validation_status = validation.status
+        state = initial_graph_state(request, run_id="run-apply-change-set")
+        state["change_set_proposal"] = proposal.model_dump()
+        state["pending_approval"] = {
+            "kind": "change_set_apply",
+            "proposal_id": proposal.model_dump()["proposal_id"],
+            "change_set_proposal": proposal.model_dump(),
+            "reason": "test",
+        }
+        state["stop_reason"] = "waiting_approval"
+        checkpointer = InMemorySaver()
+        compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpointer)
+        config = graph_config_for_request(request, "run-apply-change-set")
+        interrupted = compiled.invoke(state, config=config)
+        self.assertIn("__interrupt__", interrupted)
+        self.assertEqual((self.repo / "app.py").read_text(encoding="utf-8"), original)
+
+        resumed = compiled.invoke(Command(resume={"decision": "allow", "kind": "change_set_apply", "proposal_id": proposal.model_dump()["proposal_id"]}), config=config)
+        self.assertEqual((self.repo / "app.py").read_text(encoding="utf-8"), "def main():\n    return 2\n")
+        self.assertEqual(resumed.get("apply_status"), "applied")
+        self.assertIn("app.py", resumed.get("files_changed") or [])
+
+    def test_change_set_apply_denial_leaves_disk_unchanged(self) -> None:
+        request = self._request("Reject app.py proposal")
+        original = (self.repo / "app.py").read_text(encoding="utf-8")
+        proposal = ChangeSetProposal(
+            plan=ChangePlan(summary="Modify app.py", target_files=["app.py"], operations=["modify"]),
+            changes=[
+                ProposedFileChange(
+                    path="app.py",
+                    operation="modify",
+                    summary="Return two.",
+                    original_content=original,
+                    proposed_content="def main():\n    return 2\n",
+                )
+            ],
+        )
+        validation = validate_change_set(proposal, repo=str(self.repo))
+        proposal.validation = validation
+        proposal.status = validation.status
+        proposal.validation_status = validation.status
+        state = initial_graph_state(request, run_id="run-deny-change-set")
+        state["change_set_proposal"] = proposal.model_dump()
+        state["pending_approval"] = {
+            "kind": "change_set_apply",
+            "proposal_id": proposal.model_dump()["proposal_id"],
+            "change_set_proposal": proposal.model_dump(),
+            "reason": "test",
+        }
+        state["stop_reason"] = "waiting_approval"
+        checkpointer = InMemorySaver()
+        compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpointer)
+        config = graph_config_for_request(request, "run-deny-change-set")
+        compiled.invoke(state, config=config)
+        denied = compiled.invoke(Command(resume={"decision": "deny", "kind": "change_set_apply"}), config=config)
+        self.assertEqual((self.repo / "app.py").read_text(encoding="utf-8"), original)
+        self.assertEqual(denied.get("apply_status"), "rejected")
+        self.assertIn("not applied", denied.get("final_response") or "")
 
     def test_event_service_checkpointer_round_trips_waiting_approval_state(self) -> None:
         request = self._request("Run git status")

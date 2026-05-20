@@ -2,15 +2,20 @@
 
 import { useState } from "react";
 import {
-  writeRepositoryFile,
+  applyChangeSet,
+  rejectChangeSet,
   LocalWorkerClientError,
+  type AgentRunPayload,
   type AgentProposeFilePayload,
+  type ChangeSetProposalPayload,
 } from "@/lib/local-worker-client";
 
 export type ProposalStatus = "proposed" | "applied" | "rejected" | "failed";
 
 export type ChangeProposal = {
   id: string;
+  runId?: string | null;
+  proposalId?: string | null;
   projectPath: string;
   branch: string | null | undefined;
   relativePath: string;
@@ -18,12 +23,14 @@ export type ChangeProposal = {
   proposedContent: string;
   model: string;
   status: ProposalStatus;
+  changeSetProposal?: ChangeSetProposalPayload | null;
+  appliedAt?: string | null;
 };
 
 interface ProposalCardProps {
   proposal: ChangeProposal;
   writeMode: "basic" | "auto_review" | "full_access";
-  onStatusChange: (id: string, status: ProposalStatus, message?: string) => void;
+  onStatusChange: (id: string, status: ProposalStatus, message?: string, result?: AgentRunPayload) => void;
 }
 
 /** Build a simple unified-style line diff for display (no external library needed). */
@@ -96,19 +103,34 @@ function DiffView({ original, proposed }: { original: string; proposed: string }
 export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCardProps) {
   const [applying, setApplying] = useState(false);
   const [showFull, setShowFull] = useState(false);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
   const isSettled = proposal.status !== "proposed";
+  const changes = proposal.changeSetProposal?.changes?.length
+    ? proposal.changeSetProposal.changes
+    : [{
+        path: proposal.relativePath,
+        operation: "modify",
+        original_content: proposal.originalContent,
+        proposed_content: proposal.proposedContent,
+        summary: proposal.changeSetProposal?.plan?.summary,
+      }];
+  const selectedChange = changes.find((change) => change.path === selectedPath) ?? changes[0];
+  const fileCount = changes.length;
 
   async function handleApply() {
     if (applying || isSettled) return;
     setApplying(true);
     try {
-      await writeRepositoryFile({
-        project_path: proposal.projectPath,
-        relative_path: proposal.relativePath,
-        content: proposal.proposedContent,
-      });
-      onStatusChange(proposal.id, "applied", `Applied changes to ${proposal.relativePath}`);
+      if (proposal.runId && proposal.proposalId) {
+        const result = await applyChangeSet({
+          run_id: proposal.runId,
+          proposal_id: proposal.proposalId,
+        });
+        onStatusChange(proposal.id, "applied", `Applied proposal ${proposal.proposalId}`, result);
+      } else {
+        throw new Error("This proposal is missing a run id and cannot be applied safely.");
+      }
     } catch (err) {
       const msg =
         err instanceof LocalWorkerClientError || err instanceof Error
@@ -121,6 +143,12 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
   }
 
   function handleReject() {
+    if (proposal.runId && proposal.proposalId) {
+      void rejectChangeSet({ run_id: proposal.runId, proposal_id: proposal.proposalId })
+        .then((result) => onStatusChange(proposal.id, "rejected", "Change proposal rejected.", result))
+        .catch(() => onStatusChange(proposal.id, "rejected", "Change proposal rejected."));
+      return;
+    }
     onStatusChange(proposal.id, "rejected", "Change proposal rejected.");
   }
 
@@ -145,8 +173,10 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
         <div className="proposal-card-header-left">
           <span className="proposal-card-icon" aria-hidden="true" />
           <div>
-            <div className="proposal-card-title">RepoOperator wants to modify 1 file</div>
-            <div className="proposal-card-path">{proposal.relativePath}</div>
+            <div className="proposal-card-title">
+              RepoOperator prepared proposed changes for {fileCount} file{fileCount === 1 ? "" : "s"}
+            </div>
+            <div className="proposal-card-path">Proposed changes only. No files modified yet.</div>
           </div>
         </div>
         <span className={`proposal-status-badge ${statusClass[proposal.status]}`}>
@@ -158,13 +188,38 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
         <div className="proposal-card-meta">
           Branch: <strong>{proposal.branch}</strong>
           {" · "}Model: <strong>{proposal.model}</strong>
+          {proposal.proposalId ? (
+            <>
+              {" · "}Proposal: <strong>{proposal.proposalId}</strong>
+            </>
+          ) : null}
         </div>
       )}
+
+      <div className="proposal-file-list">
+        {changes.map((change) => (
+          <button
+            key={`${change.operation}-${change.path}`}
+            className={`proposal-file-row${selectedChange?.path === change.path ? " proposal-file-row-selected" : ""}`}
+            type="button"
+            onClick={() => setSelectedPath(change.path)}
+          >
+            <span className="proposal-file-op">{change.operation}</span>
+            <span className="proposal-file-path">{change.path}</span>
+            <span className="proposal-file-stats">
+              +{change.additions ?? countChangedLines(change.original_content ?? "", change.proposed_content ?? "").added}
+              {" / "}
+              -{change.deletions ?? countChangedLines(change.original_content ?? "", change.proposed_content ?? "").removed}
+            </span>
+            <span className="proposal-file-validation">{change.validation_status || proposal.changeSetProposal?.validation?.status || "pending"}</span>
+          </button>
+        ))}
+      </div>
 
       {/* Diff preview */}
       <div className="proposal-diff-wrapper">
         <div className="proposal-diff-titlebar">
-          <span>Diff preview</span>
+          <span>{selectedChange?.path || proposal.relativePath}</span>
           <button
             className="proposal-diff-toggle"
             type="button"
@@ -172,12 +227,31 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
           >
             {showFull ? "Collapse" : "Expand full diff"}
           </button>
+          <button
+            className="proposal-diff-toggle"
+            type="button"
+            onClick={() => void navigator.clipboard?.writeText(formatSelectedDiff(selectedChange, proposal))}
+          >
+            Copy diff
+          </button>
         </div>
+        {selectedChange?.summary ? <p className="proposal-risk-note">{selectedChange.summary}</p> : null}
+        {selectedChange?.risk_notes?.length ? (
+          <div className="proposal-risk-note">Risk notes: {selectedChange.risk_notes.join("; ")}</div>
+        ) : null}
+        {proposal.changeSetProposal?.validation?.errors?.length ? (
+          <div className="proposal-validation-errors">
+            {proposal.changeSetProposal.validation.errors.join("; ")}
+          </div>
+        ) : null}
         <div
           className="proposal-diff-scroll"
           style={{ maxHeight: showFull ? "none" : "260px" }}
         >
-          <DiffView original={proposal.originalContent} proposed={proposal.proposedContent} />
+          <DiffView
+            original={selectedChange?.operation === "create" ? "" : selectedChange?.original_content ?? proposal.originalContent}
+            proposed={selectedChange?.operation === "delete" ? "" : selectedChange?.proposed_content ?? proposal.proposedContent}
+          />
         </div>
       </div>
 
@@ -195,7 +269,7 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
               onClick={() => void handleApply()}
               disabled={applying}
             >
-              {applying ? "Applying…" : `Apply changes to ${proposal.relativePath}`}
+              {applying ? "Applying..." : "Apply changes"}
             </button>
             <button
               className="proposal-btn-reject"
@@ -211,13 +285,38 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
 
       {isSettled && proposal.status !== "proposed" && (
         <div className={`proposal-settled-notice proposal-settled-${proposal.status}`}>
-          {proposal.status === "applied" && `✓ Changes applied to ${proposal.relativePath}`}
-          {proposal.status === "rejected" && "✕ Proposal rejected."}
-          {proposal.status === "failed" && "⚠ Failed to apply changes."}
+          {proposal.status === "applied" && `Changes applied${proposal.appliedAt ? ` at ${proposal.appliedAt}` : ""}.`}
+          {proposal.status === "rejected" && "Proposal rejected."}
+          {proposal.status === "failed" && "Failed to apply changes."}
         </div>
       )}
     </div>
   );
+}
+
+function countChangedLines(original: string, proposed: string): { added: number; removed: number } {
+  const diff = buildLineDiff(original, proposed);
+  return {
+    added: diff.filter((line) => line.kind === "add").length,
+    removed: diff.filter((line) => line.kind === "del").length,
+  };
+}
+
+function formatSelectedDiff(
+  change: NonNullable<ChangeSetProposalPayload["changes"]>[number] | undefined,
+  proposal: ChangeProposal,
+): string {
+  if (!change) return `${proposal.relativePath}\n`;
+  return [
+    `${change.operation} ${change.path}`,
+    change.summary || "",
+    ...(change.risk_notes || []),
+    "",
+    buildLineDiff(
+      change.operation === "create" ? "" : change.original_content ?? proposal.originalContent,
+      change.operation === "delete" ? "" : change.proposed_content ?? proposal.proposedContent,
+    ).map((line) => `${line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "}${line.line}`).join("\n"),
+  ].filter(Boolean).join("\n");
 }
 
 /** Helper to turn an AgentProposeFilePayload into a ChangeProposal. */
@@ -241,21 +340,30 @@ export function proposalFromPayload(
 export function proposalFromRunPayload(
   payload: {
     model: string;
+    run_id?: string | null;
+    change_set_proposal?: ChangeSetProposalPayload | null;
+    proposal_id?: string | null;
     proposal_relative_path?: string | null;
     proposal_original_content?: string | null;
     proposal_proposed_content?: string | null;
+    apply_status?: string | null;
   },
   opts: { projectPath: string; branch?: string | null },
 ): ChangeProposal {
-  const relativePath = payload.proposal_relative_path ?? "unknown";
+  const firstChange = payload.change_set_proposal?.changes?.[0];
+  const relativePath = firstChange?.path ?? payload.proposal_relative_path ?? "unknown";
   return {
-    id: `${Date.now()}-proposal-${relativePath}`,
+    id: payload.change_set_proposal?.proposal_id || `${Date.now()}-proposal-${relativePath}`,
+    runId: payload.run_id,
+    proposalId: payload.change_set_proposal?.proposal_id || payload.proposal_id || null,
     projectPath: opts.projectPath,
     branch: opts.branch,
     relativePath,
-    originalContent: payload.proposal_original_content ?? "",
-    proposedContent: payload.proposal_proposed_content ?? "",
+    originalContent: firstChange?.original_content ?? payload.proposal_original_content ?? "",
+    proposedContent: firstChange?.proposed_content ?? payload.proposal_proposed_content ?? "",
     model: payload.model,
-    status: "proposed",
+    status: payload.apply_status === "applied" ? "applied" : "proposed",
+    changeSetProposal: payload.change_set_proposal,
+    appliedAt: payload.change_set_proposal?.applied_at ?? null,
   };
 }

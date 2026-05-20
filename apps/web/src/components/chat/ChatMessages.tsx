@@ -425,7 +425,7 @@ interface ChatMessagesProps {
   streamedAnswer?: string;
   gitProvider: string;
   writeMode?: "basic" | "auto_review" | "full_access";
-  onProposalStatusChange?: (id: string, status: ProposalStatus, message?: string) => void;
+  onProposalStatusChange?: (id: string, status: ProposalStatus, message?: string, result?: AgentRunPayload) => void;
   onClarificationSelect?: (candidate: string) => void;
   onCommandDecision?: (metadata: AgentRunPayload, decision: "yes" | "yes_session" | "no_explain") => void;
 }
