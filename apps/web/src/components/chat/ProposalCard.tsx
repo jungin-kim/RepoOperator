@@ -9,23 +9,9 @@ import {
   type AgentProposeFilePayload,
   type ChangeSetProposalPayload,
 } from "@/lib/local-worker-client";
+import { operationLabel, proposalApplyWarning, type ChangeProposal, type ProposalChange, type ProposalStatus } from "./proposal-card-copy";
 
-export type ProposalStatus = "proposed" | "applied" | "rejected" | "failed";
-
-export type ChangeProposal = {
-  id: string;
-  runId?: string | null;
-  proposalId?: string | null;
-  projectPath: string;
-  branch: string | null | undefined;
-  relativePath: string;
-  originalContent: string;
-  proposedContent: string;
-  model: string;
-  status: ProposalStatus;
-  changeSetProposal?: ChangeSetProposalPayload | null;
-  appliedAt?: string | null;
-};
+export type { ChangeProposal, ProposalStatus } from "./proposal-card-copy";
 
 interface ProposalCardProps {
   proposal: ChangeProposal;
@@ -106,6 +92,7 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
   const isSettled = proposal.status !== "proposed";
+  const hasChangeSet = Boolean(proposal.changeSetProposal?.changes?.length);
   const changes = proposal.changeSetProposal?.changes?.length
     ? proposal.changeSetProposal.changes
     : [{
@@ -176,7 +163,7 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
             <div className="proposal-card-title">
               RepoOperator prepared proposed changes for {fileCount} file{fileCount === 1 ? "" : "s"}
             </div>
-            <div className="proposal-card-path">Proposed changes only. No files modified yet.</div>
+            <div className="proposal-card-path">Proposed changes only. No files have been modified yet.</div>
           </div>
         </div>
         <span className={`proposal-status-badge ${statusClass[proposal.status]}`}>
@@ -204,7 +191,7 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
             type="button"
             onClick={() => setSelectedPath(change.path)}
           >
-            <span className="proposal-file-op">{change.operation}</span>
+            <span className="proposal-file-op">{operationLabel(change.operation)}</span>
             <span className="proposal-file-path">{change.path}</span>
             <span className="proposal-file-stats">
               +{change.additions ?? countChangedLines(change.original_content ?? "", change.proposed_content ?? "").added}
@@ -258,10 +245,7 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
       {/* Actions */}
       {!isSettled && (
         <div className="proposal-card-actions">
-          <p className="proposal-warning">
-            Review the diff before applying. RepoOperator will modify only{" "}
-            <strong>{proposal.relativePath}</strong> on the current branch.
-          </p>
+          <p className="proposal-warning">{proposalApplyWarning(proposal, changes, hasChangeSet)}</p>
           <div className="proposal-card-buttons">
             <button
               className="proposal-btn-apply"
@@ -285,8 +269,8 @@ export function ProposalCard({ proposal, writeMode, onStatusChange }: ProposalCa
 
       {isSettled && proposal.status !== "proposed" && (
         <div className={`proposal-settled-notice proposal-settled-${proposal.status}`}>
-          {proposal.status === "applied" && `Changes applied${proposal.appliedAt ? ` at ${proposal.appliedAt}` : ""}.`}
-          {proposal.status === "rejected" && "Proposal rejected."}
+          {proposal.status === "applied" && `Listed file changes were applied${proposal.appliedAt ? ` at ${proposal.appliedAt}` : ""}.`}
+          {proposal.status === "rejected" && "Proposal was not applied."}
           {proposal.status === "failed" && "Failed to apply changes."}
         </div>
       )}

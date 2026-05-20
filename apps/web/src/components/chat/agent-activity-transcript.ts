@@ -9,6 +9,7 @@ import type {
 import { isLowValuePrimaryLabel } from "./agent-activity-display";
 
 const SEARCH_TYPES = new Set(["search_files", "search_text"]);
+const WEB_TYPES = new Set(["search_web", "fetch_url", "summarize_web_evidence"]);
 const READ_TYPES = new Set(["read_file"]);
 const LIST_TYPES = new Set(["inspect_repo_tree", "analyze_repository"]);
 const COMMAND_TYPES = new Set(["preview_command", "inspect_git_state", "run_approved_command"]);
@@ -31,6 +32,8 @@ function getActionType(step: ProgressStep): string | null {
   const operation = stringValue(agg.operation) || step.operation;
   if (operation === "read_file") return "read_file";
   if (operation === "search") return agg.query ? "search_text" : "search_files";
+  if (operation === "web_search") return "search_web";
+  if (operation === "web_fetch") return "fetch_url";
   if (operation === "list_files") return "inspect_repo_tree";
   if (operation === "command") return "run_approved_command";
   if (operation === "edit") return "generate_edit";
@@ -41,6 +44,7 @@ function getActionType(step: ProgressStep): string | null {
   if (hasSearchAggregate(agg)) {
     return agg.query ? "search_text" : "search_files";
   }
+  if (hasWebAggregate(agg)) return "search_web";
   if (hasListAggregate(step, agg)) return "inspect_repo_tree";
   if (hasCommandAggregate(step, agg)) return "run_approved_command";
   return null;
@@ -51,6 +55,16 @@ function hasSearchAggregate(agg: Record<string, unknown>): boolean {
     nonEmptyString(agg.query)
       || nonEmptyStringList(agg.queries).length
       || nonEmptyStringList(agg.text_queries).length,
+  );
+}
+
+function hasWebAggregate(agg: Record<string, unknown>): boolean {
+  return Boolean(
+    agg.operation === "web_search"
+      || agg.operation === "web_fetch"
+      || typeof agg.source_count === "number"
+      || Array.isArray(agg.sources)
+      || agg.untrusted === true,
   );
 }
 
@@ -211,6 +225,29 @@ function makeDetailItem(
     const resultCount = numberValue(aggregateOf(step).result_count);
     return { kind: "search", id, query, label: query || step.label || "Search repository", status, resultCount: resultCount ?? null };
   }
+  if (WEB_TYPES.has(actionType)) {
+    const agg = aggregateOf(step);
+    const query = extractSearchQuery(step);
+    const sourceCount = numberValue(agg.source_count);
+    const sources = Array.isArray(agg.sources)
+      ? agg.sources
+          .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+          .map((item) => ({
+            title: stringValue(item.title) || undefined,
+            url: stringValue(item.url) || undefined,
+            source: stringValue(item.source) || undefined,
+          }))
+      : [];
+    return {
+      kind: "web",
+      id,
+      query,
+      label: step.label || (actionType === "fetch_url" ? "Read web source" : "Searched web"),
+      status,
+      sourceCount: sourceCount ?? (sources.length || null),
+      sources,
+    };
+  }
   if (READ_TYPES.has(actionType)) {
     return { kind: "read_file", id, files: extractReadFiles(step), label: step.label || "Read files", status };
   }
@@ -236,12 +273,14 @@ function groupLabel(details: AgentActivityDetailItem[]): string {
   const reads = details.filter((d): d is ReadFileDetailItem => d.kind === "read_file");
   const lists = details.filter((d) => d.kind === "list_files").length;
   const commands = details.filter((d) => d.kind === "command").length;
+  const web = details.filter((d) => d.kind === "web").length;
   const fileCount = reads.flatMap((d) => d.files).length || reads.length;
   const parts: string[] = [];
   if (searches > 0) parts.push(`Searched ${searches > 1 ? `${searches} times` : "once"}`);
   if (reads.length > 0) parts.push(`read ${fileCount} file${fileCount !== 1 ? "s" : ""}`);
   if (lists > 0) parts.push("listed repository");
   if (commands > 0) parts.push(`ran ${commands} command${commands > 1 ? "s" : ""}`);
+  if (web > 0) parts.push(`checked ${web} web source${web === 1 ? "" : "s"}`);
   return parts.length > 0 ? parts.join(", ") : "Explored repository";
 }
 
@@ -565,6 +604,9 @@ function sectionSummary(section: AgentTranscriptSection): AgentTranscriptSection
     filesListed: section.details.filter((detail) => detail.kind === "list_files").length,
     commandsRun: section.details.filter((detail) => detail.kind === "command").length,
     filesEdited: section.edits.length,
+    webSources: section.details
+      .filter((detail) => detail.kind === "web")
+      .reduce((sum, detail) => sum + (detail.sourceCount || 1), 0),
   };
 }
 
@@ -577,11 +619,12 @@ function sectionSummaryText(summary: AgentTranscriptSection["summary"]): string 
   if (summary.commandsRun > 0) {
     parts.push(`ran ${summary.commandsRun} command${summary.commandsRun === 1 ? "" : "s"}`);
   }
+  if (summary.webSources > 0) parts.push(`web sources ${summary.webSources}`);
   return parts.join(", ") || "No recorded actions";
 }
 
 function emptySummary(): AgentTranscriptSection["summary"] {
-  return { searches: 0, filesRead: 0, filesListed: 0, commandsRun: 0, filesEdited: 0 };
+  return { searches: 0, filesRead: 0, filesListed: 0, commandsRun: 0, filesEdited: 0, webSources: 0 };
 }
 
 function sectionChildStatuses(section: AgentTranscriptSection): string[] {

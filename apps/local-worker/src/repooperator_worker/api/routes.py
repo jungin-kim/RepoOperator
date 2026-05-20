@@ -82,6 +82,7 @@ from repooperator_worker.services.git_service import (
     push_branch,
 )
 from repooperator_worker.services.repo_service import open_repository, plan_repository_open
+from repooperator_worker.services.routine_service import get_default_routine_store
 from repooperator_worker.services.thread_service import list_threads, upsert_thread
 from repooperator_worker.services.tool_service import get_tools_status, preview_tool_run, run_tool
 from repooperator_worker.services.debug_service import (
@@ -184,6 +185,44 @@ def debug_skills() -> dict:
 @router.get("/debug/integrations")
 def debug_integrations() -> dict:
     return integration_status()
+
+
+@router.get("/routines")
+def routines_list() -> dict:
+    store = get_default_routine_store()
+    return {"routines": [routine.model_dump() for routine in store.list()]}
+
+
+@router.post("/routines")
+def routines_create(payload: dict) -> dict:
+    try:
+        routine = get_default_routine_store().create(payload)
+        return {"routine": routine.model_dump()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/routines/{routine_id}/enable")
+def routines_enable(routine_id: str, payload: dict) -> dict:
+    try:
+        routine = get_default_routine_store().update_enabled(routine_id, bool(payload.get("enabled", True)))
+        return {"routine": routine.model_dump()}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/routines/{routine_id}/run-now")
+def routines_run_now(routine_id: str) -> dict:
+    try:
+        run = get_default_routine_store().run_now(routine_id)
+        return {"run": run.model_dump()}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/routines/{routine_id}/runs")
+def routines_runs(routine_id: str) -> dict:
+    return {"runs": [run.model_dump() for run in get_default_routine_store().list_runs(routine_id)]}
 
 
 @router.get("/integrations/composio/status")

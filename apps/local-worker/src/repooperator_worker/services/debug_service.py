@@ -1,4 +1,5 @@
 from repooperator_worker.config import get_settings
+from repooperator_worker.agent_core.model_profile import detect_model_profile
 from repooperator_worker.services.active_repository import get_active_repository
 from repooperator_worker.services.composio_service import get_composio_status
 from repooperator_worker.services.event_service import get_active_runs, list_recent_runs
@@ -12,6 +13,7 @@ def get_debug_runtime_status() -> dict:
     settings = get_settings()
     active = get_active_repository()
     profile = permission_profile(settings.permission_mode)
+    model_profile = detect_model_profile(settings=settings)
     return {
         "worker": {
             "status": "ok",
@@ -22,6 +24,7 @@ def get_debug_runtime_status() -> dict:
             "connection_mode": settings.configured_model_connection_mode,
             "name": settings.configured_model_name,
             "base_url": settings.openai_base_url,
+            "profile": model_profile.model_dump(),
         },
         "permissions": {
             "write_mode": settings.write_mode,

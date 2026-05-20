@@ -182,6 +182,27 @@ describe("buildAgentActivityTranscript sections", () => {
     expect(sections[0].summaryText).toContain("ran 1 command");
   });
 
+  it("web research rows show source counts", () => {
+    const sections = buildAgentActivityTranscript([
+      statusStep("Checking current docs.", { activityId: "note:web" }),
+      toolStep("search_web", {
+        activityId: "web:1",
+        relatedSearchQuery: "library docs",
+        label: "Searched web",
+        aggregate: {
+          operation: "web_search",
+          query: "library docs",
+          source_count: 2,
+          sources: [{ title: "Docs", url: "https://example.com/docs", source: "example.com" }],
+          untrusted: true,
+        },
+      }),
+    ]);
+
+    expect(sections[0].details[0]).toMatchObject({ kind: "web", sourceCount: 2 });
+    expect(sections[0].summary.webSources).toBe(2);
+  });
+
   it("failed detail makes section failed", () => {
     const sections = buildAgentActivityTranscript([
       statusStep("Run command.", { activityId: "note:1" }),

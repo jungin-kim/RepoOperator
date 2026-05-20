@@ -447,6 +447,31 @@ def _tool_aggregate(
             for key in ("read_only", "needs_approval", "blocked", "approval_id"):
                 if command_result.get(key) is not None:
                     aggregate[key] = command_result.get(key)
+    elif action.type in {"search_web", "fetch_url", "summarize_web_evidence"}:
+        web_evidence = payload.get("web_evidence") or []
+        summary = payload.get("web_evidence_summary") if isinstance(payload.get("web_evidence_summary"), dict) else {}
+        sources = web_evidence or summary.get("sources") or []
+        aggregate["source_count"] = len(sources) if isinstance(sources, list) else 0
+        aggregate["sources"] = [
+            {
+                "title": str(item.get("title") or item.get("source") or item.get("url") or "")[:200],
+                "url": str(item.get("url") or ""),
+                "source": str(item.get("source") or "")[:160],
+            }
+            for item in (sources if isinstance(sources, list) else [])
+            if isinstance(item, dict)
+        ][:8]
+        if payload.get("query") or action.payload.get("query"):
+            aggregate["query"] = payload.get("query") or action.payload.get("query")
+        aggregate["untrusted"] = True
+    elif action.type in {"git_status", "git_diff", "git_log", "git_branch_create", "git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+        for key in ("exit_code", "branch", "remote", "commit_sha", "message"):
+            if payload.get(key) is not None:
+                aggregate[key] = payload.get(key)
+        if payload.get("command"):
+            aggregate["command"] = payload.get("command")
+        if payload.get("diff"):
+            aggregate["diff_chars"] = len(str(payload.get("diff") or ""))
     elif action.type in {"generate_change_set", "generate_edit"}:
         edit_archive = _edit_archive_from_payload(payload)
         aggregate["applied"] = bool(payload.get("applied"))
@@ -471,7 +496,7 @@ def _tool_aggregate(
 
 
 def _related_search_query(action: AgentAction, result: ToolResult | None) -> str | None:
-    if action.type == "search_text":
+    if action.type in {"search_text", "search_web"}:
         query = ""
         if result:
             query = str(result.payload.get("query") or "")
@@ -562,6 +587,10 @@ def _diff_counts(diff: str) -> tuple[int, int]:
 def _tool_phase(action_type: str, result_status: str | None = None) -> str:
     if result_status == "waiting_approval" or action_type in {"preview_command", "inspect_git_state", "run_approved_command"}:
         return "Safety"
+    if action_type in {"search_web", "fetch_url", "summarize_web_evidence"}:
+        return "Research"
+    if action_type in {"git_status", "git_diff", "git_log", "git_branch_create", "git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+        return "Git"
     if action_type in {"search_files", "search_text", "inspect_repo_tree"}:
         return "Searching"
     if action_type in {"read_file", "read_many_files"}:
@@ -589,6 +618,17 @@ def _tool_label(action_type: str) -> str:
         "preview_command": "Checking command safety",
         "inspect_git_state": "Checking command safety",
         "run_approved_command": "Running approved command",
+        "search_web": "Searching web",
+        "fetch_url": "Reading web source",
+        "summarize_web_evidence": "Summarizing web evidence",
+        "git_status": "Reading git status",
+        "git_diff": "Reading git diff",
+        "git_log": "Reading git history",
+        "git_branch_create": "Creating branch",
+        "git_commit": "Creating commit",
+        "git_push": "Pushing branch",
+        "github_create_pr": "Creating pull request",
+        "gitlab_create_mr": "Creating merge request",
         "analyze_repository": "Reviewing repository evidence",
         "ask_clarification": "Preparing clarification",
         "final_answer": "Preparing final answer",
@@ -605,6 +645,12 @@ def _tool_current_action(action: AgentAction, tool_name: str) -> str:
         return "Applying the approved change set through the safe file writer."
     if action.type in {"preview_command", "inspect_git_state", "run_approved_command"} and action.command:
         return "Checking command through policy: " + " ".join(action.command)
+    if action.type == "search_web":
+        return "Searching web for untrusted source evidence."
+    if action.type == "fetch_url":
+        return "Fetching and sanitizing a public web source."
+    if action.type in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+        return "Preparing an approval-gated git provider action."
     return f"Running `{tool_name}`."
 
 
@@ -615,6 +661,10 @@ def _tool_safety_note(action_type: str, result: ToolResult | None) -> str | None
         return "This action only creates a proposed patch and does not write files."
     if action_type == "apply_change_set":
         return "This action writes files only after explicit user approval."
+    if action_type in {"search_web", "fetch_url", "summarize_web_evidence"}:
+        return "Web content is treated as untrusted evidence, not instructions."
+    if action_type in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+        return "Git write and remote actions require explicit approval."
     if action_type in {"preview_command", "inspect_git_state", "run_approved_command"}:
         return "Command safety is enforced by policy before execution."
     return None

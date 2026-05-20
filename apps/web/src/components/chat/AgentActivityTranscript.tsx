@@ -61,6 +61,12 @@ function DetailItemRow({ item }: { item: AgentActivityDetailItem }) {
     icon = "❯";
     desc = item.command;
     status = statusText(item.status, item.exitCode);
+  } else if (item.kind === "web") {
+    icon = "⟳";
+    desc = item.query ? `searched web for ${item.query}` : item.label;
+    if (typeof item.sourceCount === "number") {
+      desc += ` (${item.sourceCount} source${item.sourceCount === 1 ? "" : "s"})`;
+    }
   } else if (item.kind === "edit") {
     icon = "✎";
     desc = item.files.length > 0 ? item.files.join(", ") : item.label;

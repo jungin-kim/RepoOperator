@@ -17,9 +17,11 @@ from repooperator_worker.agent_core.secret_scanner import redact_secrets
 from repooperator_worker.agent_core.tools.base import BaseTool, ToolExecutionContext, ToolResult, ToolSpec
 from repooperator_worker.agent_core.permissions import PermissionDecision, ToolPermissionContext
 from repooperator_worker.services.command_service import run_command_with_policy
-from repooperator_worker.services.common import resolve_project_path
+from repooperator_worker.services.common import ensure_git_repository, resolve_project_path
+from repooperator_worker.services.permissions_service import permission_profile
 from repooperator_worker.services.json_safe import json_safe, safe_agent_response_payload
 from repooperator_worker.services.model_client import ModelGenerationRequest, OpenAICompatibleModelClient
+from repooperator_worker.services.subprocess_utils import run_subprocess
 
 
 TEXT_FILE_SUFFIXES = {
@@ -489,6 +491,400 @@ class RunValidationCommandTool(RunApprovedCommandTool):
         permission_required=True,
         parallel_safe=False,
         produces_evidence=True,
+    )
+
+
+class _NetworkEvidenceTool(BaseTool):
+    def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
+        del context
+        decision = payload.get("approval_decision") if isinstance(payload.get("approval_decision"), dict) else {}
+        if str(decision.get("decision") or "").lower() == "allow":
+            return PermissionDecision.allow("User approved network access for this web evidence tool.")
+        try:
+            profile = permission_profile()
+        except Exception:
+            profile = {}
+        approval = profile.get("approval") if isinstance(profile.get("approval"), dict) else {}
+        sandbox = profile.get("sandbox") if isinstance(profile.get("sandbox"), dict) else {}
+        if sandbox.get("allowNetwork") and not approval.get("requireForNetwork", True):
+            return PermissionDecision.allow("Network access is allowed by the active permission profile.")
+        return PermissionDecision.ask("Web research uses network access and requires approval by the active permission profile.")
+
+
+class SearchWebTool(_NetworkEvidenceTool):
+    spec = ToolSpec(
+        name="search_web",
+        description="Search the public web and return untrusted evidence records with source metadata.",
+        operation="web_search",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 8},
+            },
+            "required": ["query"],
+            "additionalProperties": True,
+        },
+        read_only=True,
+        concurrency_safe=True,
+        requires_approval_by_default=True,
+        side_effect_level="none",
+        permission_required=True,
+        parallel_safe=True,
+        workspace_bound=False,
+        network_access=True,
+        produces_evidence=True,
+        max_result_chars=200_000,
+    )
+
+    def validate_input(self, payload: dict[str, Any], request) -> dict[str, Any]:
+        del request
+        query = " ".join(str(payload.get("query") or "").split())[:300]
+        return {**dict(payload), "query": query, "max_results": max(1, min(int(payload.get("max_results") or 5), 8))}
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        from repooperator_worker.agent_core.web_research import search_web
+
+        records = search_web(str(payload.get("query") or ""), run_id=context.run_id, max_results=int(payload.get("max_results") or 5))
+        evidence = [record.model_dump() for record in records]
+        append_activity_event(
+            run_id=context.run_id,
+            request=context.request,
+            activity_id="web-search:" + str(payload.get("query") or "")[:80],
+            event_type="activity_completed",
+            phase="Research",
+            label="Searched web",
+            status="completed",
+            observation=f"Searched web and found {len(evidence)} source(s).",
+            related_search_query=str(payload.get("query") or ""),
+            aggregate={"operation": "web_search", "query": payload.get("query"), "source_count": len(evidence), "sources": _source_notes(evidence)},
+        )
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success",
+            observation=f"Searched web for {payload.get('query')}; found {len(evidence)} source(s).",
+            payload={"query": payload.get("query"), "web_evidence": evidence, "untrusted": True},
+        )
+
+
+class FetchUrlTool(_NetworkEvidenceTool):
+    spec = ToolSpec(
+        name="fetch_url",
+        description="Fetch a public URL as sanitized, untrusted evidence with citation metadata.",
+        operation="web_fetch",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "max_bytes": {"type": "integer", "minimum": 1, "maximum": 750000},
+            },
+            "required": ["url"],
+            "additionalProperties": True,
+        },
+        read_only=True,
+        concurrency_safe=True,
+        requires_approval_by_default=True,
+        side_effect_level="none",
+        permission_required=True,
+        parallel_safe=True,
+        workspace_bound=False,
+        network_access=True,
+        produces_evidence=True,
+        max_result_chars=300_000,
+    )
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        from repooperator_worker.agent_core.web_research import fetch_url
+
+        record = fetch_url(str(payload.get("url") or ""), run_id=context.run_id, max_bytes=int(payload.get("max_bytes") or 750_000))
+        evidence = record.model_dump()
+        append_activity_event(
+            run_id=context.run_id,
+            request=context.request,
+            activity_id="web-fetch:" + str(payload.get("url") or "")[:100],
+            event_type="activity_completed",
+            phase="Research",
+            label="Read docs page",
+            status="completed",
+            observation=f"Fetched and sanitized web evidence from {record.source}.",
+            aggregate={"operation": "web_fetch", "source_count": 1, "sources": _source_notes([evidence])},
+        )
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success",
+            observation=f"Fetched sanitized web evidence from {record.url}.",
+            payload={"web_evidence": [evidence], "untrusted": True},
+        )
+
+
+class SummarizeWebEvidenceTool(BaseTool):
+    spec = ToolSpec(
+        name="summarize_web_evidence",
+        description="Summarize already fetched web evidence with source metadata and an untrusted-content safety note.",
+        operation="web_fetch",
+        input_schema={"type": "object", "properties": {"web_evidence": {"type": "array"}}, "additionalProperties": True},
+        read_only=True,
+        concurrency_safe=True,
+        side_effect_level="none",
+        parallel_safe=True,
+        workspace_bound=False,
+        produces_evidence=True,
+        max_result_chars=200_000,
+    )
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        from repooperator_worker.agent_core.web_research import summarize_web_evidence
+
+        summary = summarize_web_evidence(list(payload.get("web_evidence") or payload.get("records") or []))
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success",
+            observation=f"Summarized {summary.get('source_count', 0)} web source(s).",
+            payload={"web_evidence_summary": summary},
+        )
+
+
+class _GitTool(BaseTool):
+    permission_level = "git_read"
+
+    def _repo(self, context: ToolExecutionContext):
+        repo = resolve_project_path(context.request.project_path)
+        ensure_git_repository(repo)
+        return repo
+
+
+class GitStatusTool(_GitTool):
+    spec = ToolSpec(
+        name="git_status",
+        description="Read local git status without changing repository state.",
+        operation="git_status",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": True},
+        read_only=True,
+        concurrency_safe=True,
+        side_effect_level="read",
+        produces_evidence=True,
+    )
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        del payload
+        repo = self._repo(context)
+        result = run_subprocess(command=["git", "status", "--short", "--branch"], cwd=repo, timeout_seconds=30)
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success" if result.returncode == 0 else "failed",
+            observation=result.stdout.strip() or result.stderr.strip(),
+            payload={"stdout": result.stdout, "stderr": result.stderr, "exit_code": result.returncode},
+        )
+
+
+class GitDiffTool(_GitTool):
+    spec = ToolSpec(
+        name="git_diff",
+        description="Read local git diff without changing repository state.",
+        operation="git_diff",
+        input_schema={"type": "object", "properties": {"staged": {"type": "boolean"}, "relative_paths": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": True},
+        read_only=True,
+        concurrency_safe=True,
+        side_effect_level="read",
+        produces_evidence=True,
+        max_result_chars=400_000,
+    )
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        repo = self._repo(context)
+        command = ["git", "diff"]
+        if payload.get("staged"):
+            command.append("--cached")
+        relative_paths = [str(item).strip().lstrip("/") for item in payload.get("relative_paths") or [] if str(item).strip()]
+        if relative_paths:
+            command.extend(["--", *relative_paths])
+        result = run_subprocess(command=command, cwd=repo, timeout_seconds=30)
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success" if result.returncode == 0 else "failed",
+            observation=result.stdout,
+            payload={"diff": result.stdout, "stderr": result.stderr, "exit_code": result.returncode, "relative_paths": relative_paths},
+        )
+
+
+class GitLogTool(_GitTool):
+    spec = ToolSpec(
+        name="git_log",
+        description="Read recent local git history without changing repository state.",
+        operation="git_log",
+        input_schema={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50}}, "additionalProperties": True},
+        read_only=True,
+        concurrency_safe=True,
+        side_effect_level="read",
+        produces_evidence=True,
+    )
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        repo = self._repo(context)
+        limit = max(1, min(int(payload.get("limit") or 10), 50))
+        result = run_subprocess(command=["git", "log", "--oneline", "-n", str(limit)], cwd=repo, timeout_seconds=30)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success" if result.returncode == 0 else "failed",
+            observation="\n".join(lines),
+            payload={"commits": lines, "stderr": result.stderr, "exit_code": result.returncode},
+        )
+
+
+class _GitWriteTool(_GitTool):
+    def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
+        decision = payload.get("approval_decision") if isinstance(payload.get("approval_decision"), dict) else {}
+        if str(decision.get("decision") or "").lower() == "allow":
+            return PermissionDecision.allow("User approved this git write action.", git_permission_level=self.permission_level)
+        return PermissionDecision.ask(self._approval_reason(payload), git_permission_level=self.permission_level, approval_payload=self._approval_payload(payload, context))
+
+    def _approval_reason(self, payload: dict[str, Any]) -> str:
+        del payload
+        return "Git write action requires explicit approval."
+
+    def _approval_payload(self, payload: dict[str, Any], context: ToolPermissionContext) -> dict[str, Any]:
+        del context
+        return json_safe(payload)
+
+
+class GitBranchCreateTool(_GitWriteTool):
+    permission_level = "git_local_write"
+    spec = ToolSpec(
+        name="git_branch_create",
+        description="Create a local branch only after explicit approval.",
+        operation="git_branch",
+        input_schema={"type": "object", "properties": {"branch": {"type": "string"}, "from_ref": {"type": "string"}, "checkout": {"type": "boolean"}, "approval_decision": {"type": "object"}}, "required": ["branch"], "additionalProperties": True},
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="write",
+        permission_required=True,
+        parallel_safe=False,
+    )
+
+    def _approval_reason(self, payload: dict[str, Any]) -> str:
+        return f"Creating branch {payload.get('branch') or ''} changes local git state and requires approval."
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        repo = self._repo(context)
+        branch = str(payload.get("branch") or "").strip()
+        from_ref = str(payload.get("from_ref") or "HEAD").strip()
+        command = ["git", "checkout", "-b", branch, from_ref] if payload.get("checkout", True) else ["git", "branch", branch, from_ref]
+        result = run_subprocess(command=command, cwd=repo, timeout_seconds=30)
+        return ToolResult(tool_name=self.spec.name, status="success" if result.returncode == 0 else "failed", observation=result.stdout or result.stderr, payload={"command": command, "exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr, "branch": branch})
+
+
+class GitCommitTool(_GitWriteTool):
+    permission_level = "git_local_write"
+    spec = ToolSpec(
+        name="git_commit",
+        description="Create a local commit only after explicit approval; the message and files must be visible before approval.",
+        operation="git_commit",
+        input_schema={"type": "object", "properties": {"message": {"type": "string"}, "stage_all": {"type": "boolean"}, "files": {"type": "array", "items": {"type": "string"}}, "approval_decision": {"type": "object"}}, "required": ["message"], "additionalProperties": True},
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="write",
+        permission_required=True,
+        parallel_safe=False,
+        produces_evidence=True,
+    )
+
+    def _approval_reason(self, payload: dict[str, Any]) -> str:
+        return f"Creating a commit requires approval. Proposed message: {payload.get('message') or ''}"
+
+    def _approval_payload(self, payload: dict[str, Any], context: ToolPermissionContext) -> dict[str, Any]:
+        return {"message": payload.get("message"), "files": payload.get("files") or [], "repo": getattr(context.request, "project_path", None)}
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        repo = self._repo(context)
+        if payload.get("stage_all", True):
+            add = run_subprocess(command=["git", "add", "--all"], cwd=repo, timeout_seconds=30)
+            if add.returncode != 0:
+                return ToolResult(tool_name=self.spec.name, status="failed", observation=add.stderr, payload={"exit_code": add.returncode, "stderr": add.stderr})
+        message = str(payload.get("message") or "").strip()
+        result = run_subprocess(command=["git", "commit", "-m", message], cwd=repo, timeout_seconds=60)
+        sha = ""
+        if result.returncode == 0:
+            rev = run_subprocess(command=["git", "rev-parse", "HEAD"], cwd=repo, timeout_seconds=30)
+            sha = rev.stdout.strip()
+        return ToolResult(tool_name=self.spec.name, status="success" if result.returncode == 0 else "failed", observation=result.stdout or result.stderr, payload={"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr, "commit_sha": sha, "message": message})
+
+
+class GitPushTool(_GitWriteTool):
+    permission_level = "git_remote_write"
+    spec = ToolSpec(
+        name="git_push",
+        description="Push a branch to a remote only after explicit approval.",
+        operation="git_push",
+        input_schema={"type": "object", "properties": {"remote": {"type": "string"}, "branch": {"type": "string"}, "set_upstream": {"type": "boolean"}, "approval_decision": {"type": "object"}}, "required": ["branch"], "additionalProperties": True},
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="command",
+        permission_required=True,
+        parallel_safe=False,
+        network_access=True,
+    )
+
+    def _approval_reason(self, payload: dict[str, Any]) -> str:
+        return f"Pushing {payload.get('branch') or ''} to {payload.get('remote') or 'origin'} contacts a remote and requires approval."
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        repo = self._repo(context)
+        remote = str(payload.get("remote") or "origin")
+        branch = str(payload.get("branch") or "").strip()
+        command = ["git", "push"]
+        if payload.get("set_upstream", True):
+            command.append("--set-upstream")
+        command.extend([remote, branch])
+        result = run_subprocess(command=command, cwd=repo, timeout_seconds=180)
+        return ToolResult(tool_name=self.spec.name, status="success" if result.returncode == 0 else "failed", observation=result.stdout or result.stderr, payload={"command": command, "exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr, "remote": remote, "branch": branch})
+
+
+class _ProviderReviewTool(_GitWriteTool):
+    permission_level = "git_remote_write"
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        del context
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="failed",
+            observation="Provider review creation is approval-gated; configure the provider client before executing this remote write.",
+            payload={"errors": ["provider client not configured"], "requested": json_safe(payload)},
+        )
+
+
+class GitHubCreatePrTool(_ProviderReviewTool):
+    spec = ToolSpec(
+        name="github_create_pr",
+        description="Create a GitHub pull request only after explicit approval.",
+        operation="git_provider_request",
+        input_schema={"type": "object", "properties": {"source_branch": {"type": "string"}, "target_branch": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "approval_decision": {"type": "object"}}, "required": ["source_branch", "target_branch", "title"], "additionalProperties": True},
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="command",
+        permission_required=True,
+        parallel_safe=False,
+        network_access=True,
+    )
+
+
+class GitLabCreateMrTool(_ProviderReviewTool):
+    spec = ToolSpec(
+        name="gitlab_create_mr",
+        description="Create a GitLab merge request only after explicit approval.",
+        operation="git_provider_request",
+        input_schema={"type": "object", "properties": {"source_branch": {"type": "string"}, "target_branch": {"type": "string"}, "title": {"type": "string"}, "description": {"type": "string"}, "approval_decision": {"type": "object"}}, "required": ["source_branch", "target_branch", "title"], "additionalProperties": True},
+        read_only=False,
+        concurrency_safe=False,
+        requires_approval_by_default=True,
+        side_effect_level="command",
+        permission_required=True,
+        parallel_safe=False,
+        network_access=True,
     )
 
 
@@ -1663,6 +2059,25 @@ def _dedupe_strings(items: list[str]) -> list[str]:
         if item not in result:
             result.append(item)
     return result
+
+
+def _source_notes(records: list[dict[str, Any]]) -> list[dict[str, str]]:
+    notes: list[dict[str, str]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        url = str(record.get("url") or "")
+        if not url:
+            continue
+        notes.append(
+            {
+                "title": str(record.get("title") or url)[:200],
+                "url": url,
+                "source": str(record.get("source") or "")[:160],
+                "fetched_at": str(record.get("fetched_at") or ""),
+            }
+        )
+    return notes[:12]
 
 
 def _redact_preview(text: str, *, limit: int = 240) -> str:

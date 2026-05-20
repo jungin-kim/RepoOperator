@@ -43,6 +43,16 @@ export type CommandDetailItem = {
   exitCode?: number | null;
 };
 
+export type WebResearchDetailItem = {
+  kind: "web";
+  id: string;
+  label: string;
+  status: string;
+  query?: string | null;
+  sourceCount?: number | null;
+  sources?: Array<{ title?: string; url?: string; source?: string }>;
+};
+
 export type EditDetailItem = {
   kind: "edit";
   id: string;
@@ -57,6 +67,7 @@ export type AgentActivityDetailItem =
   | ReadFileDetailItem
   | ListFilesDetailItem
   | CommandDetailItem
+  | WebResearchDetailItem
   | EditDetailItem;
 
 export type ActivityGroupItem = {
@@ -104,6 +115,7 @@ export type AgentTranscriptSection = {
     filesListed: number;
     commandsRun: number;
     filesEdited: number;
+    webSources: number;
   };
   summaryText: string;
   collapsible: boolean;

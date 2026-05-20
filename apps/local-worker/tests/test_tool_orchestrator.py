@@ -149,6 +149,24 @@ class ToolOrchestratorTests(unittest.TestCase):
         self.assertIsNone(result.command_result.get("exit_code"))
         self.assertTrue(result.command_result["needs_approval"])
 
+    def test_git_write_tools_require_approval(self) -> None:
+        for action in (
+            AgentAction(type="git_commit", reason_summary="commit", payload={"message": "test"}),
+            AgentAction(type="git_push", reason_summary="push", payload={"branch": "main", "remote": "origin"}),
+            AgentAction(type="github_create_pr", reason_summary="pr", payload={"source_branch": "feature", "target_branch": "main", "title": "Test"}),
+        ):
+            result = self._orchestrator().execute_action(action)
+            self.assertEqual(result.status, "waiting_approval")
+            self.assertEqual(result.payload["permission_decision"]["decision"], "ask")
+
+    def test_git_status_is_read_only(self) -> None:
+        import subprocess
+
+        subprocess.run(["git", "init"], cwd=self.repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = self._orchestrator().execute_action(AgentAction(type="git_status", reason_summary="status"))
+        self.assertEqual(result.status, "success")
+        self.assertIn("##", result.observation)
+
     def test_pre_hook_can_block_tool(self) -> None:
         hooks = HookManager()
         hooks.register_pre_tool_hook(lambda event: HookResult(continue_=False, decision="deny", reason="blocked by test"))

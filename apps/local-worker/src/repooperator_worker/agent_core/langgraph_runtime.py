@@ -22,6 +22,8 @@ from repooperator_worker.agent_core.change_set import (
     proposal_from_edit_result,
     validate_change_set as validate_change_set_model,
 )
+from repooperator_worker.agent_core.capabilities.builtin import get_default_capability_registry
+from repooperator_worker.agent_core.context_packer import ContextPacker, pack_context
 from repooperator_worker.agent_core.graph_checkpoints import EventServiceLangGraphSaver
 from repooperator_worker.agent_core.graph_routes import choose_graph_next_action
 from repooperator_worker.agent_core.graph_state import (
@@ -115,6 +117,10 @@ class RepoOperatorGraphState(TypedDict, total=False):
     repo: str
     branch: str | None
     context_packet: dict[str, Any] | None
+    capability_snapshot: dict[str, Any] | None
+    model_profile_snapshot: dict[str, Any] | None
+    context_pack_summary: dict[str, Any] | None
+    short_term_memory: dict[str, Any] | None
     request_understanding_snapshot: dict[str, Any] | None
     classifier_snapshot: dict[str, Any]
     task_frame_snapshot: dict[str, Any] | None
@@ -182,6 +188,8 @@ class RepoOperatorGraphState(TypedDict, total=False):
     edit_done: bool
     validation_done: bool
     approval_decision: dict[str, Any] | None
+    git_workflow: dict[str, Any] | None
+    routine_context: dict[str, Any] | None
 
 
 _DEFAULT_LANGGRAPH_CHECKPOINTER = EventServiceLangGraphSaver()
@@ -194,6 +202,8 @@ def get_default_langgraph_checkpointer() -> InMemorySaver:
 def build_repooperator_state_graph() -> StateGraph:
     graph = StateGraph(RepoOperatorGraphState)
     graph.add_node("load_context", load_context_node)
+    graph.add_node("capability_discovery", capability_discovery_node)
+    graph.add_node("context_pack", context_pack_node)
     graph.add_node("understand_request", understand_request_node)
     graph.add_node("build_task_plan", build_task_plan_node)
     graph.add_node("route_next", route_next_node)
@@ -211,10 +221,18 @@ def build_repooperator_state_graph() -> StateGraph:
     graph.add_node("await_change_approval", await_approval_node)
     graph.add_node("apply_change_set", apply_change_set_node)
     graph.add_node("post_apply_validation", post_apply_validation_node)
+    graph.add_node("web_research_graph", web_research_graph_node)
+    graph.add_node("git_workflow_graph", git_workflow_graph_node)
+    graph.add_node("routine_enqueue_node", routine_enqueue_node)
+    graph.add_node("decompose_task", decompose_task_node)
+    graph.add_node("dispatch_work_units", dispatch_work_units_node)
+    graph.add_node("reduce_work_reports", reduce_work_reports_node)
     graph.add_node("final_synthesis", final_synthesis_node)
 
     graph.add_edge(START, "load_context")
-    graph.add_edge("load_context", "understand_request")
+    graph.add_edge("load_context", "capability_discovery")
+    graph.add_edge("capability_discovery", "context_pack")
+    graph.add_edge("context_pack", "understand_request")
     graph.add_edge("understand_request", "build_task_plan")
     graph.add_edge("build_task_plan", "route_next")
     graph.add_conditional_edges(
@@ -235,6 +253,12 @@ def build_repooperator_state_graph() -> StateGraph:
             "await_change_approval": "await_change_approval",
             "apply_change_set": "apply_change_set",
             "post_apply_validation": "post_apply_validation",
+            "web_research_graph": "web_research_graph",
+            "git_workflow_graph": "git_workflow_graph",
+            "routine_enqueue_node": "routine_enqueue_node",
+            "decompose_task": "decompose_task",
+            "dispatch_work_units": "dispatch_work_units",
+            "reduce_work_reports": "reduce_work_reports",
             "final_synthesis": "final_synthesis",
             END: END,
         },
@@ -262,7 +286,13 @@ def build_repooperator_state_graph() -> StateGraph:
     graph.add_edge("await_approval", "route_next")
     graph.add_edge("await_change_approval", "route_next")
     graph.add_edge("apply_change_set", "post_apply_validation")
-    graph.add_edge("post_apply_validation", "final_synthesis")
+    graph.add_edge("post_apply_validation", "route_next")
+    graph.add_edge("web_research_graph", "validate_result")
+    graph.add_edge("git_workflow_graph", "route_next")
+    graph.add_edge("routine_enqueue_node", "final_synthesis")
+    graph.add_edge("decompose_task", "dispatch_work_units")
+    graph.add_edge("dispatch_work_units", "reduce_work_reports")
+    graph.add_edge("reduce_work_reports", "route_next")
     graph.add_edge("final_synthesis", END)
     return graph
 
@@ -368,6 +398,50 @@ def build_validation_graph() -> StateGraph:
     graph.add_edge("parse_errors", "update_validation_result")
     graph.add_edge("update_validation_result", "route_validation_next")
     graph.add_edge("route_validation_next", END)
+    return graph
+
+
+def build_web_research_graph() -> StateGraph:
+    graph = StateGraph(RepoOperatorGraphState)
+    graph.add_node("decide_web_needed", web_decide_needed_node)
+    graph.add_node("search_web", web_search_node)
+    graph.add_node("fetch_sources", web_fetch_sources_node)
+    graph.add_node("summarize_web_evidence", web_summarize_node)
+    graph.add_node("merge_web_evidence", web_merge_evidence_node)
+    graph.add_edge(START, "decide_web_needed")
+    graph.add_conditional_edges(
+        "decide_web_needed",
+        route_web_research_next,
+        {
+            "search_web": "search_web",
+            "summarize_web_evidence": "summarize_web_evidence",
+            END: END,
+        },
+    )
+    graph.add_edge("search_web", "fetch_sources")
+    graph.add_edge("fetch_sources", "summarize_web_evidence")
+    graph.add_edge("summarize_web_evidence", "merge_web_evidence")
+    graph.add_edge("merge_web_evidence", END)
+    return graph
+
+
+def build_git_workflow_graph() -> StateGraph:
+    graph = StateGraph(RepoOperatorGraphState)
+    graph.add_node("propose_commit_summary", git_propose_commit_summary_node)
+    graph.add_node("await_commit_approval", git_await_commit_approval_node)
+    graph.add_node("git_commit", git_commit_node)
+    graph.add_node("await_push_approval", git_await_push_approval_node)
+    graph.add_node("git_push", git_push_node)
+    graph.add_node("await_pr_approval", git_await_pr_approval_node)
+    graph.add_node("create_pr_or_mr", git_create_review_node)
+    graph.add_edge(START, "propose_commit_summary")
+    graph.add_edge("propose_commit_summary", "await_commit_approval")
+    graph.add_edge("await_commit_approval", END)
+    graph.add_edge("git_commit", "await_push_approval")
+    graph.add_edge("await_push_approval", END)
+    graph.add_edge("git_push", "await_pr_approval")
+    graph.add_edge("await_pr_approval", END)
+    graph.add_edge("create_pr_or_mr", END)
     return graph
 
 
@@ -488,6 +562,10 @@ def initial_graph_state(
         "repo": request.project_path,
         "branch": request.branch,
         "context_packet": None,
+        "capability_snapshot": None,
+        "model_profile_snapshot": None,
+        "context_pack_summary": None,
+        "short_term_memory": None,
         "request_understanding_snapshot": None,
         "classifier_snapshot": classifier_to_snapshot(ClassifierResult()),
         "task_frame_snapshot": None,
@@ -555,6 +633,8 @@ def initial_graph_state(
         "edit_done": False,
         "validation_done": False,
         "approval_decision": None,
+        "git_workflow": None,
+        "routine_context": None,
     }
 
 
@@ -565,6 +645,58 @@ def load_context_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     update = _updates_from_core(state, core)
     update["events_to_emit"] = [_graph_transition_event(state, "load_context", operation="load_context")]
     return _with_checkpoint_bump(update)
+
+
+def capability_discovery_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    registry = get_default_capability_registry()
+    tool_registry = get_default_tool_registry()
+    snapshot = {
+        "capabilities": registry.specs_for_model(),
+        "tool_capabilities": registry.tool_map(),
+        "available_tools": tool_registry.allowed_action_types(),
+    }
+    return _with_checkpoint_bump(
+        {
+            "capability_snapshot": json_safe(snapshot),
+            "events_to_emit": [
+                _graph_transition_event(
+                    state,
+                    "capability_discovery",
+                    operation="capability_discovery",
+                    aggregate={"available_capabilities": registry.selectable_names()},
+                )
+            ],
+        }
+    )
+
+
+def context_pack_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    request = _request(state)
+    base_context = state.get("context_packet") if isinstance(state.get("context_packet"), dict) else {}
+    kind = _context_kind_for_state(state)
+    packet = pack_context(kind, request, state=dict(state), base_context=base_context)
+    merged_packet = {**dict(base_context or {}), **packet}
+    summary = {
+        "kind": kind,
+        "compression": packet.get("compression"),
+        "file_count": len(((packet.get("file_evidence") or {}).get("included_files") or {})),
+    }
+    return _with_checkpoint_bump(
+        {
+            "context_packet": json_safe(merged_packet),
+            "model_profile_snapshot": packet.get("model_profile"),
+            "context_pack_summary": json_safe(summary),
+            "short_term_memory": packet.get("short_term_memory"),
+            "events_to_emit": [
+                _graph_transition_event(
+                    state,
+                    "context_pack",
+                    operation="context_pack",
+                    aggregate=summary,
+                )
+            ],
+        }
+    )
 
 
 def understand_request_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -686,6 +818,8 @@ def route_by_stage(state: RepoOperatorGraphState) -> str:
         return route_after_validation(state)
     if stage == "after_change_plan":
         return route_after_change_plan(state)
+    if stage == "after_apply":
+        return route_after_apply(state)
     if stage == "after_approval":
         return route_after_approval(state)
     return route_after_understanding(state)
@@ -693,11 +827,13 @@ def route_by_stage(state: RepoOperatorGraphState) -> str:
 
 def route_after_understanding(state: RepoOperatorGraphState) -> str:
     if _should_use_supervisor(state):
-        return "supervisor"
+        return "decompose_task"
     return _route_to_final_or_action(state)
 
 
 def route_after_evidence(state: RepoOperatorGraphState) -> str:
+    if _web_research_needed(state) and _web_research_available(state) and not _has_web_evidence(state):
+        return "web_research_graph"
     return route_to_final_or_continue(state)
 
 
@@ -738,10 +874,18 @@ def route_after_approval(state: RepoOperatorGraphState) -> str:
     return route_to_final_or_continue(state)
 
 
+def route_after_apply(state: RepoOperatorGraphState) -> str:
+    if state.get("apply_status") == "applied" and _git_workflow_requested(state) and not (state.get("git_workflow") or {}).get("commit_proposed"):
+        return "git_workflow_graph"
+    return route_to_final_or_continue(state)
+
+
 def route_after_interrupt_resume(state: RepoOperatorGraphState) -> str:
     if _pending_action(state):
         if _pending_action(state).type == "apply_change_set":
             return "apply_change_set"
+        if _pending_action(state).type in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+            return "execute_tool"
         return "execute_tool"
     if state.get("stop_reason") == "approval_denied":
         return "final_synthesis"
@@ -752,6 +896,77 @@ def route_to_final_or_continue(state: RepoOperatorGraphState) -> str:
     if state.get("stop_reason") in {"cancelled", "timed_out", "max_loop_iterations", "max_file_reads", "max_commands", "waiting_approval", "approval_denied"}:
         return "final_synthesis"
     return _route_to_final_or_action(state)
+
+
+def web_research_graph_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    update = _invoke_subgraph_delta(build_web_research_graph, state)
+    update["routing_stage"] = "after_tool_result"
+    update.setdefault("events_to_emit", []).append(
+        _graph_transition_event(state, "web_research_graph", subgraph="web_research_graph", operation="web_research")
+    )
+    return _with_checkpoint_bump(update)
+
+
+def git_workflow_graph_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    update = _invoke_subgraph_delta(build_git_workflow_graph, state)
+    update["routing_stage"] = "after_approval" if update.get("pending_approval") else "after_tool_result"
+    update.setdefault("events_to_emit", []).append(
+        _graph_transition_event(state, "git_workflow_graph", subgraph="git_workflow_graph", operation="git_workflow")
+    )
+    return _with_checkpoint_bump(update)
+
+
+def routine_enqueue_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return _with_checkpoint_bump(
+        {
+            "routine_context": {"status": "not_enqueued", "reason": "Routine runs use normal AgentRunRequest enqueue paths."},
+            "events_to_emit": [_graph_transition_event(state, "routine_enqueue_node", subgraph="routine", operation="routine_enqueue")],
+        }
+    )
+
+
+def decompose_task_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    from repooperator_worker.agent_core.tasks import decompose_complex_task
+
+    plan = decompose_complex_task(_request(state).task, capability_snapshot=state.get("capability_snapshot") or {})
+    work_units = [unit.model_dump() for unit in plan.work_units]
+    return _with_checkpoint_bump(
+        {
+            "worker_tasks": work_units,
+            "supervisor_mode": True,
+            "events_to_emit": [
+                _graph_transition_event(
+                    state,
+                    "decompose_task",
+                    subgraph="supervisor",
+                    operation="decompose_task",
+                    aggregate={"work_unit_count": len(work_units), "plan_id": plan.id},
+                )
+            ],
+        }
+    )
+
+
+def dispatch_work_units_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    reports = [_run_worker_task(task, state=state) for task in state.get("worker_tasks") or [] if _work_unit_dependencies_complete(task, state)]
+    return _with_checkpoint_bump(
+        {
+            "worker_reports": reports,
+            "events_to_emit": [
+                _graph_transition_event(
+                    state,
+                    "dispatch_work_units",
+                    subgraph="supervisor",
+                    operation="dispatch_work_units",
+                    aggregate={"worker_report_count": len(reports)},
+                )
+            ],
+        }
+    )
+
+
+def reduce_work_reports_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return supervisor_reduce_worker_reports_node(state)
 
 
 def supervisor_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -1025,6 +1240,86 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                 ],
             }
         )
+    if pending.get("kind") in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"} or payload.get("kind") in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+        kind = str(pending.get("kind") or payload.get("kind") or "")
+        if normalized.get("decision") == "allow":
+            action_type = kind
+            action_payload = {**json_safe(pending.get("approval_payload") or {}), "approval_decision": normalized}
+            if kind == "git_push":
+                action_payload.update({"remote": pending.get("remote") or "origin", "branch": pending.get("branch") or state.get("branch") or "HEAD"})
+            return _with_checkpoint_bump(
+                {
+                    "pending_action": action_to_snapshot(
+                        AgentAction(
+                            type=action_type,
+                            reason_summary=f"Run {kind} after explicit approval.",
+                            expected_output=f"{kind} result.",
+                            payload=action_payload,
+                        )
+                    ),
+                    "pending_approval": None,
+                    "stop_reason": None,
+                    "routing_stage": "after_interrupt_resume",
+                    "approval_decision": normalized,
+                    "events_to_emit": [
+                        _graph_transition_event(
+                            state,
+                            "await_approval",
+                            operation="approval_resume",
+                            status="completed",
+                            aggregate={"kind": kind, "decision": "allow"},
+                        )
+                    ],
+                }
+            )
+        return _with_checkpoint_bump(
+            {
+                "stop_reason": "approval_denied",
+                "final_response": f"I did not run {kind} because approval was denied. No git write was performed.",
+                "pending_approval": None,
+                "routing_stage": "after_approval",
+                "approval_decision": normalized,
+                "events_to_emit": [
+                    _graph_transition_event(
+                        state,
+                        "await_approval",
+                        operation="approval_gate",
+                        status="completed",
+                        aggregate={"kind": kind, "decision": "deny"},
+                    )
+                ],
+            }
+        )
+    if pending.get("kind") in {"search_web", "fetch_url"} or payload.get("kind") in {"search_web", "fetch_url"}:
+        kind = str(pending.get("kind") or payload.get("kind") or "")
+        if normalized.get("decision") == "allow":
+            return _with_checkpoint_bump(
+                {
+                    "pending_action": action_to_snapshot(
+                        AgentAction(
+                            type=kind,
+                            reason_summary=f"Run {kind} after explicit network approval.",
+                            expected_output="Untrusted web evidence with source metadata.",
+                            payload={**json_safe(pending.get("approval_payload") or {}), "approval_decision": normalized},
+                        )
+                    ),
+                    "pending_approval": None,
+                    "stop_reason": None,
+                    "routing_stage": "after_interrupt_resume",
+                    "approval_decision": normalized,
+                    "events_to_emit": [_graph_transition_event(state, "await_approval", operation="approval_resume", status="completed", aggregate={"kind": kind, "decision": "allow"})],
+                }
+            )
+        return _with_checkpoint_bump(
+            {
+                "stop_reason": "approval_denied",
+                "final_response": f"I did not run {kind} because network approval was denied.",
+                "pending_approval": None,
+                "routing_stage": "after_approval",
+                "approval_decision": normalized,
+                "events_to_emit": [_graph_transition_event(state, "await_approval", operation="approval_gate", status="completed", aggregate={"kind": kind, "decision": "deny"})],
+            }
+        )
     if normalized.get("decision") == "allow":
         command = list((state.get("pending_approval") or {}).get("command") or payload.get("command") or [])
         approval_id = str((state.get("pending_approval") or {}).get("approval_id") or payload.get("approval_id") or "")
@@ -1113,6 +1408,7 @@ def post_apply_validation_node(state: RepoOperatorGraphState) -> dict[str, Any]:
             "post_apply_validation_status": status,
             "change_set_proposal": proposal or state.get("change_set_proposal"),
             "validation_results": [{"kind": "post_apply", "status": status, "errors": []}],
+            "routing_stage": "after_apply",
             "events_to_emit": [
                 _graph_transition_event(
                     state,
@@ -1421,6 +1717,137 @@ def validation_route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     }
 
 
+def web_decide_needed_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    needed = _web_research_needed(state) and _web_research_available(state)
+    return {
+        "evidence_store": {**dict(state.get("evidence_store") or {}), "web_research_needed": needed},
+        "events_to_emit": [_graph_transition_event(state, "decide_web_needed", subgraph="web_research_graph", operation="decide_web_needed", aggregate={"needed": needed})],
+    }
+
+
+def route_web_research_next(state: RepoOperatorGraphState) -> str:
+    evidence = state.get("evidence_store") if isinstance(state.get("evidence_store"), dict) else {}
+    if not evidence.get("web_research_needed"):
+        return END
+    if _has_web_evidence(state):
+        return "summarize_web_evidence"
+    return "search_web"
+
+
+def web_search_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    action = AgentAction(
+        type="search_web",
+        reason_summary="Search web for current external evidence.",
+        expected_output="Untrusted web evidence records with source metadata.",
+        payload={"query": _web_query_for_request(state), "max_results": 4},
+    )
+    return _execute_ad_hoc_action(state, action, subgraph="web_research_graph", node_name="search_web")
+
+
+def web_fetch_sources_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    latest = _latest_result(state)
+    sources = [item for item in (latest.payload.get("web_evidence") if latest else []) or [] if isinstance(item, dict)]
+    updates: dict[str, Any] = {"events_to_emit": [_graph_transition_event(state, "fetch_sources", subgraph="web_research_graph", operation="fetch_sources")]}
+    fetched: list[dict[str, Any]] = []
+    for source in sources[:2]:
+        url = str(source.get("url") or "")
+        if not url:
+            continue
+        result_update = _execute_ad_hoc_action(
+            {**dict(state), **updates},
+            AgentAction(type="fetch_url", reason_summary="Fetch selected web source as sanitized evidence.", payload={"url": url}),
+            subgraph="web_research_graph",
+            node_name="fetch_sources",
+        )
+        latest_result = result_from_snapshot((result_update.get("action_results") or [None])[-1])
+        if latest_result and latest_result.payload.get("web_evidence"):
+            fetched.extend(item for item in latest_result.payload.get("web_evidence") or [] if isinstance(item, dict))
+        updates = _merge_updates(updates, result_update)
+    evidence = dict(state.get("evidence_store") or {})
+    evidence.setdefault("web_evidence", [])
+    evidence["web_evidence"] = [*evidence["web_evidence"], *sources, *fetched]
+    updates["evidence_store"] = evidence
+    return updates
+
+
+def web_summarize_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    evidence = dict(state.get("evidence_store") or {})
+    records = list(evidence.get("web_evidence") or [])
+    action = AgentAction(
+        type="summarize_web_evidence",
+        reason_summary="Summarize web evidence with source metadata.",
+        payload={"web_evidence": records},
+    )
+    return _execute_ad_hoc_action(state, action, subgraph="web_research_graph", node_name="summarize_web_evidence")
+
+
+def web_merge_evidence_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    evidence = dict(state.get("evidence_store") or {})
+    latest = _latest_result(state)
+    if latest and isinstance(latest.payload.get("web_evidence_summary"), dict):
+        evidence["web_evidence_summary"] = latest.payload["web_evidence_summary"]
+    return {
+        "evidence_store": evidence,
+        "events_to_emit": [_graph_transition_event(state, "merge_web_evidence", subgraph="web_research_graph", operation="merge_web_evidence")],
+    }
+
+
+def git_propose_commit_summary_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    workflow = dict(state.get("git_workflow") or {})
+    files = list(state.get("files_changed") or [])
+    message = workflow.get("commit_message") or _generated_commit_message(state)
+    workflow.update({"commit_message": message, "files": files, "commit_proposed": True})
+    pending = {
+        "kind": "git_commit",
+        "message": message,
+        "files": files,
+        "reason": "Creating a local commit requires explicit approval.",
+        "approval_payload": {"message": message, "files": files},
+    }
+    return {
+        "git_workflow": workflow,
+        "pending_approval": pending,
+        "stop_reason": "waiting_approval",
+        "final_response": f"Validation passed. Proposed commit message before approval:\n\n{message}",
+        "events_to_emit": [_graph_transition_event(state, "propose_commit_summary", subgraph="git_workflow_graph", operation="propose_commit_summary", files=files, aggregate={"message": message, "files": files})],
+    }
+
+
+def git_await_commit_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    if state.get("pending_approval"):
+        return await_approval_node(state)
+    return {"events_to_emit": [_graph_transition_event(state, "await_commit_approval", subgraph="git_workflow_graph", operation="approval_not_needed")]}
+
+
+def git_commit_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return _execute_if_action_type(state, {"git_commit"}, "git_workflow_graph", "git_commit")
+
+
+def git_await_push_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    if not _git_push_requested(state):
+        return {"events_to_emit": [_graph_transition_event(state, "await_push_approval", subgraph="git_workflow_graph", operation="push_not_requested")]}
+    branch = state.get("branch") or _current_branch_hint(state) or "HEAD"
+    pending = {
+        "kind": "git_push",
+        "remote": "origin",
+        "branch": branch,
+        "reason": f"Pushing branch {branch} to origin requires explicit approval.",
+    }
+    return {"pending_approval": pending, "stop_reason": "waiting_approval", "events_to_emit": [_graph_transition_event(state, "await_push_approval", subgraph="git_workflow_graph", operation="await_push_approval", aggregate=pending)]}
+
+
+def git_push_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return _execute_if_action_type(state, {"git_push"}, "git_workflow_graph", "git_push")
+
+
+def git_await_pr_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return {"events_to_emit": [_graph_transition_event(state, "await_pr_approval", subgraph="git_workflow_graph", operation="pr_not_requested")]}
+
+
+def git_create_review_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return _execute_if_action_type(state, {"github_create_pr", "gitlab_create_mr"}, "git_workflow_graph", "create_pr_or_mr")
+
+
 def final_quality_guard_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     return {
         "events_to_emit": [_graph_transition_event(state, "quality_guard", subgraph="finalization_graph", operation="quality_guard")]
@@ -1459,6 +1886,9 @@ def final_build_response_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     core.final_response = _controller().validate_or_repair_final_answer(core.final_response, core, request)
     if _is_explanation_only_edit_request(state) and not state.get("files_changed") and "no files were modified" not in core.final_response.lower():
         core.final_response = core.final_response.rstrip() + "\n\nNo files were modified."
+    source_notes = _web_source_notes_for_final(state)
+    if source_notes and "Source notes:" not in core.final_response:
+        core.final_response = core.final_response.rstrip() + "\n\nSource notes:\n" + "\n".join(source_notes)
     if core.final_response != draft_response:
         from repooperator_worker.agent_core.events import append_work_trace
 
@@ -1580,6 +2010,25 @@ def _execute_pending_action(state: RepoOperatorGraphState, *, subgraph: str | No
     return update
 
 
+def _execute_ad_hoc_action(state: RepoOperatorGraphState, action: AgentAction, *, subgraph: str | None, node_name: str) -> dict[str, Any]:
+    working = {**dict(state), "pending_action": action_to_snapshot(action)}
+    return _execute_pending_action(working, subgraph=subgraph, node_name=node_name)
+
+
+def _merge_updates(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(left)
+    for key, value in right.items():
+        if key in APPEND_REDUCER_FIELDS or key in UNIQUE_APPEND_REDUCER_FIELDS:
+            existing = list(merged.get(key) or [])
+            incoming = value if isinstance(value, list) else [value]
+            merged[key] = [*existing, *incoming]
+        elif key == "evidence_store" and isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
 def _route_to_final_or_action(state: RepoOperatorGraphState) -> str:
     action = _pending_action(state)
     if not action:
@@ -1590,12 +2039,16 @@ def _route_to_final_or_action(state: RepoOperatorGraphState) -> str:
         return "ask_clarification"
     if action.type in {"inspect_repo_tree", "search_files", "search_text", "read_file", "inspect_symbol", "analyze_file"}:
         return "gather_evidence"
+    if action.type in {"search_web", "fetch_url", "summarize_web_evidence"}:
+        return "web_research_graph"
     if action.type == "analyze_repository":
         return "analysis_graph"
     if action.type in {"generate_change_set", "generate_edit", "validate_change_set", "validate_edit"}:
         return "plan_change_set"
     if action.type == "apply_change_set":
         return "apply_change_set"
+    if action.type in {"git_status", "git_diff", "git_log", "git_branch_create", "git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+        return "execute_tool"
     if action.type in {"preview_command", "inspect_git_state", "run_approved_command", "request_command_approval"}:
         return "execute_tool"
     return "execute_tool"
@@ -1687,7 +2140,14 @@ def _updates_from_core_after_action(
     if result.files_read:
         update["files_read"] = list(result.files_read)
     if result.status == "waiting_approval":
-        update["pending_approval"] = result.command_result
+        decision = result.payload.get("permission_decision") if isinstance(result.payload, dict) else None
+        metadata = decision.get("metadata") if isinstance(decision, dict) and isinstance(decision.get("metadata"), dict) else {}
+        update["pending_approval"] = result.command_result or {
+            "kind": action.type,
+            "reason": result.observation,
+            "approval_payload": metadata.get("approval_payload") or action.payload,
+            "tool_name": action.type,
+        }
     if result.status in {"cancelled", "timed_out"}:
         update["stop_reason"] = result.status
     return update
@@ -1800,6 +2260,35 @@ def _approval_interrupt_payload(state: RepoOperatorGraphState) -> dict[str, Any]
                 "files": files,
                 "risk": approval.get("reason") or "Applying this proposal modifies files and requires approval.",
                 "resume_token": f"{state.get('run_id')}:change_set_apply:{proposal_id}",
+            }
+        )
+    if approval.get("kind") in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+        kind = str(approval.get("kind"))
+        return json_safe(
+            {
+                "kind": kind,
+                "run_id": state.get("run_id"),
+                "thread_id": state.get("thread_id"),
+                "files": approval.get("files") or [],
+                "message": approval.get("message"),
+                "remote": approval.get("remote"),
+                "branch": approval.get("branch") or state.get("branch"),
+                "target_branch": approval.get("target_branch"),
+                "risk": approval.get("reason") or f"{kind} requires explicit approval.",
+                "resume_token": f"{state.get('run_id')}:{kind}:{approval.get('branch') or approval.get('message') or ''}",
+            }
+        )
+    if approval.get("kind") in {"search_web", "fetch_url"}:
+        kind = str(approval.get("kind"))
+        return json_safe(
+            {
+                "kind": kind,
+                "run_id": state.get("run_id"),
+                "thread_id": state.get("thread_id"),
+                "files": [],
+                "risk": approval.get("reason") or "Network access requires approval.",
+                "approval_payload": approval.get("approval_payload") or {},
+                "resume_token": f"{state.get('run_id')}:{kind}",
             }
         )
     command = list(approval.get("command") or [])
@@ -1970,6 +2459,8 @@ def _graph_transition_event(
 def _graph_event_label(node: str, operation: str) -> str:
     labels = {
         "load_context": "Loaded runtime context",
+        "capability_discovery": "Discovered capabilities",
+        "context_pack": "Packed model context",
         "understand_request": "Framed request",
         "build_task_plan": "Built task plan",
         "route_next": "Selected next step",
@@ -1984,6 +2475,15 @@ def _graph_event_label(node: str, operation: str) -> str:
         "repair_change_set": "Repaired proposal",
         "ask_clarification": "Prepared clarification",
         "await_approval": "Waiting for approval",
+        "await_change_approval": "Waiting for approval",
+        "apply_change_set": "Applied change set",
+        "post_apply_validation": "Checked applied changes",
+        "web_research_graph": "Researched web evidence",
+        "git_workflow_graph": "Prepared git workflow",
+        "routine_enqueue_node": "Checked routine enqueue",
+        "decompose_task": "Decomposed task",
+        "dispatch_work_units": "Dispatched work units",
+        "reduce_work_reports": "Reduced work reports",
         "final_synthesis": "Built final response",
     }
     return labels.get(node, operation.replace("_", " ").title())
@@ -2065,14 +2565,15 @@ def _worker_tasks_from_groups(groups: dict[str, list[str]], *, roles: list[str])
 
 
 def _run_worker_task(task: dict[str, Any], *, state: RepoOperatorGraphState) -> dict[str, Any]:
-    role = str(task.get("role") or "AnalysisAgent")
-    if role == "AnalysisAgent":
+    role = str(task.get("role") or task.get("assigned_worker_role") or "AnalysisAgent")
+    if role in {"AnalysisAgent", "CodeAnalysisAgent"}:
         return _run_analysis_worker_task(task, state=state)
     files = [str(item) for item in task.get("input_files") or task.get("files") or []]
     if role == "EvidenceAgent":
         read = _worker_read_files(state, files[:1])
         return {
             "worker": role,
+            "work_unit_id": task.get("id") or task.get("task_id"),
             "task_id": task.get("task_id"),
             "role": role,
             "scope": task.get("scope") or task.get("group"),
@@ -2082,9 +2583,20 @@ def _run_worker_task(task: dict[str, Any], *, state: RepoOperatorGraphState) -> 
             "summary": "Located bounded evidence candidates for the requested scope.",
             "status": read["status"],
         }
+    if role == "WebResearchAgent":
+        return {
+            "worker": role,
+            "work_unit_id": task.get("id") or task.get("task_id"),
+            "task_id": task.get("task_id"),
+            "role": role,
+            "findings": ["Web research must use search_web/fetch_url as untrusted evidence when needed."],
+            "summary": "Prepared web research constraints; no web write or trust escalation occurred.",
+            "status": "completed",
+        }
     if role == "EditPlanningAgent":
         return {
             "worker": role,
+            "work_unit_id": task.get("id") or task.get("task_id"),
             "task_id": task.get("task_id"),
             "role": role,
             "scope": task.get("scope") or task.get("group"),
@@ -2097,12 +2609,14 @@ def _run_worker_task(task: dict[str, Any], *, state: RepoOperatorGraphState) -> 
             "status": "completed",
         }
     if role == "ValidationAgent":
-        return {"worker": role, "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Validation should run through ToolOrchestrator-backed checks."], "summary": "Validation should run through ToolOrchestrator-backed checks.", "status": "completed"}
+        return {"worker": role, "work_unit_id": task.get("id") or task.get("task_id"), "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Validation should run through ToolOrchestrator-backed checks."], "summary": "Validation should run through ToolOrchestrator-backed checks.", "status": "completed"}
+    if role == "GitAgent":
+        return {"worker": role, "work_unit_id": task.get("id") or task.get("task_id"), "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Git writes require explicit approval for commit, push, and PR/MR actions."], "summary": "Prepared approval-gated git workflow guidance without remote writes.", "status": "completed"}
     if role == "DocumentationAgent":
-        return {"worker": role, "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Documentation impact should be considered if behavior changes."], "summary": "Documentation impact should be considered if behavior changes.", "status": "completed"}
+        return {"worker": role, "work_unit_id": task.get("id") or task.get("task_id"), "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Documentation impact should be considered if behavior changes."], "summary": "Documentation impact should be considered if behavior changes.", "status": "completed"}
     if role == "TestAgent":
-        return {"worker": role, "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Tests or safe validation commands may be needed after a proposal."], "summary": "Tests or safe validation commands may be needed after a proposal.", "status": "completed"}
-    return {"worker": role, "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Worker completed bounded scoped analysis."], "summary": "Worker completed bounded scoped analysis.", "status": "completed"}
+        return {"worker": role, "work_unit_id": task.get("id") or task.get("task_id"), "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Tests or safe validation commands may be needed after a proposal."], "summary": "Tests or safe validation commands may be needed after a proposal.", "status": "completed"}
+    return {"worker": role, "work_unit_id": task.get("id") or task.get("task_id"), "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Worker completed bounded scoped analysis."], "summary": "Worker completed bounded scoped analysis.", "status": "completed"}
 
 
 def _run_analysis_worker_task(task: dict[str, Any], *, state: RepoOperatorGraphState | None = None) -> dict[str, Any]:
@@ -2110,8 +2624,9 @@ def _run_analysis_worker_task(task: dict[str, Any], *, state: RepoOperatorGraphS
     read = _worker_read_files(state, files[:1]) if state is not None else {"files_read": [], "status": "completed"}
     return {
         "worker": "AnalysisAgent",
+        "work_unit_id": task.get("id") or task.get("task_id"),
         "task_id": task.get("task_id"),
-        "role": "AnalysisAgent",
+        "role": task.get("role") or task.get("assigned_worker_role") or "AnalysisAgent",
         "scope": task.get("scope") or task.get("group"),
         "group": task.get("group"),
         "files": files,
@@ -2168,6 +2683,120 @@ def _is_explanation_only_edit_request(state: RepoOperatorGraphState) -> bool:
     asks_how = bool(re.search(r"\bhow\s+(would|do|can|should)\b", lowered)) or any(term in text for term in ("어떻게", "어떤 식으로"))
     mentions_change = bool(re.search(r"\b(change|edit|add|fix|implement|refactor|update)\b", lowered)) or any(term in text for term in ("추가", "고쳐", "구현", "수정"))
     return asks_how and mentions_change
+
+
+def _context_kind_for_state(state: RepoOperatorGraphState) -> str:
+    if state.get("repair_attempts") or state.get("proposal_errors"):
+        return "repair_context"
+    if state.get("validation_results"):
+        return "validation_context"
+    if state.get("change_set_proposal") or _frame_is_edit_like(state):
+        return "edit_context"
+    if _web_research_needed(state):
+        return "web_research_context"
+    if _should_use_supervisor(state):
+        return "broad_analysis_context"
+    return "summary_context"
+
+
+def _web_research_available(state: RepoOperatorGraphState) -> bool:
+    snapshot = state.get("capability_snapshot") if isinstance(state.get("capability_snapshot"), dict) else {}
+    capabilities = snapshot.get("capabilities") if isinstance(snapshot.get("capabilities"), list) else []
+    if not capabilities:
+        return True
+    return any(item.get("name") == "web_research" and item.get("available") for item in capabilities if isinstance(item, dict))
+
+
+def _web_research_needed(state: RepoOperatorGraphState) -> bool:
+    request = _request(state)
+    text = request.task.lower()
+    if any(action.get("type") in {"search_web", "fetch_url", "summarize_web_evidence"} for action in state.get("actions_taken") or [] if isinstance(action, dict)):
+        return False
+    explicit = any(term in text for term in ("search web", "look up", "latest", "current", "external docs", "online docs", "web research"))
+    dependency = any(term in text for term in ("api version", "library version", "dependency", "release notes", "documentation for"))
+    local_evidence_insufficient = bool(state.get("evidence_done")) and not state.get("files_read") and any(term in text for term in ("docs", "api", "library"))
+    return explicit or dependency or local_evidence_insufficient
+
+
+def _web_query_for_request(state: RepoOperatorGraphState) -> str:
+    request = _request(state)
+    return " ".join(request.task.split())[:280]
+
+
+def _has_web_evidence(state: RepoOperatorGraphState) -> bool:
+    evidence = state.get("evidence_store") if isinstance(state.get("evidence_store"), dict) else {}
+    if evidence.get("web_evidence") or evidence.get("web_evidence_summary"):
+        return True
+    for result in state.get("action_results") or []:
+        payload = result.get("payload") if isinstance(result, dict) else {}
+        if isinstance(payload, dict) and (payload.get("web_evidence") or payload.get("web_evidence_summary")):
+            return True
+    return False
+
+
+def _web_source_notes_for_final(state: RepoOperatorGraphState) -> list[str]:
+    evidence = state.get("evidence_store") if isinstance(state.get("evidence_store"), dict) else {}
+    sources: list[dict[str, Any]] = []
+    if isinstance(evidence.get("web_evidence_summary"), dict):
+        sources.extend(item for item in evidence["web_evidence_summary"].get("sources") or [] if isinstance(item, dict))
+    sources.extend(item for item in evidence.get("web_evidence") or [] if isinstance(item, dict))
+    for result in state.get("action_results") or []:
+        payload = result.get("payload") if isinstance(result, dict) else {}
+        if isinstance(payload, dict):
+            sources.extend(item for item in payload.get("web_evidence") or [] if isinstance(item, dict))
+            summary = payload.get("web_evidence_summary")
+            if isinstance(summary, dict):
+                sources.extend(item for item in summary.get("sources") or [] if isinstance(item, dict))
+    notes: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        url = str(source.get("url") or "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        title = str(source.get("title") or source.get("source") or url)
+        notes.append(f"- {title}: {url}")
+        if len(notes) >= 6:
+            break
+    return notes
+
+
+def _git_workflow_requested(state: RepoOperatorGraphState) -> bool:
+    text = _request(state).task.lower()
+    return any(term in text for term in ("commit", "push", "pull request", "merge request", "pr", "mr"))
+
+
+def _git_push_requested(state: RepoOperatorGraphState) -> bool:
+    text = _request(state).task.lower()
+    return any(term in text for term in ("push", "pull request", "merge request", "pr", "mr"))
+
+
+def _generated_commit_message(state: RepoOperatorGraphState) -> str:
+    files = [str(item) for item in state.get("files_changed") or [] if str(item)]
+    proposal = state.get("change_set_proposal") if isinstance(state.get("change_set_proposal"), dict) else {}
+    summary = ((proposal.get("plan") or {}).get("summary") if isinstance(proposal.get("plan"), dict) else None) or "Apply RepoOperator change set"
+    suffix = f" ({len(files)} file{'s' if len(files) != 1 else ''})" if files else ""
+    return f"{str(summary).strip()[:64]}{suffix}"
+
+
+def _current_branch_hint(state: RepoOperatorGraphState) -> str | None:
+    for result in reversed(state.get("action_results") or []):
+        payload = result.get("payload") if isinstance(result, dict) else {}
+        if isinstance(payload, dict) and payload.get("branch"):
+            return str(payload.get("branch"))
+    return None
+
+
+def _work_unit_dependencies_complete(task: dict[str, Any], state: RepoOperatorGraphState) -> bool:
+    dependencies = [str(item) for item in task.get("dependencies") or [] if str(item)]
+    if not dependencies:
+        return True
+    completed = {
+        str(report.get("work_unit_id") or report.get("task_id"))
+        for report in state.get("worker_reports") or []
+        if isinstance(report, dict) and report.get("status") == "completed"
+    }
+    return all(dep in completed for dep in dependencies)
 
 
 def _final_text_for_change_set(state: RepoOperatorGraphState, proposal: dict[str, Any]) -> str:

@@ -15,7 +15,17 @@ ToolOperation = Literal[
     "search",
     "read_file",
     "analyze_repository",
+    "web_search",
+    "web_fetch",
     "command",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_branch",
+    "git_commit",
+    "git_push",
+    "git_provider_request",
+    "routine",
     "edit",
     "validation",
     "write",
@@ -39,9 +49,11 @@ class ToolSpec:
     permission_required: bool = False
     parallel_safe: bool = True
     workspace_bound: bool = True
+    network_access: bool = False
     produces_artifact: bool = False
     produces_evidence: bool = False
     can_be_retried: bool = True
+    capabilities: tuple[str, ...] = ()
 
     def model_dump(self) -> dict[str, Any]:
         return json_safe(
@@ -58,9 +70,11 @@ class ToolSpec:
                 "permission_required": self.permission_required,
                 "parallel_safe": self.parallel_safe,
                 "workspace_bound": self.workspace_bound,
+                "network_access": self.network_access,
                 "produces_artifact": self.produces_artifact,
                 "produces_evidence": self.produces_evidence,
                 "can_be_retried": self.can_be_retried,
+                "capabilities": list(self.capabilities),
             }
         )
 

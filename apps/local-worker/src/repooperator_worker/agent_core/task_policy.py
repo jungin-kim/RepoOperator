@@ -263,12 +263,18 @@ def action_operation(action_type: str) -> str:
         return "list_files"
     if action_type in {"search_files", "search_text"}:
         return "search"
+    if action_type == "search_web":
+        return "web_search"
+    if action_type in {"fetch_url", "summarize_web_evidence"}:
+        return "web_fetch"
     if action_type in {"read_file", "read_many_files"}:
         return "read_file"
     if action_type == "analyze_repository":
         return "analyze_repository"
     if action_type in {"preview_command", "inspect_git_state", "run_approved_command"}:
         return "command"
+    if action_type in {"git_status", "git_diff", "git_log", "git_branch_create", "git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+        return "git_provider"
     if action_type in {"generate_change_set", "generate_edit"}:
         return "edit"
     if action_type == "validate_change_set":

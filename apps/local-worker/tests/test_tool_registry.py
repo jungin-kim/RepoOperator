@@ -30,9 +30,20 @@ class ToolRegistryTests(unittest.TestCase):
                 "inspect_git_state",
                 "run_approved_command",
                 "run_validation_command",
+                "search_web",
+                "fetch_url",
+                "summarize_web_evidence",
                 "generate_change_set",
                 "validate_change_set",
                 "apply_change_set",
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_branch_create",
+                "git_commit",
+                "git_push",
+                "github_create_pr",
+                "gitlab_create_mr",
                 "create_file",
                 "modify_file",
                 "delete_file",
@@ -54,6 +65,11 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(by_name["search_files"]["operation"], "search")
         self.assertTrue(by_name["search_text"]["read_only"])
         self.assertTrue(by_name["run_approved_command"]["requires_approval_by_default"])
+        self.assertTrue(by_name["search_web"]["network_access"])
+        self.assertEqual(by_name["search_web"]["operation"], "web_search")
+        self.assertIn("web_research", by_name["fetch_url"]["capabilities"])
+        self.assertIn("git_provider", by_name["git_commit"]["capabilities"])
+        self.assertTrue(by_name["git_commit"]["requires_approval_by_default"])
         self.assertTrue(by_name["apply_change_set"]["requires_approval_by_default"])
         self.assertEqual(by_name["apply_change_set"]["operation"], "write")
         self.assertEqual(by_name["generate_change_set"]["operation"], "edit")
@@ -76,6 +92,7 @@ class ToolRegistryTests(unittest.TestCase):
         }
         self.assertTrue(all(required.issubset(item) for item in specs))
         self.assertTrue(all(item.get("operation") for item in specs))
+        self.assertTrue(all(item.get("capabilities") for item in specs))
 
     def test_planner_action_types_come_from_registry(self) -> None:
         self.assertEqual(PLANNER_ACTION_TYPES, set(get_default_tool_registry().allowed_action_types()))

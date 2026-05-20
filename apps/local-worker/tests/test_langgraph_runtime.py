@@ -23,9 +23,11 @@ from repooperator_worker.agent_core.langgraph_runtime import (  # noqa: E402
     build_edit_graph,
     build_evidence_gathering_graph,
     build_finalization_graph,
+    build_git_workflow_graph,
     build_repooperator_state_graph,
     build_supervisor_graph,
     build_validation_graph,
+    build_web_research_graph,
     final_emit_message_node,
     graph_config_for_request,
     initial_graph_state,
@@ -120,6 +122,14 @@ class LangGraphRuntimeTests(unittest.TestCase):
             "post_apply_validation",
             "final_synthesis",
             "supervisor",
+            "capability_discovery",
+            "context_pack",
+            "web_research_graph",
+            "git_workflow_graph",
+            "routine_enqueue_node",
+            "decompose_task",
+            "dispatch_work_units",
+            "reduce_work_reports",
         }
         self.assertTrue(expected.issubset(set(graph.nodes)))
         self.assertIsNotNone(build_compiled_repooperator_graph())
@@ -130,6 +140,8 @@ class LangGraphRuntimeTests(unittest.TestCase):
             build_analysis_graph(),
             build_edit_graph(),
             build_validation_graph(),
+            build_web_research_graph(),
+            build_git_workflow_graph(),
             build_finalization_graph(),
             build_supervisor_graph(),
         ]
@@ -254,6 +266,18 @@ class LangGraphRuntimeTests(unittest.TestCase):
         self.assertIn("read_file", calls)
         self.assertIn("input_files", update["worker_tasks"][0])
         self.assertIn("files_analyzed", update["worker_reports"][0])
+
+    def test_complex_task_decomposition_creates_work_units(self) -> None:
+        from repooperator_worker.agent_core.langgraph_runtime import decompose_task_node, dispatch_work_units_node, reduce_work_reports_node
+
+        state = initial_graph_state(self._request("Analyze the whole codebase and prepare validation guidance."), run_id="run-work-units")
+        decomposed = decompose_task_node(state)
+        self.assertGreaterEqual(len(decomposed["worker_tasks"]), 3)
+        self.assertIn("capability_needed", decomposed["worker_tasks"][0])
+        dispatched = dispatch_work_units_node({**state, **decomposed})
+        self.assertTrue(dispatched["worker_reports"])
+        reduced = reduce_work_reports_node({**state, **decomposed, **dispatched})
+        self.assertTrue(reduced["evidence_reports"] or reduced["file_role_reports"])
 
     def test_interrupt_resume_allow_runs_without_restarting_evidence(self) -> None:
         request = self._request("Run git status")

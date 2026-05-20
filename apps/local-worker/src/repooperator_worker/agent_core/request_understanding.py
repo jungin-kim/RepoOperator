@@ -41,7 +41,7 @@ Return ONLY a JSON object matching this schema:
   "mentioned_symbols": ["<class/function/variable names explicitly named>"],
   "constraints": ["<explicit constraints the user stated, e.g. 'only look at X'>"],
   "requested_outputs": ["<output types requested, e.g. 'explanation', 'diff', 'list'>"],
-  "likely_needed_tools": ["<weak tool hints: read_file | search_files | run_command | generate_change_set | generate_edit | ask_clarification>"],
+  "likely_needed_tools": ["<weak tool hints: read_file | search_files | search_web | run_command | generate_change_set | generate_edit | ask_clarification>"],
   "safety_notes": ["<any safety or scope constraints implicit in the task>"],
   "uncertainties": ["<things that are unclear or ambiguous>"],
   "needs_clarification": false,
@@ -58,7 +58,7 @@ Rules:
 
 _ALLOWED_TOOL_HINTS = frozenset({
     "read_file", "search_files", "search_text", "run_command",
-    "generate_change_set", "generate_edit", "ask_clarification", "inspect_repo_tree",
+    "search_web", "fetch_url", "generate_change_set", "generate_edit", "ask_clarification", "inspect_repo_tree",
 })
 
 
