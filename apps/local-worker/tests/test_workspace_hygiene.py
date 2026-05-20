@@ -21,6 +21,8 @@ SKIP_DIRS = {
     "dist",
     "build",
     "coverage",
+    "runtime",
+    "test-results",
 }
 
 

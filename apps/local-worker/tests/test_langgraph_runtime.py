@@ -5,6 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+
 
 TESTS_DIR = Path(__file__).resolve().parent
 SRC_DIR = TESTS_DIR.parent / "src"
@@ -22,12 +25,21 @@ from repooperator_worker.agent_core.langgraph_runtime import (  # noqa: E402
     build_evidence_gathering_graph,
     build_finalization_graph,
     build_repooperator_state_graph,
+    build_supervisor_graph,
     build_validation_graph,
+    graph_config_for_request,
     initial_graph_state,
+    resume_langgraph_controller,
     route_after_change_plan,
     route_after_tool_result,
     route_after_understanding,
     route_to_final_or_continue,
+)
+from repooperator_worker.agent_core.change_set import (  # noqa: E402
+    ProposedFileChange,
+    ChangePlan,
+    ChangeSetProposal,
+    validate_change_set,
 )
 from repooperator_worker.agent_core.controller_graph import run_controller_graph  # noqa: E402
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator  # noqa: E402
@@ -97,9 +109,15 @@ class LangGraphRuntimeTests(unittest.TestCase):
             build_edit_graph(),
             build_validation_graph(),
             build_finalization_graph(),
+            build_supervisor_graph(),
         ]
         for graph in subgraphs:
             self.assertIsNotNone(graph.compile())
+
+    def test_graph_compiles_with_langgraph_checkpointer(self) -> None:
+        checkpointer = InMemorySaver()
+        compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpointer)
+        self.assertIs(compiled.checkpointer, checkpointer)
 
     def test_route_after_understanding_maps_actions_to_work_modes(self) -> None:
         state = initial_graph_state(self._request(), run_id="run-route")
@@ -117,6 +135,28 @@ class LangGraphRuntimeTests(unittest.TestCase):
         result = ActionResult(action_id=action.action_id, status="success")
         self.assertEqual(append_items([], [action]), [action])
         self.assertEqual(append_items([result], []), [result])
+
+    def test_langgraph_route_does_not_call_legacy_chooser(self) -> None:
+        request = self._request("Summarize README.md")
+        with patch.dict(os.environ, {"REPOOPERATOR_AGENT_RUNTIME": "langgraph"}, clear=False), patch(
+            "repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None
+        ), patch("repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()), patch(
+            "repooperator_worker.agent_core.controller_graph.controller_choose_next_action",
+            side_effect=AssertionError("legacy chooser should not run"),
+        ):
+            response = run_controller_graph(request, run_id="run-no-legacy-chooser")
+        self.assertIn("README.md", response.files_read)
+
+    def test_runtime_default_env_can_select_langgraph(self) -> None:
+        request = self._request("Summarize README.md")
+        with patch.dict(os.environ, {"REPOOPERATOR_AGENT_RUNTIME_DEFAULT": "langgraph"}, clear=False), patch(
+            "repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None
+        ), patch("repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()), patch(
+            "repooperator_worker.agent_core.controller_graph.controller_choose_next_action",
+            side_effect=AssertionError("legacy chooser should not run"),
+        ):
+            response = run_controller_graph(request, run_id="run-default-langgraph")
+        self.assertIn("README.md", response.files_read)
 
     def test_approval_and_cancellation_routes_stop_at_safe_boundaries(self) -> None:
         state = initial_graph_state(self._request("Run git status"), run_id="run-approval")
@@ -161,9 +201,64 @@ class LangGraphRuntimeTests(unittest.TestCase):
 
         update = supervisor_node(state)
         self.assertTrue(update["supervisor_mode"])
+        self.assertGreater(len(update["worker_tasks"]), 1)
+        self.assertGreater(len(update["worker_reports"]), 1)
         self.assertTrue(update["file_role_reports"])
         workers = {item["worker"] for item in update["file_role_reports"]}
         self.assertIn("AnalysisAgent", workers)
+
+    def test_interrupt_resume_allow_runs_without_restarting_evidence(self) -> None:
+        request = self._request("Run git status")
+        state = initial_graph_state(request, run_id="run-interrupt")
+        state["pending_approval"] = {"command": ["git", "status", "--short"], "approval_id": "", "reason": "test"}
+        state["stop_reason"] = "waiting_approval"
+        state["files_read"] = ["README.md"]
+        checkpointer = InMemorySaver()
+        compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpointer)
+        config = graph_config_for_request(request, "run-interrupt")
+        interrupted = compiled.invoke(state, config=config)
+        self.assertIn("__interrupt__", interrupted)
+
+        resumed = compiled.invoke(Command(resume={"decision": "allow"}), config=config)
+        self.assertIn("README.md", resumed.get("files_read") or [])
+        run_actions = [action.type for action in resumed.get("actions_taken") or []]
+        self.assertIn("run_approved_command", run_actions)
+
+    def test_interrupt_resume_deny_finalizes_safely(self) -> None:
+        request = self._request("Run git status")
+        state = initial_graph_state(request, run_id="run-deny")
+        state["pending_approval"] = {"command": ["git", "status", "--short"], "approval_id": "", "reason": "test"}
+        state["stop_reason"] = "waiting_approval"
+        checkpointer = InMemorySaver()
+        compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpointer)
+        config = graph_config_for_request(request, "run-deny")
+        compiled.invoke(state, config=config)
+        denied = compiled.invoke(Command(resume={"decision": "deny"}), config=config)
+        self.assertEqual(denied.get("stop_reason"), "approval_denied")
+        self.assertIn("approval was denied", denied.get("final_response") or "")
+
+    def test_change_set_validation_rejects_unapproved_delete_and_accepts_modify(self) -> None:
+        proposal = ChangeSetProposal(
+            plan=ChangePlan(summary="Modify app.py", target_files=["app.py"], operations=["modify"]),
+            changes=[
+                ProposedFileChange(
+                    path="app.py",
+                    operation="modify",
+                    summary="Return two.",
+                    original_content=(self.repo / "app.py").read_text(encoding="utf-8"),
+                    proposed_content="def main():\n    return 2\n",
+                )
+            ],
+        )
+        self.assertEqual(validate_change_set(proposal, repo=str(self.repo)).status, "valid")
+
+        delete = ChangeSetProposal(
+            plan=ChangePlan(summary="Delete app.py", target_files=["app.py"], operations=["delete"]),
+            changes=[ProposedFileChange(path="app.py", operation="delete", summary="Delete file")],
+        )
+        result = validate_change_set(delete, repo=str(self.repo))
+        self.assertEqual(result.status, "invalid")
+        self.assertIn("delete proposals require explicit", "; ".join(result.errors))
 
     def test_checkpoint_adapter_round_trips_waiting_approval_state(self) -> None:
         adapter = InMemoryGraphCheckpointAdapter()

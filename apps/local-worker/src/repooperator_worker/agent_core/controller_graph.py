@@ -879,7 +879,9 @@ def _initial_state(request: AgentRunRequest, run_id: str) -> AgentCoreState:
 
 
 def _use_langgraph_runtime() -> bool:
-    return os.getenv("REPOOPERATOR_AGENT_RUNTIME", "legacy").strip().lower() == "langgraph"
+    configured = os.getenv("REPOOPERATOR_AGENT_RUNTIME")
+    default = os.getenv("REPOOPERATOR_AGENT_RUNTIME_DEFAULT", "legacy")
+    return (configured if configured is not None else default).strip().lower() == "langgraph"
 
 
 def _safe_observation(action: AgentAction, result: ActionResult) -> str:

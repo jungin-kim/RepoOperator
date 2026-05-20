@@ -16,16 +16,33 @@ import time
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Iterator, Protocol, TypedDict
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult
+from repooperator_worker.agent_core.change_set import (
+    ChangeSetProposal,
+    plan_change_set,
+    proposal_from_edit_result,
+    validate_change_set as validate_change_set_model,
+)
+from repooperator_worker.agent_core.graph_routes import choose_graph_next_action
 from repooperator_worker.agent_core.hooks import HookManager
+from repooperator_worker.agent_core.planner import (
+    build_task_frame,
+    candidate_files_from_results,
+    edit_requested,
+)
 from repooperator_worker.agent_core.state import AgentCoreState, AgentSubtask, ClassifierResult
+from repooperator_worker.agent_core.task_policy import (
+    next_evidence_gathering_action,
+)
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
 from repooperator_worker.services.event_service import append_run_event, list_run_events
-from repooperator_worker.services.json_safe import json_safe, safe_agent_response_payload, safe_repr
+from repooperator_worker.services.json_safe import json_safe, safe_agent_response_payload
 from repooperator_worker.services.skills_service import enabled_skill_context
 
 
@@ -43,6 +60,10 @@ APPEND_REDUCER_FIELDS = {
     "file_role_reports",
     "proposed_changes",
     "risk_notes",
+    "worker_tasks",
+    "worker_reports",
+    "proposal_errors",
+    "attempts",
 }
 
 UNIQUE_APPEND_REDUCER_FIELDS = {
@@ -110,6 +131,10 @@ class RepoOperatorGraphState(TypedDict, total=False):
     file_role_reports: Annotated[list[dict[str, Any]], append_items]
     proposed_changes: Annotated[list[dict[str, Any]], append_items]
     risk_notes: Annotated[list[str], append_items]
+    worker_tasks: Annotated[list[dict[str, Any]], append_items]
+    worker_reports: Annotated[list[dict[str, Any]], append_items]
+    proposal_errors: Annotated[list[str], append_items]
+    attempts: Annotated[list[dict[str, Any]], append_items]
     supervisor_mode: bool
     current_worker_role: str | None
     pending_action: AgentAction | None
@@ -131,6 +156,12 @@ class RepoOperatorGraphState(TypedDict, total=False):
     max_commands: int
     max_edits: int
     stream_final_answer: bool
+    evidence_goal: dict[str, Any] | None
+    evidence_done: bool
+    analysis_done: bool
+    edit_done: bool
+    validation_done: bool
+    approval_decision: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -182,10 +213,15 @@ class InMemoryGraphCheckpointAdapter:
 
 
 _DEFAULT_CHECKPOINT_ADAPTER = InMemoryGraphCheckpointAdapter()
+_DEFAULT_LANGGRAPH_CHECKPOINTER = InMemorySaver()
 
 
 def get_default_checkpoint_adapter() -> InMemoryGraphCheckpointAdapter:
     return _DEFAULT_CHECKPOINT_ADAPTER
+
+
+def get_default_langgraph_checkpointer() -> InMemorySaver:
+    return _DEFAULT_LANGGRAPH_CHECKPOINTER
 
 
 def build_repooperator_state_graph() -> StateGraph:
@@ -249,27 +285,43 @@ def build_repooperator_state_graph() -> StateGraph:
     )
     graph.add_edge("repair_change_set", "route_next")
     graph.add_edge("ask_clarification", "final_synthesis")
-    graph.add_edge("await_approval", "final_synthesis")
+    graph.add_edge("await_approval", "route_next")
     graph.add_edge("final_synthesis", END)
     return graph
 
 
-def build_compiled_repooperator_graph(*, checkpoint_adapter: GraphCheckpointAdapter | None = None) -> Any:
-    del checkpoint_adapter
-    return build_repooperator_state_graph().compile()
+def build_compiled_repooperator_graph(*, checkpoint_adapter: Any | None = None) -> Any:
+    checkpointer = checkpoint_adapter if _is_langgraph_checkpointer(checkpoint_adapter) else get_default_langgraph_checkpointer()
+    return build_repooperator_state_graph().compile(checkpointer=checkpointer)
 
 
 def build_evidence_gathering_graph() -> StateGraph:
     graph = StateGraph(RepoOperatorGraphState)
+    graph.add_node("route_evidence_next", route_evidence_next_node)
     graph.add_node("inspect_tree", evidence_inspect_tree_node)
+    graph.add_node("rank_candidates", evidence_rank_candidates_node)
     graph.add_node("search_files", evidence_search_files_node)
     graph.add_node("search_text", evidence_search_text_node)
     graph.add_node("read_files", evidence_read_files_node)
     graph.add_node("update_evidence_store", update_evidence_store_node)
-    graph.add_edge(START, "inspect_tree")
-    graph.add_edge("inspect_tree", "search_files")
-    graph.add_edge("search_files", "search_text")
-    graph.add_edge("search_text", "read_files")
+    graph.add_edge(START, "route_evidence_next")
+    graph.add_conditional_edges(
+        "route_evidence_next",
+        route_evidence_next,
+        {
+            "inspect_tree": "inspect_tree",
+            "rank_candidates": "rank_candidates",
+            "search_files": "search_files",
+            "search_text": "search_text",
+            "read_files": "read_files",
+            "update_evidence_store": "update_evidence_store",
+            END: END,
+        },
+    )
+    graph.add_edge("inspect_tree", "update_evidence_store")
+    graph.add_edge("rank_candidates", "update_evidence_store")
+    graph.add_edge("search_files", "update_evidence_store")
+    graph.add_edge("search_text", "update_evidence_store")
     graph.add_edge("read_files", "update_evidence_store")
     graph.add_edge("update_evidence_store", END)
     return graph
@@ -278,29 +330,46 @@ def build_evidence_gathering_graph() -> StateGraph:
 def build_analysis_graph() -> StateGraph:
     graph = StateGraph(RepoOperatorGraphState)
     graph.add_node("inventory", analysis_inventory_node)
-    graph.add_node("batch_files", analysis_batch_files_node)
-    graph.add_node("file_role_analysis", analysis_file_role_node)
+    graph.add_node("group_files", analysis_batch_files_node)
+    graph.add_node("dispatch_file_role_workers", analysis_file_role_node)
+    graph.add_node("reduce_file_reports", analysis_reduce_file_reports_node)
     graph.add_node("summarize_batch", analysis_summarize_batch_node)
+    graph.add_node("route_batch_continue_or_end", analysis_route_batch_node)
     graph.add_edge(START, "inventory")
-    graph.add_edge("inventory", "batch_files")
-    graph.add_edge("batch_files", "file_role_analysis")
-    graph.add_edge("file_role_analysis", "summarize_batch")
-    graph.add_edge("summarize_batch", END)
+    graph.add_edge("inventory", "group_files")
+    graph.add_edge("group_files", "dispatch_file_role_workers")
+    graph.add_edge("dispatch_file_role_workers", "reduce_file_reports")
+    graph.add_edge("reduce_file_reports", "summarize_batch")
+    graph.add_edge("summarize_batch", "route_batch_continue_or_end")
+    graph.add_edge("route_batch_continue_or_end", END)
     return graph
 
 
 def build_edit_graph() -> StateGraph:
     graph = StateGraph(RepoOperatorGraphState)
+    graph.add_node("route_edit_next", route_edit_next_node)
     graph.add_node("locate_targets", edit_locate_targets_node)
     graph.add_node("plan_change_set", edit_plan_change_set_node)
     graph.add_node("generate_change_set", edit_generate_change_set_node)
     graph.add_node("validate_change_set", edit_validate_change_set_node)
     graph.add_node("repair_change_set", edit_repair_change_set_node)
-    graph.add_edge(START, "locate_targets")
+    graph.add_edge(START, "route_edit_next")
+    graph.add_conditional_edges(
+        "route_edit_next",
+        route_edit_next,
+        {
+            "locate_targets": "locate_targets",
+            "plan_change_set": "plan_change_set",
+            "generate_change_set": "generate_change_set",
+            "validate_change_set": "validate_change_set",
+            "repair_change_set": "repair_change_set",
+            END: END,
+        },
+    )
     graph.add_edge("locate_targets", "plan_change_set")
     graph.add_edge("plan_change_set", "generate_change_set")
     graph.add_edge("generate_change_set", "validate_change_set")
-    graph.add_edge("validate_change_set", "repair_change_set")
+    graph.add_conditional_edges("validate_change_set", route_edit_after_validation, {"repair_change_set": "repair_change_set", END: END})
     graph.add_edge("repair_change_set", END)
     return graph
 
@@ -309,27 +378,45 @@ def build_validation_graph() -> StateGraph:
     graph = StateGraph(RepoOperatorGraphState)
     graph.add_node("choose_validation", validation_choose_node)
     graph.add_node("preview_command", validation_preview_command_node)
+    graph.add_node("approval_interrupt_if_needed", validation_approval_interrupt_node)
     graph.add_node("run_safe_validation", validation_run_safe_node)
     graph.add_node("parse_errors", validation_parse_errors_node)
     graph.add_node("update_validation_result", validation_update_result_node)
+    graph.add_node("route_validation_next", validation_route_next_node)
     graph.add_edge(START, "choose_validation")
     graph.add_edge("choose_validation", "preview_command")
-    graph.add_edge("preview_command", "run_safe_validation")
+    graph.add_edge("preview_command", "approval_interrupt_if_needed")
+    graph.add_edge("approval_interrupt_if_needed", "run_safe_validation")
     graph.add_edge("run_safe_validation", "parse_errors")
     graph.add_edge("parse_errors", "update_validation_result")
-    graph.add_edge("update_validation_result", END)
+    graph.add_edge("update_validation_result", "route_validation_next")
+    graph.add_edge("route_validation_next", END)
     return graph
 
 
 def build_finalization_graph() -> StateGraph:
     graph = StateGraph(RepoOperatorGraphState)
+    graph.add_node("quality_guard", final_quality_guard_node)
     graph.add_node("repair_final_answer", final_repair_answer_node)
     graph.add_node("build_response", final_build_response_node)
     graph.add_node("emit_final_message", final_emit_message_node)
-    graph.add_edge(START, "repair_final_answer")
+    graph.add_edge(START, "quality_guard")
+    graph.add_edge("quality_guard", "repair_final_answer")
     graph.add_edge("repair_final_answer", "build_response")
     graph.add_edge("build_response", "emit_final_message")
     graph.add_edge("emit_final_message", END)
+    return graph
+
+
+def build_supervisor_graph() -> StateGraph:
+    graph = StateGraph(RepoOperatorGraphState)
+    graph.add_node("build_worker_tasks", supervisor_build_worker_tasks_node)
+    graph.add_node("run_worker_task", supervisor_run_worker_tasks_node)
+    graph.add_node("reduce_worker_reports", supervisor_reduce_worker_reports_node)
+    graph.add_edge(START, "build_worker_tasks")
+    graph.add_edge("build_worker_tasks", "run_worker_task")
+    graph.add_edge("run_worker_task", "reduce_worker_reports")
+    graph.add_edge("reduce_worker_reports", END)
     return graph
 
 
@@ -338,7 +425,7 @@ def run_langgraph_controller(
     *,
     run_id: str | None = None,
     stream_final_answer: bool = False,
-    checkpoint_adapter: GraphCheckpointAdapter | None = None,
+    checkpoint_adapter: Any | None = None,
 ) -> AgentRunResponse:
     run_id = run_id or "run_controller"
     _controller()._validate_active_repository(request)
@@ -350,16 +437,46 @@ def run_langgraph_controller(
         skills_context=skills_context,
         skills_used=skills_used,
     )
-    adapter = checkpoint_adapter or get_default_checkpoint_adapter()
-    _save_checkpoint(adapter, initial_state, "start")
-    final_state = build_compiled_repooperator_graph(checkpoint_adapter=adapter).invoke(initial_state)
-    _save_checkpoint(adapter, final_state, "end")
+    compatibility_adapter = checkpoint_adapter if _is_compat_checkpoint_adapter(checkpoint_adapter) else get_default_checkpoint_adapter()
+    _save_checkpoint(compatibility_adapter, initial_state, "start")
+    compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpoint_adapter)
+    config = graph_config_for_request(request, run_id)
+    final_state = compiled.invoke(initial_state, config=config)
+    if final_state.get("__interrupt__"):
+        snapshot_state = dict(compiled.get_state(config).values or {})
+        snapshot_state.setdefault("request", request)
+        snapshot_state.setdefault("run_id", run_id)
+        snapshot_state.setdefault("thread_id", request.thread_id)
+        snapshot_state.setdefault("repo", request.project_path)
+        snapshot_state.setdefault("branch", request.branch)
+        _save_checkpoint(compatibility_adapter, snapshot_state, "interrupt")
+        return _response_from_interrupted_state(snapshot_state, request)
+    _save_checkpoint(compatibility_adapter, final_state, "end")
     response = final_state.get("response_model")
     if isinstance(response, AgentRunResponse):
         return response
     core = _core_state_from_graph(final_state)
     if not core.final_response:
         core.final_response = final_state.get("final_response") or ""
+    return _controller().build_final_response(core, request)
+
+
+def resume_langgraph_controller(
+    request: AgentRunRequest,
+    *,
+    run_id: str,
+    approval_decision: dict[str, Any],
+    checkpoint_adapter: Any | None = None,
+) -> AgentRunResponse:
+    compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpoint_adapter)
+    config = graph_config_for_request(request, run_id)
+    final_state = compiled.invoke(Command(resume=json_safe(approval_decision)), config=config)
+    if final_state.get("__interrupt__"):
+        return _response_from_interrupted_state(dict(compiled.get_state(config).values or {}), request)
+    response = final_state.get("response_model")
+    if isinstance(response, AgentRunResponse):
+        return response
+    core = _core_state_from_graph({**dict(final_state), "request": request, "run_id": run_id})
     return _controller().build_final_response(core, request)
 
 
@@ -376,6 +493,11 @@ def stream_langgraph_controller(request: AgentRunRequest, *, run_id: str | None 
             yield {"type": "assistant_delta", "delta": chunk, "streaming_mode": "post_hoc_chunking"}
     final = _controller()._response_json_safe(response.model_copy(update={"activity_events": []}), request)
     yield {"type": "final_message", "result": safe_agent_response_payload(final)}
+
+
+def graph_config_for_request(request: AgentRunRequest, run_id: str) -> dict[str, Any]:
+    stable = "|".join([run_id, request.thread_id or "", request.project_path, request.branch or ""])
+    return {"configurable": {"thread_id": stable}}
 
 
 def initial_graph_state(
@@ -423,6 +545,10 @@ def initial_graph_state(
         "file_role_reports": [],
         "proposed_changes": [],
         "risk_notes": [],
+        "worker_tasks": [],
+        "worker_reports": [],
+        "proposal_errors": [],
+        "attempts": [],
         "supervisor_mode": False,
         "current_worker_role": None,
         "pending_action": None,
@@ -444,6 +570,12 @@ def initial_graph_state(
         "max_commands": 8,
         "max_edits": 6,
         "stream_final_answer": stream_final_answer,
+        "evidence_goal": None,
+        "evidence_done": False,
+        "analysis_done": False,
+        "edit_done": False,
+        "validation_done": False,
+        "approval_decision": None,
     }
 
 
@@ -485,10 +617,28 @@ def build_task_plan_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     request = _request(state)
     core = _core_state_from_graph(state)
+    if state.get("pending_action"):
+        route = route_by_stage(state)
+        return _with_checkpoint_bump(
+            {
+                "next_node": route,
+                "events_to_emit": [
+                    _graph_transition_event(
+                        state,
+                        "route_next",
+                        operation="route_existing_action",
+                        action_type=state["pending_action"].type if state.get("pending_action") else None,
+                        next_node=route,
+                    )
+                ],
+            }
+        )
     if state.get("stop_reason") == "waiting_approval":
         return {"next_node": "await_approval", "events_to_emit": [_graph_transition_event(state, "route_next", operation="approval_gate")]}
     if state.get("stop_reason") in {"needs_clarification"}:
         return {"next_node": "ask_clarification", "events_to_emit": [_graph_transition_event(state, "route_next", operation="clarification")]}
+    if state.get("stop_reason") in {"approval_denied"}:
+        return {"next_node": "final_synthesis", "events_to_emit": [_graph_transition_event(state, "route_next", operation="approval_denied")]}
 
     should_continue = _controller().should_continue(
         core,
@@ -512,7 +662,7 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     from repooperator_worker.agent_core.steering import consume_steering_for_state
 
     consume_steering_for_state(core, request)
-    action = _select_next_action(core, request)
+    action = choose_graph_next_action(core, request)
     core.current_step = action.reason_summary
     update = _updates_from_core(state, core)
     route = route_by_stage({**dict(state), **update, "pending_action": action})
@@ -543,6 +693,8 @@ def route_to_next_node(state: RepoOperatorGraphState) -> str:
 
 def route_by_stage(state: RepoOperatorGraphState) -> str:
     stage = state.get("routing_stage") or "after_understanding"
+    if stage == "after_interrupt_resume":
+        return route_after_interrupt_resume(state)
     if stage == "after_evidence":
         return route_after_evidence(state)
     if stage == "after_tool_result":
@@ -588,7 +740,9 @@ def route_after_change_plan(state: RepoOperatorGraphState) -> str:
     latest = _latest_result(state)
     if latest and latest.status == "waiting_approval":
         return "await_approval"
-    if latest and latest.status == "failed" and int(state.get("repair_attempts") or 0) < 1:
+    proposal = state.get("change_set_proposal") or {}
+    errors = list((proposal.get("validation") or {}).get("errors") or state.get("proposal_errors") or [])
+    if (errors or (latest and latest.status == "failed")) and int(state.get("repair_attempts") or 0) < 1:
         return "repair_change_set"
     return route_to_final_or_continue(state)
 
@@ -599,42 +753,35 @@ def route_after_approval(state: RepoOperatorGraphState) -> str:
     return route_to_final_or_continue(state)
 
 
+def route_after_interrupt_resume(state: RepoOperatorGraphState) -> str:
+    if state.get("pending_action"):
+        return "execute_tool"
+    if state.get("stop_reason") == "approval_denied":
+        return "final_synthesis"
+    return route_to_final_or_continue(state)
+
+
 def route_to_final_or_continue(state: RepoOperatorGraphState) -> str:
-    if state.get("stop_reason") in {"cancelled", "timed_out", "max_loop_iterations", "max_file_reads", "max_commands", "waiting_approval"}:
+    if state.get("stop_reason") in {"cancelled", "timed_out", "max_loop_iterations", "max_file_reads", "max_commands", "waiting_approval", "approval_denied"}:
         return "final_synthesis"
     return _route_to_final_or_action(state)
 
 
 def supervisor_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    groups = _supervisor_file_groups(state)
-    reports = [
-        {
-            "worker": "AnalysisAgent",
-            "group": name,
-            "files": files,
-            "summary": f"Queued {len(files)} file(s) for bounded role analysis.",
-        }
-        for name, files in groups.items()
-        if files
-    ]
-    return _with_checkpoint_bump(
-        {
-            "supervisor_mode": True,
-            "evidence_reports": reports,
-            "file_role_reports": reports,
-            "routing_stage": "after_understanding",
-            "events_to_emit": [
-                _graph_transition_event(
-                    state,
-                    "supervisor",
-                    subgraph="supervisor",
-                    operation="delegate",
-                    status="completed",
-                    aggregate={"workers": ["EvidenceAgent", "AnalysisAgent", "EditAgent", "ValidationAgent", "DocumentationAgent", "TestAgent"]},
-                )
-            ],
-        }
+    update = _invoke_subgraph_delta(build_supervisor_graph, state)
+    update["supervisor_mode"] = True
+    update["routing_stage"] = "after_understanding"
+    update.setdefault("events_to_emit", []).append(
+        _graph_transition_event(
+            state,
+            "supervisor",
+            subgraph="supervisor",
+            operation="delegate_reduce",
+            status="completed",
+            aggregate={"workers": ["EvidenceAgent", "AnalysisAgent", "EditPlanningAgent", "ValidationAgent", "DocumentationAgent", "TestAgent"]},
+        )
     )
+    return _with_checkpoint_bump(update)
 
 
 def gather_evidence_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -694,12 +841,11 @@ def validate_result_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 def plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     action = state.get("pending_action")
-    proposal = {
-        "status": "planned",
-        "action_id": action.action_id if action else None,
-        "files": list(action.target_files if action else []),
-        "summary": action.reason_summary if action else "Plan proposal-only change set.",
-    }
+    proposal = plan_change_set(
+        list(action.target_files if action else []),
+        action.reason_summary if action else "Plan proposal-only change set.",
+    ).model_dump()
+    proposal["action_id"] = action.action_id if action else None
     return _with_checkpoint_bump(
         {
             "change_set_proposal": proposal,
@@ -711,7 +857,7 @@ def plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     "plan_change_set",
                     subgraph="edit_graph",
                     operation="plan_change_set",
-                    files=proposal["files"],
+                    files=list((proposal.get("plan") or {}).get("target_files") or []),
                 )
             ],
         }
@@ -729,24 +875,19 @@ def generate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     latest = _latest_result(state)
-    proposal = state.get("change_set_proposal") or {}
-    if latest and latest.payload.get("edit_proposals"):
-        proposal = {
-            **proposal,
-            "status": latest.status,
-            "edit_proposals": latest.payload.get("edit_proposals") or [],
-            "proposal_error": latest.payload.get("proposal_error"),
-        }
+    proposal = _change_set_from_latest_result(state, latest) or state.get("change_set_proposal") or {}
     validation = {
         "kind": "change_set",
-        "status": latest.status if latest else "skipped",
+        "status": (proposal.get("status") if proposal else None) or (latest.status if latest else "skipped"),
         "action_id": latest.action_id if latest else None,
-        "proposal_files": [str(item.get("file")) for item in proposal.get("edit_proposals") or [] if isinstance(item, dict)],
+        "proposal_files": [str(item.get("path")) for item in proposal.get("changes") or [] if isinstance(item, dict)],
+        "errors": list((proposal.get("validation") or {}).get("errors") or []),
     }
     return _with_checkpoint_bump(
         {
             "change_set_proposal": proposal,
             "validation_results": [validation],
+            "proposal_errors": validation["errors"],
             "routing_stage": "after_change_plan",
             "events_to_emit": [
                 _graph_transition_event(
@@ -806,17 +947,51 @@ def ask_clarification_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     adapter = get_default_checkpoint_adapter()
     _save_checkpoint(adapter, state, "await_approval")
+    payload = _approval_interrupt_payload(state)
+    decision = interrupt(payload)
+    normalized = _normalize_approval_decision(decision)
+    if normalized.get("decision") == "allow":
+        command = list((state.get("pending_approval") or {}).get("command") or payload.get("command") or [])
+        approval_id = str((state.get("pending_approval") or {}).get("approval_id") or payload.get("approval_id") or "")
+        return _with_checkpoint_bump(
+            {
+                "pending_action": AgentAction(
+                    type="run_approved_command",
+                    reason_summary="Run command after user approval.",
+                    command=command,
+                    expected_output="Command output after approval.",
+                    payload={"approval_id": approval_id, "approval_decision": normalized},
+                ),
+                "pending_approval": None,
+                "stop_reason": None,
+                "routing_stage": "after_interrupt_resume",
+                "approval_decision": normalized,
+                "events_to_emit": [
+                    _graph_transition_event(
+                        state,
+                        "await_approval",
+                        operation="approval_resume",
+                        status="completed",
+                        command=command,
+                    )
+                ],
+            }
+        )
+    final_response = "I did not run the command because approval was denied. No command was executed."
     return _with_checkpoint_bump(
         {
-            "stop_reason": "waiting_approval",
+            "stop_reason": "approval_denied",
+            "final_response": final_response,
+            "pending_approval": None,
             "routing_stage": "after_approval",
+            "approval_decision": normalized,
             "events_to_emit": [
                 _graph_transition_event(
                     state,
                     "await_approval",
                     operation="approval_gate",
-                    status="waiting",
-                    command=(state.get("pending_approval") or {}).get("command"),
+                    status="completed",
+                    command=payload.get("command"),
                 )
             ],
         }
@@ -831,8 +1006,66 @@ def final_synthesis_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     return _with_checkpoint_bump(update)
 
 
+def route_evidence_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    if state.get("pending_action"):
+        return {
+            "events_to_emit": [_graph_transition_event(state, "route_evidence_next", subgraph="evidence_gathering_graph", operation="route")],
+        }
+    core = _core_state_from_graph(state)
+    action = next_evidence_gathering_action(core, _request(state), build_task_frame(_request(state), core))
+    if action is None:
+        return {
+            "evidence_done": True,
+            "events_to_emit": [_graph_transition_event(state, "route_evidence_next", subgraph="evidence_gathering_graph", operation="evidence_complete")],
+        }
+    return {
+        "pending_action": action,
+        "events_to_emit": [
+            _graph_transition_event(
+                state,
+                "route_evidence_next",
+                subgraph="evidence_gathering_graph",
+                operation="route",
+                action_type=action.type,
+            )
+        ],
+    }
+
+
+def route_evidence_next(state: RepoOperatorGraphState) -> str:
+    action = state.get("pending_action")
+    if not action:
+        return END
+    if action.type == "inspect_repo_tree":
+        return "inspect_tree"
+    if action.type == "search_files":
+        return "search_files"
+    if action.type == "search_text":
+        return "search_text"
+    if action.type in {"read_file", "inspect_symbol", "analyze_file"}:
+        return "read_files"
+    return "update_evidence_store"
+
+
 def evidence_inspect_tree_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     return _execute_if_action_type(state, {"inspect_repo_tree"}, "evidence_gathering_graph", "inspect_tree")
+
+
+def evidence_rank_candidates_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    core = _core_state_from_graph(state)
+    candidates = candidate_files_from_results(core, edit_related=bool(edit_requested(build_task_frame(_request(state), core))))
+    return {
+        "evidence_store": {**dict(state.get("evidence_store") or {}), "ranked_candidates": candidates},
+        "events_to_emit": [
+            _graph_transition_event(
+                state,
+                "rank_candidates",
+                subgraph="evidence_gathering_graph",
+                operation="rank_candidates",
+                files=candidates[:8],
+            )
+        ],
+    }
 
 
 def evidence_search_files_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -871,16 +1104,30 @@ def analysis_inventory_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def analysis_batch_files_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    groups = _supervisor_file_groups(state)
     return {
-        "events_to_emit": [_graph_transition_event(state, "batch_files", subgraph="analysis_graph", operation="batch_files")],
+        "worker_tasks": _worker_tasks_from_groups(groups, roles=["AnalysisAgent"]),
+        "events_to_emit": [_graph_transition_event(state, "group_files", subgraph="analysis_graph", operation="group_files")],
     }
 
 
 def analysis_file_role_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    reports = [{"file": path, "role": "evidence file"} for path in state.get("files_read") or []]
+    tasks = state.get("worker_tasks") or []
+    reports = [_run_analysis_worker_task(task) for task in tasks if task.get("role") == "AnalysisAgent"]
+    if not reports:
+        reports = [{"worker": "AnalysisAgent", "file": path, "role": "evidence file", "files": [path]} for path in state.get("files_read") or []]
+    return {
+        "worker_reports": reports,
+        "file_role_reports": reports,
+        "events_to_emit": [_graph_transition_event(state, "dispatch_file_role_workers", subgraph="analysis_graph", operation="dispatch_file_role_workers")],
+    }
+
+
+def analysis_reduce_file_reports_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    reports = list(state.get("worker_reports") or state.get("file_role_reports") or [])
     return {
         "file_role_reports": reports,
-        "events_to_emit": [_graph_transition_event(state, "file_role_analysis", subgraph="analysis_graph", operation="file_role_analysis")],
+        "events_to_emit": [_graph_transition_event(state, "reduce_file_reports", subgraph="analysis_graph", operation="reduce_file_reports")],
     }
 
 
@@ -893,6 +1140,13 @@ def analysis_summarize_batch_node(state: RepoOperatorGraphState) -> dict[str, An
             }
         ],
         "events_to_emit": [_graph_transition_event(state, "summarize_batch", subgraph="analysis_graph", operation="summarize_batch")],
+        "analysis_done": True,
+    }
+
+
+def analysis_route_batch_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return {
+        "events_to_emit": [_graph_transition_event(state, "route_batch_continue_or_end", subgraph="analysis_graph", operation="route_batch_continue_or_end")],
     }
 
 
@@ -911,9 +1165,47 @@ def edit_locate_targets_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     }
 
 
-def edit_plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+def route_edit_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    action = state.get("pending_action")
+    if not action:
+        return {
+            "edit_done": True,
+            "events_to_emit": [_graph_transition_event(state, "route_edit_next", subgraph="edit_graph", operation="edit_complete")],
+        }
     return {
-        "events_to_emit": [_graph_transition_event(state, "plan_change_set", subgraph="edit_graph", operation="plan_change_set")]
+        "events_to_emit": [
+            _graph_transition_event(
+                state,
+                "route_edit_next",
+                subgraph="edit_graph",
+                operation="route_edit_next",
+                action_type=action.type,
+            )
+        ]
+    }
+
+
+def route_edit_next(state: RepoOperatorGraphState) -> str:
+    action = state.get("pending_action")
+    if not action:
+        return END
+    if action.type == "generate_edit":
+        if not state.get("change_set_proposal"):
+            return "locate_targets"
+        return "generate_change_set"
+    return END
+
+
+def edit_plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    action = state.get("pending_action")
+    proposal = plan_change_set(
+        list(action.target_files if action else []),
+        action.reason_summary if action else "Plan proposal-only change set.",
+    ).model_dump()
+    return {
+        "change_set_proposal": proposal,
+        "proposed_changes": [proposal],
+        "events_to_emit": [_graph_transition_event(state, "plan_change_set", subgraph="edit_graph", operation="plan_change_set")],
     }
 
 
@@ -923,13 +1215,17 @@ def edit_generate_change_set_node(state: RepoOperatorGraphState) -> dict[str, An
 
 def edit_validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     latest = _latest_result(state)
+    proposal = _change_set_from_latest_result(state, latest)
     validation = {
         "kind": "change_set",
-        "status": latest.status if latest else "skipped",
+        "status": (proposal.get("status") if proposal else None) or (latest.status if latest else "skipped"),
         "action_id": latest.action_id if latest else None,
+        "errors": list((proposal.get("validation") or {}).get("errors") or []),
     }
     return {
+        "change_set_proposal": proposal or state.get("change_set_proposal"),
         "validation_results": [validation],
+        "proposal_errors": validation["errors"],
         "events_to_emit": [
             _graph_transition_event(state, "validate_change_set", subgraph="edit_graph", operation="validate_change_set", validation_result=validation)
         ],
@@ -937,9 +1233,20 @@ def edit_validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, An
 
 
 def edit_repair_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    attempts = int(state.get("repair_attempts") or 0) + 1
     return {
+        "repair_attempts": attempts,
+        "attempts": [{"kind": "repair", "attempt": attempts, "status": "blocked" if attempts > 1 else "queued"}],
         "events_to_emit": [_graph_transition_event(state, "repair_change_set", subgraph="edit_graph", operation="repair_change_set")]
     }
+
+
+def route_edit_after_validation(state: RepoOperatorGraphState) -> str:
+    proposal = state.get("change_set_proposal") or {}
+    errors = list((proposal.get("validation") or {}).get("errors") or state.get("proposal_errors") or [])
+    if errors and int(state.get("repair_attempts") or 0) < 1:
+        return "repair_change_set"
+    return END
 
 
 def validation_choose_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -948,6 +1255,16 @@ def validation_choose_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 def validation_preview_command_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     return _execute_if_action_type(state, {"preview_command", "inspect_git_state"}, "validation_graph", "preview_command")
+
+
+def validation_approval_interrupt_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    if state.get("pending_approval"):
+        return await_approval_node(state)
+    return {
+        "events_to_emit": [
+            _graph_transition_event(state, "approval_interrupt_if_needed", subgraph="validation_graph", operation="approval_not_needed")
+        ]
+    }
 
 
 def validation_run_safe_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -965,7 +1282,20 @@ def validation_parse_errors_node(state: RepoOperatorGraphState) -> dict[str, Any
 
 def validation_update_result_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     return {
+        "validation_done": True,
         "events_to_emit": [_graph_transition_event(state, "update_validation_result", subgraph="validation_graph", operation="update_validation_result")]
+    }
+
+
+def validation_route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return {
+        "events_to_emit": [_graph_transition_event(state, "route_validation_next", subgraph="validation_graph", operation="route_validation_next")]
+    }
+
+
+def final_quality_guard_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return {
+        "events_to_emit": [_graph_transition_event(state, "quality_guard", subgraph="finalization_graph", operation="quality_guard")]
     }
 
 
@@ -1018,6 +1348,41 @@ def final_emit_message_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     return {
         "response_model": response,
         "events_to_emit": [_graph_transition_event(state, "emit_final_message", subgraph="finalization_graph", operation="emit_final_message")],
+    }
+
+
+def supervisor_build_worker_tasks_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    groups = _supervisor_file_groups(state)
+    roles = ["AnalysisAgent"]
+    if _frame_is_edit_like(state):
+        roles = ["EvidenceAgent", "EditPlanningAgent", "ValidationAgent", "DocumentationAgent", "TestAgent"]
+    tasks = _worker_tasks_from_groups(groups, roles=roles)
+    return {
+        "worker_tasks": tasks,
+        "events_to_emit": [_graph_transition_event(state, "build_worker_tasks", subgraph="supervisor", operation="build_worker_tasks")],
+    }
+
+
+def supervisor_run_worker_tasks_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    reports = [_run_worker_task(task) for task in state.get("worker_tasks") or []]
+    return {
+        "worker_reports": reports,
+        "events_to_emit": [_graph_transition_event(state, "run_worker_task", subgraph="supervisor", operation="run_worker_task")],
+    }
+
+
+def supervisor_reduce_worker_reports_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    reports = list(state.get("worker_reports") or [])
+    file_role_reports = [report for report in reports if report.get("role") or report.get("worker") == "AnalysisAgent"]
+    evidence_reports = [report for report in reports if report.get("worker") in {"EvidenceAgent", "AnalysisAgent"}]
+    proposed_changes = [report for report in reports if report.get("worker") == "EditPlanningAgent"]
+    risk_notes = [str(note) for report in reports for note in report.get("risk_notes") or []]
+    return {
+        "file_role_reports": file_role_reports,
+        "evidence_reports": evidence_reports,
+        "proposed_changes": proposed_changes,
+        "risk_notes": risk_notes,
+        "events_to_emit": [_graph_transition_event(state, "reduce_worker_reports", subgraph="supervisor", operation="reduce_worker_reports")],
     }
 
 
@@ -1102,10 +1467,6 @@ def _should_use_supervisor(state: RepoOperatorGraphState) -> bool:
     text = " ".join([str(getattr(frame, "user_goal", "")), *[str(item) for item in getattr(frame, "requested_outputs", [])]]).lower()
     broad = any(term in text for term in ("whole", "entire", "all files", "every file", "codebase", "source tree", "repository-wide"))
     return broad and not state.get("files_read")
-
-
-def _select_next_action(core: AgentCoreState, request: AgentRunRequest) -> AgentAction:
-    return _controller().controller_choose_next_action(core, request)
 
 
 def _invoke_subgraph_delta(builder: Any, state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -1236,6 +1597,67 @@ def _latest_result(state: RepoOperatorGraphState) -> ActionResult | None:
     return results[-1] if results else None
 
 
+def _change_set_from_latest_result(state: RepoOperatorGraphState, result: ActionResult | None) -> dict[str, Any] | None:
+    if not result:
+        return None
+    edit_proposals = result.payload.get("edit_proposals") or []
+    if edit_proposals:
+        plan_summary = str(((state.get("change_set_proposal") or {}).get("plan") or {}).get("summary") or "Prepare proposal-only edits.")
+        return proposal_from_edit_result(edit_proposals, repo=str(state.get("repo") or _request(state).project_path), plan_summary=plan_summary).model_dump()
+    if result.payload.get("proposal_error"):
+        proposal = state.get("change_set_proposal") or plan_change_set([], "Prepare proposal-only edits.").model_dump()
+        error = str(result.payload.get("proposal_error") or "")
+        proposal.update({"status": "invalid", "proposal_error": error, "validation": {"status": "invalid", "errors": [error], "warnings": []}})
+        return proposal
+    proposal = state.get("change_set_proposal")
+    if isinstance(proposal, dict) and proposal.get("changes"):
+        typed = ChangeSetProposal(
+            plan=plan_change_set(list((proposal.get("plan") or {}).get("target_files") or []), str((proposal.get("plan") or {}).get("summary") or "")).plan,
+            changes=[],
+        )
+        validation = validate_change_set_model(typed, repo=str(state.get("repo") or _request(state).project_path))
+        proposal = {**proposal, "validation": validation.model_dump(), "status": validation.status}
+        return proposal
+    return None
+
+
+def _approval_interrupt_payload(state: RepoOperatorGraphState) -> dict[str, Any]:
+    approval = state.get("pending_approval") or {}
+    command = list(approval.get("command") or [])
+    return json_safe(
+        {
+            "kind": "command_approval",
+            "run_id": state.get("run_id"),
+            "thread_id": state.get("thread_id"),
+            "command": command,
+            "approval_id": approval.get("approval_id"),
+            "files": [],
+            "risk": approval.get("reason") or approval.get("risk") or "Command requires approval before execution.",
+            "resume_token": f"{state.get('run_id')}:command:{approval.get('approval_id') or shlex.join(command)}",
+        }
+    )
+
+
+def _normalize_approval_decision(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        decision = str(value.get("decision") or value.get("approval") or value.get("action") or "").strip().lower()
+        if decision in {"allow", "approved", "approve", "yes"}:
+            return {**json_safe(value), "decision": "allow"}
+        return {**json_safe(value), "decision": "deny"}
+    if str(value).strip().lower() in {"allow", "approved", "approve", "yes", "true"}:
+        return {"decision": "allow"}
+    return {"decision": "deny"}
+
+
+def _response_from_interrupted_state(state: dict[str, Any], request: AgentRunRequest) -> AgentRunResponse:
+    state = dict(state)
+    state.setdefault("request", request)
+    core = _core_state_from_graph(state)
+    if not core.stop_reason:
+        core.stop_reason = "waiting_approval"
+    return _controller().build_final_response(core, request)
+
+
 def _graph_transition_event(
     state: RepoOperatorGraphState,
     node: str,
@@ -1358,9 +1780,79 @@ def _supervisor_file_groups(state: RepoOperatorGraphState) -> dict[str, list[str
         return {}
 
 
+def _worker_tasks_from_groups(groups: dict[str, list[str]], *, roles: list[str]) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    for role in roles:
+        for group, files in groups.items():
+            if not files:
+                continue
+            tasks.append({"role": role, "group": group, "files": files[:8], "task_id": f"{role}:{group}"})
+    return tasks[:12]
+
+
+def _run_worker_task(task: dict[str, Any]) -> dict[str, Any]:
+    role = str(task.get("role") or "AnalysisAgent")
+    if role == "AnalysisAgent":
+        return _run_analysis_worker_task(task)
+    if role == "EvidenceAgent":
+        return {
+            "worker": role,
+            "task_id": task.get("task_id"),
+            "group": task.get("group"),
+            "files": list(task.get("files") or []),
+            "summary": "Located bounded evidence candidates for the requested scope.",
+        }
+    if role == "EditPlanningAgent":
+        return {
+            "worker": role,
+            "task_id": task.get("task_id"),
+            "group": task.get("group"),
+            "files": list(task.get("files") or []),
+            "summary": "Identified files that may participate in a proposal-only change plan.",
+            "risk_notes": ["Change plan still requires proposal validation before it can be shown as valid."],
+        }
+    if role == "ValidationAgent":
+        return {"worker": role, "task_id": task.get("task_id"), "summary": "Validation should run through ToolOrchestrator-backed checks."}
+    if role == "DocumentationAgent":
+        return {"worker": role, "task_id": task.get("task_id"), "summary": "Documentation impact should be considered if behavior changes."}
+    if role == "TestAgent":
+        return {"worker": role, "task_id": task.get("task_id"), "summary": "Tests or safe validation commands may be needed after a proposal."}
+    return {"worker": role, "task_id": task.get("task_id"), "summary": "Worker completed bounded scoped analysis."}
+
+
+def _run_analysis_worker_task(task: dict[str, Any]) -> dict[str, Any]:
+    files = list(task.get("files") or [])
+    return {
+        "worker": "AnalysisAgent",
+        "task_id": task.get("task_id"),
+        "group": task.get("group"),
+        "files": files,
+        "role": f"{task.get('group') or 'files'} analysis batch",
+        "summary": f"Grouped {len(files)} file(s) for bounded file-role analysis.",
+    }
+
+
+def _frame_is_edit_like(state: RepoOperatorGraphState) -> bool:
+    frame = state.get("task_frame")
+    if frame is None:
+        try:
+            frame = build_task_frame(_request(state), _core_state_from_graph(state))
+        except Exception:
+            return False
+    return edit_requested(frame)
+
+
 def _with_checkpoint_bump(update: dict[str, Any]) -> dict[str, Any]:
     update["checkpoint_sequence"] = int(update.get("checkpoint_sequence") or 0) + 1
     return update
+
+
+def _is_langgraph_checkpointer(value: Any) -> bool:
+    return value is not None and hasattr(value, "put") and hasattr(value, "get_tuple")
+
+
+def _is_compat_checkpoint_adapter(value: Any) -> bool:
+    return value is not None and hasattr(value, "save") and hasattr(value, "load_latest")
 
 
 def _save_checkpoint(adapter: GraphCheckpointAdapter, state: RepoOperatorGraphState, node: str) -> None:
@@ -1431,16 +1923,21 @@ __all__ = [
     "build_evidence_gathering_graph",
     "build_finalization_graph",
     "build_repooperator_state_graph",
+    "build_supervisor_graph",
     "build_validation_graph",
+    "get_default_langgraph_checkpointer",
+    "graph_config_for_request",
     "get_default_checkpoint_adapter",
     "initial_graph_state",
     "route_after_approval",
     "route_after_change_plan",
     "route_after_evidence",
+    "route_after_interrupt_resume",
     "route_after_tool_result",
     "route_after_understanding",
     "route_after_validation",
     "route_to_final_or_continue",
+    "resume_langgraph_controller",
     "run_langgraph_controller",
     "stream_langgraph_controller",
 ]
