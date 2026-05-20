@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -16,8 +17,6 @@ if str(SRC_DIR) not in sys.path:
 
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult  # noqa: E402
 from repooperator_worker.agent_core.langgraph_runtime import (  # noqa: E402
-    GraphCheckpointIdentity,
-    InMemoryGraphCheckpointAdapter,
     append_items,
     build_analysis_graph,
     build_compiled_repooperator_graph,
@@ -27,6 +26,7 @@ from repooperator_worker.agent_core.langgraph_runtime import (  # noqa: E402
     build_repooperator_state_graph,
     build_supervisor_graph,
     build_validation_graph,
+    final_emit_message_node,
     graph_config_for_request,
     initial_graph_state,
     resume_langgraph_controller,
@@ -34,6 +34,16 @@ from repooperator_worker.agent_core.langgraph_runtime import (  # noqa: E402
     route_after_tool_result,
     route_after_understanding,
     route_to_final_or_continue,
+)
+from repooperator_worker.agent_core.graph_checkpoints import EventServiceLangGraphSaver  # noqa: E402
+from repooperator_worker.agent_core.graph_state import (  # noqa: E402
+    action_from_snapshot,
+    action_to_snapshot,
+    request_from_snapshot,
+    request_to_snapshot,
+    response_from_snapshot,
+    result_from_snapshot,
+    result_to_snapshot,
 )
 from repooperator_worker.agent_core.change_set import (  # noqa: E402
     ProposedFileChange,
@@ -44,6 +54,9 @@ from repooperator_worker.agent_core.change_set import (  # noqa: E402
 from repooperator_worker.agent_core.controller_graph import run_controller_graph  # noqa: E402
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator  # noqa: E402
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
+from repooperator_worker.services.agent_run_coordinator import resume_approval, wait_for_approval  # noqa: E402
+from repooperator_worker.services.event_service import get_run, list_run_events, start_active_run  # noqa: E402
+from repooperator_worker.services.json_safe import json_safe  # noqa: E402
 
 
 class _QuietClient:
@@ -63,12 +76,18 @@ class _QuietClient:
 class LangGraphRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
+        self._old_config_path = os.environ.get("REPOOPERATOR_CONFIG_PATH")
+        os.environ["REPOOPERATOR_CONFIG_PATH"] = str(Path(self.tmp.name) / ".repooperator" / "config.json")
         self.repo = Path(self.tmp.name) / "repo"
         self.repo.mkdir()
         (self.repo / "README.md").write_text("# Demo\n", encoding="utf-8")
         (self.repo / "app.py").write_text("def main():\n    return 1\n", encoding="utf-8")
 
     def tearDown(self) -> None:
+        if self._old_config_path is None:
+            os.environ.pop("REPOOPERATOR_CONFIG_PATH", None)
+        else:
+            os.environ["REPOOPERATOR_CONFIG_PATH"] = self._old_config_path
         self.tmp.cleanup()
 
     def _request(self, task: str = "Summarize README.md") -> AgentRunRequest:
@@ -118,6 +137,18 @@ class LangGraphRuntimeTests(unittest.TestCase):
         checkpointer = InMemorySaver()
         compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpointer)
         self.assertIs(compiled.checkpointer, checkpointer)
+
+    def test_initial_graph_state_and_snapshots_are_json_safe(self) -> None:
+        request = self._request()
+        state = initial_graph_state(request, run_id="run-json-safe")
+        action = AgentAction(type="read_file", reason_summary="Read.", target_files=["README.md"])
+        result = ActionResult(action_id=action.action_id, status="success", files_read=["README.md"])
+        action_snapshot = action_to_snapshot(action)
+        result_snapshot = result_to_snapshot(result)
+        self.assertEqual(action_from_snapshot(action_snapshot).type, "read_file")
+        self.assertEqual(result_from_snapshot(result_snapshot).files_read, ["README.md"])
+        self.assertEqual(request_from_snapshot(request_to_snapshot(request)).project_path, request.project_path)
+        json.dumps(json_safe({**state, "actions_taken": [action_snapshot], "action_results": [result_snapshot]}))
 
     def test_route_after_understanding_maps_actions_to_work_modes(self) -> None:
         state = initial_graph_state(self._request(), run_id="run-route")
@@ -199,13 +230,24 @@ class LangGraphRuntimeTests(unittest.TestCase):
         state = initial_graph_state(request, run_id="run-supervisor")
         from repooperator_worker.agent_core.langgraph_runtime import supervisor_node
 
-        update = supervisor_node(state)
+        calls: list[str] = []
+        original_execute_action = ToolOrchestrator.execute_action
+
+        def tracking_execute_action(self, action):
+            calls.append(action.type)
+            return original_execute_action(self, action)
+
+        with patch("repooperator_worker.agent_core.langgraph_runtime.ToolOrchestrator.execute_action", tracking_execute_action):
+            update = supervisor_node(state)
         self.assertTrue(update["supervisor_mode"])
         self.assertGreater(len(update["worker_tasks"]), 1)
         self.assertGreater(len(update["worker_reports"]), 1)
         self.assertTrue(update["file_role_reports"])
         workers = {item["worker"] for item in update["file_role_reports"]}
         self.assertIn("AnalysisAgent", workers)
+        self.assertIn("read_file", calls)
+        self.assertIn("input_files", update["worker_tasks"][0])
+        self.assertIn("files_analyzed", update["worker_reports"][0])
 
     def test_interrupt_resume_allow_runs_without_restarting_evidence(self) -> None:
         request = self._request("Run git status")
@@ -221,7 +263,7 @@ class LangGraphRuntimeTests(unittest.TestCase):
 
         resumed = compiled.invoke(Command(resume={"decision": "allow"}), config=config)
         self.assertIn("README.md", resumed.get("files_read") or [])
-        run_actions = [action.type for action in resumed.get("actions_taken") or []]
+        run_actions = [action.get("type") for action in resumed.get("actions_taken") or []]
         self.assertIn("run_approved_command", run_actions)
 
     def test_interrupt_resume_deny_finalizes_safely(self) -> None:
@@ -260,19 +302,144 @@ class LangGraphRuntimeTests(unittest.TestCase):
         self.assertEqual(result.status, "invalid")
         self.assertIn("delete proposals require explicit", "; ".join(result.errors))
 
-    def test_checkpoint_adapter_round_trips_waiting_approval_state(self) -> None:
-        adapter = InMemoryGraphCheckpointAdapter()
+    def test_change_set_validation_supports_create_and_explicit_delete(self) -> None:
+        create = ChangeSetProposal(
+            plan=ChangePlan(summary="Create a helper module", target_files=["helper.py"], operations=["create"]),
+            changes=[
+                ProposedFileChange(
+                    path="helper.py",
+                    operation="create",
+                    summary="Add helper.",
+                    proposed_content="def helper():\n    return 1\n",
+                )
+            ],
+        )
+        self.assertEqual(validate_change_set(create, repo=str(self.repo)).status, "valid")
+
+        collision = ChangeSetProposal(
+            plan=ChangePlan(summary="Create colliding file", target_files=["app.py"], operations=["create"]),
+            changes=[ProposedFileChange(path="app.py", operation="create", summary="Collide.", proposed_content="print(1)\n")],
+        )
+        self.assertEqual(validate_change_set(collision, repo=str(self.repo)).status, "invalid")
+
+        explicit_delete = ChangeSetProposal(
+            plan=ChangePlan(summary="Explicitly delete obsolete app.py as requested", target_files=["app.py"], operations=["delete"]),
+            changes=[
+                ProposedFileChange(
+                    path="app.py",
+                    operation="delete",
+                    summary="Delete obsolete app.py.",
+                    delete_justification="User explicitly requested deleting this obsolete file.",
+                    original_content=(self.repo / "app.py").read_text(encoding="utf-8"),
+                )
+            ],
+        )
+        self.assertEqual(validate_change_set(explicit_delete, repo=str(self.repo)).status, "valid")
+
+    def test_change_set_validation_rejects_binary_syntax_and_fenced_source(self) -> None:
+        binary = ChangeSetProposal(
+            plan=ChangePlan(summary="Create image", target_files=["image.png"], operations=["create"]),
+            changes=[ProposedFileChange(path="image.png", operation="create", summary="Binary.", proposed_content="not really png")],
+        )
+        self.assertEqual(validate_change_set(binary, repo=str(self.repo)).status, "invalid")
+
+        invalid_python = ChangeSetProposal(
+            plan=ChangePlan(summary="Modify app.py", target_files=["app.py"], operations=["modify"]),
+            changes=[
+                ProposedFileChange(
+                    path="app.py",
+                    operation="modify",
+                    summary="Break syntax.",
+                    original_content=(self.repo / "app.py").read_text(encoding="utf-8"),
+                    proposed_content="def main(:\n    return 2\n",
+                )
+            ],
+        )
+        self.assertIn("Python syntax is invalid", "; ".join(validate_change_set(invalid_python, repo=str(self.repo)).errors))
+
+        fenced_source = ChangeSetProposal(
+            plan=ChangePlan(summary="Modify app.py", target_files=["app.py"], operations=["modify"]),
+            changes=[
+                ProposedFileChange(
+                    path="app.py",
+                    operation="modify",
+                    summary="Fenced source.",
+                    original_content=(self.repo / "app.py").read_text(encoding="utf-8"),
+                    proposed_content="```python\ndef main():\n    return 2\n```\n",
+                )
+            ],
+        )
+        self.assertIn("markdown fences", "; ".join(validate_change_set(fenced_source, repo=str(self.repo)).errors))
+
+    def test_final_response_includes_change_set_payload_and_archive(self) -> None:
+        request = self._request("Create helper.py")
+        state = initial_graph_state(request, run_id="run-change-set-response")
+        proposal = ChangeSetProposal(
+            plan=ChangePlan(summary="Create helper.py", target_files=["helper.py"], operations=["create"]),
+            changes=[
+                ProposedFileChange(
+                    path="helper.py",
+                    operation="create",
+                    summary="Add helper.",
+                    proposed_content="def helper():\n    return 1\n",
+                )
+            ],
+        )
+        validation = validate_change_set(proposal, repo=str(self.repo))
+        proposal.validation = validation
+        proposal.status = validation.status
+        state["change_set_proposal"] = proposal.model_dump()
+        state["final_response"] = "Prepared a proposal-only change set."
+
+        update = final_emit_message_node(state)
+        response = response_from_snapshot(update["response_snapshot"])
+        self.assertEqual(response.response_type, "change_proposal")
+        self.assertEqual(response.change_set_proposal["status"], "valid")
+        self.assertEqual(response.edit_archive[0]["operation"], "create")
+        self.assertIn("+def helper", response.edit_archive[0]["diff"])
+
+    def test_event_service_checkpointer_round_trips_waiting_approval_state(self) -> None:
         request = self._request("Run git status")
         state = initial_graph_state(request, run_id="run-checkpoint")
         state["pending_approval"] = {"command": ["git", "status"], "needs_approval": True}
         state["stop_reason"] = "waiting_approval"
-        identity = GraphCheckpointIdentity("run-checkpoint", request.thread_id, request.project_path, request.branch)
-        adapter.save(identity, 7, "await_approval", state)
-        record = adapter.load_latest(identity)
-        self.assertIsNotNone(record)
-        self.assertEqual(record.sequence, 7)
-        self.assertEqual(record.state["stop_reason"], "waiting_approval")
-        self.assertEqual(record.state["pending_approval"]["command"], ["git", "status"])
+        config = graph_config_for_request(request, "run-checkpoint")
+        saver = EventServiceLangGraphSaver()
+        compiled = build_compiled_repooperator_graph(checkpoint_adapter=saver)
+        compiled.invoke(state, config=config)
+
+        events = [event for event in list_run_events("run-checkpoint") if event.get("type") == "langgraph_checkpoint"]
+        self.assertTrue(events)
+        restored = EventServiceLangGraphSaver().get_tuple(config)
+        self.assertIsNotNone(restored)
+        values = restored.checkpoint.get("channel_values") or {}
+        self.assertEqual(values.get("stop_reason"), "waiting_approval")
+        self.assertEqual(values.get("pending_approval", {}).get("command"), ["git", "status"])
+
+    def test_production_approval_resume_denial_uses_langgraph_checkpoint(self) -> None:
+        request = self._request("Run git status")
+        run_id = "run-production-deny"
+        start_active_run(run_id=run_id, request=request, thread_id=request.thread_id)
+        state = initial_graph_state(request, run_id=run_id)
+        state["pending_approval"] = {"command": ["git", "status", "--short"], "approval_id": "cmd_test", "reason": "test"}
+        state["stop_reason"] = "waiting_approval"
+        checkpointer = EventServiceLangGraphSaver()
+        compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpointer)
+        compiled.invoke(state, config=graph_config_for_request(request, run_id))
+        wait_for_approval(
+            run_id,
+            {
+                "runtime": "langgraph",
+                "request_snapshot": request_to_snapshot(request),
+                "command": ["git", "status", "--short"],
+                "approval_id": "cmd_test",
+            },
+        )
+
+        final_payload = resume_approval(run_id, {"decision": "no_explain"})
+        self.assertEqual(get_run(run_id)["status"], "completed")
+        self.assertEqual(final_payload["stop_reason"], "approval_denied")
+        self.assertIn("approval was denied", final_payload["response"])
 
 
 if __name__ == "__main__":

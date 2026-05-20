@@ -31,6 +31,28 @@ graph. The current backend loop is:
 `agent_core/classifier.py` and `ClassifierResult` remain compatibility-only. They
 must not grow workflow-routing fields or drive planner behavior.
 
+## LangGraph Runtime Migration
+
+RepoOperator now has a real LangGraph `StateGraph` runtime under
+`agent_core/langgraph_runtime.py`. The graph owns tested routing decisions,
+stores JSON-safe checkpoint state, uses a LangGraph checkpointer mirrored into
+run event storage, and resumes command-approval interrupts from the saved graph
+checkpoint. `ToolOrchestrator` remains the only execution boundary for reads,
+commands, and proposal generation.
+
+Runtime selection is controlled by:
+
+- `REPOOPERATOR_AGENT_RUNTIME=legacy|langgraph`
+- `REPOOPERATOR_AGENT_RUNTIME_DEFAULT=legacy|langgraph`
+
+Production default intentionally remains `legacy` until the parity matrix covers
+the full backend route set under normal packaging: streamed final responses,
+completed-while-away rehydrate, broad supervisor decomposition, and complex
+multi-file create/modify/delete proposals. LangGraph-specific tests exercise
+project summary, explicit routing without the legacy chooser, approval
+interrupt/resume, event-service checkpoint restore, supervisor dispatch/reduce,
+and first-class `ChangeSetProposal` payloads.
+
 ## Frontend Run State
 
 The chat UI uses these current modules for agent activity and rehydration:

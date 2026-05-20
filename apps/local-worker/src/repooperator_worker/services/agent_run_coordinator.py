@@ -51,6 +51,16 @@ def start_run(request: AgentRunRequest, *, stream: bool = False) -> AgentRunResp
         response = run_controller_graph(request, run_id=run_id).model_copy(update={"run_id": run_id})
         final_payload = _safe_final_result(response, run_id=run_id)
         _record_response_events(run_id, request, response)
+        if _is_waiting_for_approval(response):
+            wait_for_approval(run_id, _approval_resume_payload(response, request))
+            record_agent_run(
+                run_id=run_id,
+                request=request,
+                response=response,
+                status="waiting_approval",
+                latency_ms=int((time.perf_counter() - start) * 1000),
+            )
+            return response
         maybe_record_from_agent_run(request, response)
         update_thread_context(request, response)
         terminal_status = "cancelled" if response.stop_reason == "cancelled" else "completed"
@@ -117,6 +127,16 @@ def stream_run(request: AgentRunRequest) -> tuple[str, Iterator[str]]:
             if isinstance(final_result, dict):
                 try:
                     response = AgentRunResponse.model_validate(final_result)
+                    if _is_waiting_for_approval(response):
+                        wait_for_approval(run_id, _approval_resume_payload(response, request))
+                        record_agent_run(
+                            run_id=run_id,
+                            request=request,
+                            response=response,
+                            status="waiting_approval",
+                            latency_ms=int((time.perf_counter() - started) * 1000),
+                        )
+                        return
                     update_thread_context(request, response)
                     maybe_record_from_agent_run(request, response)
                     record_agent_run(
@@ -361,6 +381,46 @@ def wait_for_approval(run_id: str, approval: dict[str, Any]) -> dict[str, Any]:
     return meta
 
 
+def resume_approval(run_id: str, decision: dict[str, Any]) -> dict[str, Any]:
+    run = get_run(run_id)
+    if run is None:
+        raise ValueError("Run not found.")
+    if run.get("status") != "waiting_approval":
+        raise ValueError("Run is not waiting for approval.")
+    pending = dict(run.get("pending_approval") or {})
+    if pending.get("runtime") != "langgraph":
+        raise ValueError("Run approval is not owned by the LangGraph runtime.")
+    request_snapshot = run.get("request_snapshot") or pending.get("request_snapshot")
+    if not isinstance(request_snapshot, dict):
+        raise ValueError("Waiting approval run is missing its request snapshot.")
+    request = AgentRunRequest(**request_snapshot)
+    normalized = _normalize_resume_decision(decision)
+    started = time.perf_counter()
+    from repooperator_worker.agent_core.langgraph_runtime import resume_langgraph_controller
+
+    response = resume_langgraph_controller(request, run_id=run_id, approval_decision=normalized).model_copy(update={"run_id": run_id})
+    final_payload = _safe_final_result(response, run_id=run_id)
+    _record_response_events(run_id, request, response)
+    if _is_waiting_for_approval(response):
+        wait_for_approval(run_id, _approval_resume_payload(response, request))
+        terminal_status = "waiting_approval"
+    else:
+        terminal_status = "cancelled" if response.stop_reason == "cancelled" else "completed"
+        complete_active_run(run_id=run_id, status=terminal_status, final_result=final_payload)
+        if terminal_status == "completed":
+            maybe_record_from_agent_run(request, response)
+            update_thread_context(request, response)
+            _drain_queue_after_run(request)
+    record_agent_run(
+        run_id=run_id,
+        request=request,
+        response=response,
+        status=terminal_status,
+        latency_ms=int((time.perf_counter() - started) * 1000),
+    )
+    return final_payload
+
+
 def record_action_result(run_id: str, result: ActionResult | dict[str, Any]) -> dict[str, Any]:
     payload = json_safe(result.model_dump() if hasattr(result, "model_dump") else dict(result))
     return append_run_event(run_id, {"type": "action_result", "event_type": "action_result", "status": payload.get("status"), "result": payload})
@@ -368,6 +428,34 @@ def record_action_result(run_id: str, result: ActionResult | dict[str, Any]) -> 
 
 def complete_run(run_id: str, *, status: str, final_result: dict[str, Any] | None = None, error: str | None = None) -> dict[str, Any]:
     return complete_active_run(run_id=run_id, status=status, final_result=json_safe(final_result), error=error)
+
+
+def _is_waiting_for_approval(response: AgentRunResponse) -> bool:
+    return response.response_type == "command_approval" or response.stop_reason == "waiting_approval"
+
+
+def _approval_resume_payload(response: AgentRunResponse, request: AgentRunRequest) -> dict[str, Any]:
+    payload = dict(response.command_approval or {})
+    payload.update(
+        {
+            "runtime": "langgraph" if response.agent_flow == "langgraph" else "legacy",
+            "run_id": response.run_id,
+            "thread_id": request.thread_id,
+            "repo": request.project_path,
+            "branch": request.branch,
+            "request_snapshot": json_safe(request.model_dump(mode="json")),
+        }
+    )
+    return json_safe(payload)
+
+
+def _normalize_resume_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    raw = str(decision.get("decision") or decision.get("approval") or "").strip().lower()
+    if raw in {"yes", "yes_session", "allow", "approved", "approve"}:
+        normalized = "allow"
+    else:
+        normalized = "deny"
+    return {**json_safe(decision), "decision": normalized}
 
 
 def _safe_final_result(response: AgentRunResponse, *, run_id: str) -> dict[str, Any]:
@@ -395,6 +483,18 @@ def _safe_final_result(response: AgentRunResponse, *, run_id: str) -> dict[str, 
 
 
 def _record_response_events(run_id: str, request: AgentRunRequest, response: AgentRunResponse) -> None:
+    if _is_waiting_for_approval(response):
+        append_activity(
+            run_id,
+            request=request,
+            phase="Commands",
+            label="Waiting for command approval",
+            detail=response.stop_reason or response.response_type,
+            status="waiting",
+            event_type="approval_waiting",
+            related_command=(response.command_approval or {}).get("command") if response.command_approval else None,
+        )
+        return
     if response.agent_flow == "agent_core_controller":
         append_activity(
             run_id,

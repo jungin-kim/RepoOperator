@@ -207,8 +207,32 @@ export type AgentRunPayload = {
   }>;
   activity_events?: AgentActivityEvent[];
   edit_archive?: EditArchiveRecord[];
+  change_set_proposal?: ChangeSetProposalPayload | null;
   loop_iteration?: number;
   stop_reason?: string | null;
+};
+
+export type ChangeSetProposalPayload = {
+  plan?: {
+    summary?: string;
+    target_files?: string[];
+    operations?: string[];
+  };
+  changes?: Array<{
+    path: string;
+    operation: "modify" | "create" | "delete" | "rename" | string;
+    summary?: string;
+    original_content?: string | null;
+    proposed_content?: string | null;
+    risk_notes?: string[];
+  }>;
+  status?: string;
+  validation?: {
+    status?: string;
+    errors?: string[];
+    warnings?: string[];
+  } | null;
+  proposal_error?: string | null;
 };
 
 export type AgentActivityEvent = {
@@ -260,6 +284,7 @@ export type AgentActivityEvent = {
 export type EditArchiveRecord = {
   file_path: string;
   status: "proposed" | "applied" | "rejected" | "failed" | string;
+  operation?: "modify" | "create" | "delete" | "rename" | string;
   additions: number;
   deletions: number;
   diff?: string | null;
@@ -376,20 +401,22 @@ export async function updatePermissionMode(mode: PermissionMode): Promise<Permis
 export async function runApprovedCommand(input: {
   command: string[];
   approval_id?: string;
+  run_id?: string | null;
   remember_for_session?: boolean;
   decision?: string;
-}): Promise<CommandResultPayload> {
+}): Promise<CommandResultPayload | AgentRunPayload> {
   const response = await fetch("/api/worker/commands/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       argv: input.command,
       approval_id: input.approval_id,
+      run_id: input.run_id,
       remember_for_session: input.remember_for_session,
       decision: input.decision,
     }),
   });
-  return parseWorkerResponse<CommandResultPayload>(response);
+  return parseWorkerResponse<CommandResultPayload | AgentRunPayload>(response);
 }
 
 export async function getProviderProjects(input: {

@@ -236,6 +236,7 @@ class AgentRunResponse(BaseModel):
     plan_steps_summary: list[dict] = []
     activity_events: list[dict] = []
     edit_archive: list[dict] = []
+    change_set_proposal: dict | None = None
     loop_iteration: int = 0
     stop_reason: str | None = None
 

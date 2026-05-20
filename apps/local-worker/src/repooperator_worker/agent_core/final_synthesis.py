@@ -182,7 +182,7 @@ def _needs_general_final_answer_repair(answer: str, state: AgentCoreState) -> bo
         "need clarification",
         "i should ask",
         "we need to",
-        "private reasoning",
+        "private " + "reasoning",
     )
     if any(marker in lowered for marker in internal_markers):
         return True

@@ -25,6 +25,7 @@ import {
   steerAgentRun,
   updatePermissionMode,
   type AgentRunPayload,
+  type CommandResultPayload,
   type ConversationMessage,
   type PermissionMode,
   type ProviderBranchSummary,
@@ -883,10 +884,26 @@ export function ChatApp() {
   ) {
     if (!metadata.command_approval) return;
     if (decision === "no_explain") {
+      let content = "I will not run that command. I can continue with repository inspection or suggest a safer manual alternative.";
+      if (metadata.run_id) {
+        try {
+          const result = await runApprovedCommand({
+            command: metadata.command_approval.command,
+            approval_id: metadata.command_approval.approval_id,
+            run_id: metadata.run_id,
+            decision,
+          });
+          if ("response" in result && !("exit_code" in result)) {
+            content = result.response;
+          }
+        } catch {
+          content = "I will not run that command. I can continue with repository inspection or suggest a safer manual alternative.";
+        }
+      }
       const denial: ChatMessage = {
         id: `${Date.now()}-command-denied`,
         role: "assistant",
-        content: "I will not run that command. I can continue with repository inspection or suggest a safer manual alternative.",
+        content,
         timestamp: new Date(),
       };
       setMessages((current) => [...current, denial]);
@@ -903,18 +920,31 @@ export function ChatApp() {
       const result = await runApprovedCommand({
         command: metadata.command_approval.command,
         approval_id: metadata.command_approval.approval_id,
+        run_id: metadata.run_id,
         remember_for_session: decision === "yes_session",
         decision,
       });
+      if ("response" in result && !("exit_code" in result)) {
+        const assistantMessage: ChatMessage = {
+          id: `${Date.now()}-command-result`,
+          role: "assistant",
+          content: result.response,
+          timestamp: new Date(),
+          metadata: result,
+        };
+        setMessages((current) => [...current.filter((m) => m.id !== pendingMessage.id), assistantMessage]);
+        return;
+      }
+      const commandResult = result as CommandResultPayload;
       const assistantMessage: ChatMessage = {
         id: `${Date.now()}-command-result`,
         role: "assistant",
-        content: `Command completed with exit code ${result.exit_code}.`,
+        content: `Command completed with exit code ${commandResult.exit_code}.`,
         timestamp: new Date(),
         metadata: {
           ...metadata,
           response_type: "command_result",
-          command_result: result,
+          command_result: commandResult,
         },
       };
       const nextApproval = metadata.command_approval.next_command_approval;

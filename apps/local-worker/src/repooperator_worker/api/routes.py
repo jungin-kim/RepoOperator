@@ -48,6 +48,7 @@ from repooperator_worker.services.agent_run_coordinator import (
     get_active_run,
     list_events,
     list_queue,
+    resume_approval,
     start_run,
     steer_run,
     stream_run,
@@ -274,6 +275,19 @@ def commands_run(request: dict) -> dict:
     argv = request.get("argv") or request.get("command")
     try:
         decision = request.get("decision", "yes")
+        if request.get("run_id"):
+            run = get_run(str(request.get("run_id"))) or {}
+            pending = run.get("pending_approval") if isinstance(run.get("pending_approval"), dict) else {}
+            if pending.get("runtime") == "langgraph":
+                return resume_approval(
+                    str(request.get("run_id")),
+                    {
+                        "decision": decision,
+                        "approval_id": request.get("approval_id"),
+                        "command": argv if isinstance(argv, list) else [],
+                        "remember_for_session": bool(request.get("remember_for_session")),
+                    },
+                )
         record_event(
             event_type="command_approval",
             summary=f"Command approval decision: {decision}",

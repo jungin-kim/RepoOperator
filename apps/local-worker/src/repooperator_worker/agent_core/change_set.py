@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import ast
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from repooperator_worker.agent_core.tools.builtin import is_supported_text_file
+from repooperator_worker.agent_core.tools.builtin import (
+    BINARY_OR_CACHE_SUFFIXES,
+    TEXT_FILE_BASENAMES,
+    TEXT_FILE_SUFFIXES,
+    is_supported_text_file,
+)
 from repooperator_worker.services.common import resolve_project_path
 from repooperator_worker.services.json_safe import json_safe
 
@@ -19,6 +26,7 @@ class ProposedFileChange:
     summary: str
     original_content: str | None = None
     proposed_content: str | None = None
+    delete_justification: str | None = None
     risk_notes: list[str] = field(default_factory=list)
 
     def model_dump(self) -> dict[str, Any]:
@@ -135,7 +143,12 @@ def validate_change_set(proposal: ChangeSetProposal, *, repo: str) -> Validation
             errors.append(f"{change.path}: resolved path escapes repository")
             continue
         if change.operation == "delete":
-            errors.append(f"{change.path}: delete proposals require explicit protected-delete approval")
+            if not target.exists():
+                errors.append(f"{change.path}: delete target does not exist")
+            if not target.is_file():
+                errors.append(f"{change.path}: delete target must be a file")
+            if not _delete_is_explicitly_justified(change, proposal):
+                errors.append(f"{change.path}: delete proposals require explicit protected-delete approval")
             continue
         if change.operation == "rename":
             errors.append(f"{change.path}: rename proposals are deferred in this graph path")
@@ -151,12 +164,74 @@ def validate_change_set(proposal: ChangeSetProposal, *, repo: str) -> Validation
                 errors.append(f"{change.path}: proposed content is missing")
             if change.original_content is not None and change.proposed_content == change.original_content:
                 errors.append(f"{change.path}: proposed content is unchanged")
+            _validate_proposed_text(change, target=target, errors=errors)
         if change.operation == "create":
             if target.exists():
                 errors.append(f"{change.path}: create target already exists")
             if change.proposed_content is None:
                 errors.append(f"{change.path}: proposed content is missing")
+            if not _is_supported_new_text_path(target):
+                errors.append(f"{change.path}: binary or unsupported file edits are not allowed")
+            _validate_proposed_text(change, target=target, errors=errors)
     return ValidationResult(status="invalid" if errors else "valid", errors=errors)
+
+
+def _delete_is_explicitly_justified(change: ProposedFileChange, proposal: ChangeSetProposal) -> bool:
+    text = " ".join(
+        [
+            change.summary,
+            change.delete_justification or "",
+            " ".join(change.risk_notes),
+            proposal.plan.summary,
+        ]
+    ).lower()
+    return "delete" in text and any(term in text for term in ("explicit", "requested", "obsolete", "remove"))
+
+
+def _is_supported_new_text_path(target: Path) -> bool:
+    suffix = target.suffix.lower()
+    if suffix in BINARY_OR_CACHE_SUFFIXES:
+        return False
+    return suffix in TEXT_FILE_SUFFIXES or target.name.lower() in TEXT_FILE_BASENAMES
+
+
+def _validate_proposed_text(change: ProposedFileChange, *, target: Path, errors: list[str]) -> None:
+    content = change.proposed_content
+    if content is None:
+        return
+    suffix = target.suffix.lower()
+    if suffix not in {".md", ".markdown", ".rst", ".txt"} and "```" in content:
+        errors.append(f"{change.path}: proposed source content must not include markdown fences")
+    if suffix == ".py":
+        try:
+            ast.parse(content or "\n", filename=change.path)
+        except SyntaxError as exc:
+            errors.append(f"{change.path}: Python syntax is invalid: line {exc.lineno}")
+    if suffix == ".json":
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as exc:
+            errors.append(f"{change.path}: JSON syntax is invalid: line {exc.lineno}")
+    if suffix in {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".go", ".rs", ".cs", ".c", ".cpp", ".h", ".hpp"}:
+        bracket_error = _basic_bracket_error(content)
+        if bracket_error:
+            errors.append(f"{change.path}: {bracket_error}")
+    original = change.original_content or ""
+    if original and len(original) > 240 and len((content or "").strip()) < max(40, int(len(original.strip()) * 0.2)):
+        errors.append(f"{change.path}: proposed content appears truncated")
+
+
+def _basic_bracket_error(content: str) -> str | None:
+    pairs = {")": "(", "]": "[", "}": "{"}
+    stack: list[str] = []
+    for char in content:
+        if char in pairs.values():
+            stack.append(char)
+        elif char in pairs:
+            if not stack or stack[-1] != pairs[char]:
+                return "bracket/brace structure is unbalanced"
+            stack.pop()
+    return "bracket/brace structure is unbalanced" if stack else None
 
 
 def _read_original(repo_path: Path, relative_path: str) -> str | None:

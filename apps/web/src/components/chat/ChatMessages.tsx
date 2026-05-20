@@ -114,6 +114,7 @@ function ChangedFilesArchive({ records }: { records?: EditArchiveRecord[] }) {
             >
               <div className="changed-file-path">{compactFileName(record.file_path)}</div>
               <div className="changed-file-stats">
+                {record.operation ? <span className="changed-file-operation">{record.operation}</span> : null}
                 <span className="changed-file-add">+{record.additions}</span>
                 <span className="changed-file-del">-{record.deletions}</span>
                 <span className={`changed-file-status changed-file-status-${record.status}`}>
@@ -135,6 +136,7 @@ function ChangedFilesArchive({ records }: { records?: EditArchiveRecord[] }) {
               <button type="button" onClick={() => setSelected(null)} aria-label="Close changed file details">×</button>
             </div>
             <div className="changed-file-drawer-stats">
+              {selected.operation ? <span className="changed-file-operation">{selected.operation}</span> : null}
               <span className={`changed-file-status changed-file-status-${selected.status}`}>{selected.status}</span>
               <span className="changed-file-add">+{selected.additions}</span>
               <span className="changed-file-del">-{selected.deletions}</span>
@@ -155,7 +157,7 @@ function ChangedFilesArchive({ records }: { records?: EditArchiveRecord[] }) {
             </div>
             <div className="proposal-diff-wrapper changed-file-diff-wrapper">
               <div className="proposal-diff-titlebar">
-                <span>Applied diff</span>
+                <span>Proposed diff</span>
                 <span className="changed-file-readonly-note">Read-only</span>
               </div>
               <div className="proposal-diff-scroll changed-file-diff-scroll">

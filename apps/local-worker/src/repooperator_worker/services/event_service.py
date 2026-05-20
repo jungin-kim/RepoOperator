@@ -62,6 +62,7 @@ def start_active_run(
         "repo": request.project_path,
         "branch": request.branch,
         "task_summary": summarize_user_message(request.task),
+        "request_snapshot": json_safe(request.model_dump(mode="json")),
         "status": "running",
         "started_at": _now_iso(),
         "completed_at": None,

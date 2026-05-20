@@ -1,20 +1,12 @@
-"""LangGraph orchestration seam for RepoOperator.
-
-This module intentionally wraps the existing controller callbacks and
-ToolOrchestrator boundary while introducing a real StateGraph topology. Durable
-interrupt resume is represented by GraphCheckpointAdapter for this migration
-patch; the next step is to back it with event_service storage and wire approved
-commands back into the saved graph state instead of restarting a run.
-"""
+"""LangGraph orchestration runtime for RepoOperator."""
 
 from __future__ import annotations
 
 import copy
-import json
+import difflib
 import shlex
 import time
-from dataclasses import dataclass, field
-from typing import Annotated, Any, Iterator, Protocol, TypedDict
+from typing import Annotated, Any, Iterator, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -27,14 +19,33 @@ from repooperator_worker.agent_core.change_set import (
     proposal_from_edit_result,
     validate_change_set as validate_change_set_model,
 )
+from repooperator_worker.agent_core.graph_checkpoints import EventServiceLangGraphSaver
 from repooperator_worker.agent_core.graph_routes import choose_graph_next_action
+from repooperator_worker.agent_core.graph_state import (
+    action_from_snapshot,
+    action_to_snapshot,
+    classifier_from_snapshot,
+    classifier_to_snapshot,
+    request_from_snapshot,
+    request_to_snapshot,
+    request_understanding_from_snapshot,
+    request_understanding_to_snapshot,
+    response_from_snapshot,
+    response_to_snapshot,
+    result_from_snapshot,
+    result_to_snapshot,
+    subtask_from_snapshot,
+    subtask_to_snapshot,
+    task_frame_from_snapshot,
+    task_frame_to_snapshot,
+)
 from repooperator_worker.agent_core.hooks import HookManager
 from repooperator_worker.agent_core.planner import (
     build_task_frame,
     candidate_files_from_results,
     edit_requested,
 )
-from repooperator_worker.agent_core.state import AgentCoreState, AgentSubtask, ClassifierResult
+from repooperator_worker.agent_core.state import AgentCoreState, ClassifierResult
 from repooperator_worker.agent_core.task_policy import (
     next_evidence_gathering_action,
 )
@@ -95,22 +106,22 @@ def append_unique_items(left: list[Any] | None, right: list[Any] | Any | None) -
 
 
 class RepoOperatorGraphState(TypedDict, total=False):
-    request: AgentRunRequest
+    request_snapshot: dict[str, Any]
     run_id: str
     thread_id: str | None
     repo: str
     branch: str | None
     context_packet: dict[str, Any] | None
-    request_understanding: Any | None
-    classifier_result: ClassifierResult
-    task_frame: Any | None
-    subtasks: list[AgentSubtask]
+    request_understanding_snapshot: dict[str, Any] | None
+    classifier_snapshot: dict[str, Any]
+    task_frame_snapshot: dict[str, Any] | None
+    subtasks: list[dict[str, Any]]
     current_subtask_id: str | None
     plan: list[str]
     messages: Annotated[list[dict[str, Any]], append_items]
     events: Annotated[list[dict[str, Any]], append_items]
-    actions_taken: Annotated[list[AgentAction], append_items]
-    action_results: Annotated[list[ActionResult], append_items]
+    actions_taken: Annotated[list[dict[str, Any]], append_items]
+    action_results: Annotated[list[dict[str, Any]], append_items]
     observations: Annotated[list[str], append_items]
     evidence_store: dict[str, Any]
     files_read: Annotated[list[str], append_unique_items]
@@ -121,7 +132,7 @@ class RepoOperatorGraphState(TypedDict, total=False):
     validation_results: Annotated[list[dict[str, Any]], append_items]
     repair_attempts: int
     final_response: str
-    response_model: AgentRunResponse | None
+    response_snapshot: dict[str, Any] | None
     stop_reason: str | None
     loop_iteration: int
     budgets: dict[str, Any]
@@ -137,7 +148,7 @@ class RepoOperatorGraphState(TypedDict, total=False):
     attempts: Annotated[list[dict[str, Any]], append_items]
     supervisor_mode: bool
     current_worker_role: str | None
-    pending_action: AgentAction | None
+    pending_action: dict[str, Any] | None
     next_node: str | None
     routing_stage: str
     graph_started_at: float
@@ -164,60 +175,7 @@ class RepoOperatorGraphState(TypedDict, total=False):
     approval_decision: dict[str, Any] | None
 
 
-@dataclass(frozen=True)
-class GraphCheckpointIdentity:
-    run_id: str
-    thread_id: str | None
-    repo: str
-    branch: str | None
-
-
-@dataclass
-class GraphCheckpointRecord:
-    identity: GraphCheckpointIdentity
-    sequence: int
-    node: str
-    state: dict[str, Any]
-    created_at: float = field(default_factory=time.time)
-
-
-class GraphCheckpointAdapter(Protocol):
-    def save(self, identity: GraphCheckpointIdentity, sequence: int, node: str, state: RepoOperatorGraphState) -> GraphCheckpointRecord:
-        ...
-
-    def load_latest(self, identity: GraphCheckpointIdentity) -> GraphCheckpointRecord | None:
-        ...
-
-
-class InMemoryGraphCheckpointAdapter:
-    """Compatibility checkpoint adapter until event-service-backed graph persistence lands."""
-
-    def __init__(self) -> None:
-        self._records: dict[tuple[str, str | None, str, str | None], list[GraphCheckpointRecord]] = {}
-
-    def save(self, identity: GraphCheckpointIdentity, sequence: int, node: str, state: RepoOperatorGraphState) -> GraphCheckpointRecord:
-        record = GraphCheckpointRecord(
-            identity=identity,
-            sequence=sequence,
-            node=node,
-            state=json_safe(_checkpointable_state(state)),
-        )
-        key = (identity.run_id, identity.thread_id, identity.repo, identity.branch)
-        self._records.setdefault(key, []).append(record)
-        return record
-
-    def load_latest(self, identity: GraphCheckpointIdentity) -> GraphCheckpointRecord | None:
-        key = (identity.run_id, identity.thread_id, identity.repo, identity.branch)
-        records = self._records.get(key) or []
-        return records[-1] if records else None
-
-
-_DEFAULT_CHECKPOINT_ADAPTER = InMemoryGraphCheckpointAdapter()
-_DEFAULT_LANGGRAPH_CHECKPOINTER = InMemorySaver()
-
-
-def get_default_checkpoint_adapter() -> InMemoryGraphCheckpointAdapter:
-    return _DEFAULT_CHECKPOINT_ADAPTER
+_DEFAULT_LANGGRAPH_CHECKPOINTER = EventServiceLangGraphSaver()
 
 
 def get_default_langgraph_checkpointer() -> InMemorySaver:
@@ -437,28 +395,24 @@ def run_langgraph_controller(
         skills_context=skills_context,
         skills_used=skills_used,
     )
-    compatibility_adapter = checkpoint_adapter if _is_compat_checkpoint_adapter(checkpoint_adapter) else get_default_checkpoint_adapter()
-    _save_checkpoint(compatibility_adapter, initial_state, "start")
     compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpoint_adapter)
     config = graph_config_for_request(request, run_id)
     final_state = compiled.invoke(initial_state, config=config)
     if final_state.get("__interrupt__"):
         snapshot_state = dict(compiled.get_state(config).values or {})
-        snapshot_state.setdefault("request", request)
+        snapshot_state.setdefault("request_snapshot", request_to_snapshot(request))
         snapshot_state.setdefault("run_id", run_id)
         snapshot_state.setdefault("thread_id", request.thread_id)
         snapshot_state.setdefault("repo", request.project_path)
         snapshot_state.setdefault("branch", request.branch)
-        _save_checkpoint(compatibility_adapter, snapshot_state, "interrupt")
         return _response_from_interrupted_state(snapshot_state, request)
-    _save_checkpoint(compatibility_adapter, final_state, "end")
-    response = final_state.get("response_model")
+    response = response_from_snapshot(final_state.get("response_snapshot"))
     if isinstance(response, AgentRunResponse):
         return response
     core = _core_state_from_graph(final_state)
     if not core.final_response:
         core.final_response = final_state.get("final_response") or ""
-    return _controller().build_final_response(core, request)
+    return _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"})
 
 
 def resume_langgraph_controller(
@@ -473,11 +427,11 @@ def resume_langgraph_controller(
     final_state = compiled.invoke(Command(resume=json_safe(approval_decision)), config=config)
     if final_state.get("__interrupt__"):
         return _response_from_interrupted_state(dict(compiled.get_state(config).values or {}), request)
-    response = final_state.get("response_model")
+    response = response_from_snapshot(final_state.get("response_snapshot"))
     if isinstance(response, AgentRunResponse):
         return response
-    core = _core_state_from_graph({**dict(final_state), "request": request, "run_id": run_id})
-    return _controller().build_final_response(core, request)
+    core = _core_state_from_graph({**dict(final_state), "request_snapshot": request_to_snapshot(request), "run_id": run_id})
+    return _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"})
 
 
 def stream_langgraph_controller(request: AgentRunRequest, *, run_id: str | None = None) -> Iterator[dict[str, Any]]:
@@ -509,15 +463,15 @@ def initial_graph_state(
     skills_used: list[str] | None = None,
 ) -> RepoOperatorGraphState:
     return {
-        "request": request,
+        "request_snapshot": request_to_snapshot(request),
         "run_id": run_id,
         "thread_id": request.thread_id,
         "repo": request.project_path,
         "branch": request.branch,
         "context_packet": None,
-        "request_understanding": None,
-        "classifier_result": ClassifierResult(),
-        "task_frame": None,
+        "request_understanding_snapshot": None,
+        "classifier_snapshot": classifier_to_snapshot(ClassifierResult()),
+        "task_frame_snapshot": None,
         "subtasks": [],
         "current_subtask_id": None,
         "plan": [],
@@ -535,7 +489,7 @@ def initial_graph_state(
         "validation_results": [],
         "repair_attempts": 0,
         "final_response": "",
-        "response_model": None,
+        "response_snapshot": None,
         "stop_reason": None,
         "loop_iteration": 0,
         "budgets": {},
@@ -593,7 +547,7 @@ def understand_request_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     core = _core_state_from_graph(state)
     _controller().classify(core, request)
     update = _updates_from_core(state, core)
-    update["task_frame"] = _controller().build_task_frame(request, core)
+    update["task_frame_snapshot"] = task_frame_to_snapshot(_controller().build_task_frame(request, core))
     update["budgets"] = {
         "max_loop_iterations": core.max_loop_iterations,
         "max_file_reads": core.max_file_reads,
@@ -617,7 +571,8 @@ def build_task_plan_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     request = _request(state)
     core = _core_state_from_graph(state)
-    if state.get("pending_action"):
+    existing_action = _pending_action(state)
+    if existing_action:
         route = route_by_stage(state)
         return _with_checkpoint_bump(
             {
@@ -627,7 +582,7 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                         state,
                         "route_next",
                         operation="route_existing_action",
-                        action_type=state["pending_action"].type if state.get("pending_action") else None,
+                        action_type=existing_action.type,
                         next_node=route,
                     )
                 ],
@@ -665,13 +620,14 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     action = choose_graph_next_action(core, request)
     core.current_step = action.reason_summary
     update = _updates_from_core(state, core)
-    route = route_by_stage({**dict(state), **update, "pending_action": action})
+    action_snapshot = action_to_snapshot(action)
+    route = route_by_stage({**dict(state), **update, "pending_action": action_snapshot})
     update.update(
         {
-            "pending_action": action,
+            "pending_action": action_snapshot,
             "next_node": route,
             "current_step": action.reason_summary,
-            "task_frame": _controller().build_task_frame(request, core),
+            "task_frame_snapshot": task_frame_to_snapshot(_controller().build_task_frame(request, core)),
             "events_to_emit": [
                 _graph_transition_event(
                     state,
@@ -754,7 +710,7 @@ def route_after_approval(state: RepoOperatorGraphState) -> str:
 
 
 def route_after_interrupt_resume(state: RepoOperatorGraphState) -> str:
-    if state.get("pending_action"):
+    if _pending_action(state):
         return "execute_tool"
     if state.get("stop_reason") == "approval_denied":
         return "final_synthesis"
@@ -840,7 +796,7 @@ def validate_result_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     proposal = plan_change_set(
         list(action.target_files if action else []),
         action.reason_summary if action else "Plan proposal-only change set.",
@@ -919,7 +875,7 @@ def repair_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def ask_clarification_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     request = _request(state)
     core = _core_state_from_graph(state)
     missing = ", ".join(action.payload.get("missing_files") or []) if action else ""
@@ -945,8 +901,6 @@ def ask_clarification_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    adapter = get_default_checkpoint_adapter()
-    _save_checkpoint(adapter, state, "await_approval")
     payload = _approval_interrupt_payload(state)
     decision = interrupt(payload)
     normalized = _normalize_approval_decision(decision)
@@ -955,12 +909,14 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         approval_id = str((state.get("pending_approval") or {}).get("approval_id") or payload.get("approval_id") or "")
         return _with_checkpoint_bump(
             {
-                "pending_action": AgentAction(
-                    type="run_approved_command",
-                    reason_summary="Run command after user approval.",
-                    command=command,
-                    expected_output="Command output after approval.",
-                    payload={"approval_id": approval_id, "approval_decision": normalized},
+                "pending_action": action_to_snapshot(
+                    AgentAction(
+                        type="run_approved_command",
+                        reason_summary="Run command after user approval.",
+                        command=command,
+                        expected_output="Command output after approval.",
+                        payload={"approval_id": approval_id, "approval_decision": normalized},
+                    )
                 ),
                 "pending_approval": None,
                 "stop_reason": None,
@@ -1007,7 +963,7 @@ def final_synthesis_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def route_evidence_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    if state.get("pending_action"):
+    if _pending_action(state):
         return {
             "events_to_emit": [_graph_transition_event(state, "route_evidence_next", subgraph="evidence_gathering_graph", operation="route")],
         }
@@ -1019,7 +975,7 @@ def route_evidence_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
             "events_to_emit": [_graph_transition_event(state, "route_evidence_next", subgraph="evidence_gathering_graph", operation="evidence_complete")],
         }
     return {
-        "pending_action": action,
+        "pending_action": action_to_snapshot(action),
         "events_to_emit": [
             _graph_transition_event(
                 state,
@@ -1033,7 +989,7 @@ def route_evidence_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def route_evidence_next(state: RepoOperatorGraphState) -> str:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     if not action:
         return END
     if action.type == "inspect_repo_tree":
@@ -1113,7 +1069,7 @@ def analysis_batch_files_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 def analysis_file_role_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     tasks = state.get("worker_tasks") or []
-    reports = [_run_analysis_worker_task(task) for task in tasks if task.get("role") == "AnalysisAgent"]
+    reports = [_run_analysis_worker_task(task, state=state) for task in tasks if task.get("role") == "AnalysisAgent"]
     if not reports:
         reports = [{"worker": "AnalysisAgent", "file": path, "role": "evidence file", "files": [path]} for path in state.get("files_read") or []]
     return {
@@ -1151,7 +1107,7 @@ def analysis_route_batch_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def edit_locate_targets_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     return {
         "events_to_emit": [
             _graph_transition_event(
@@ -1166,7 +1122,7 @@ def edit_locate_targets_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def route_edit_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     if not action:
         return {
             "edit_done": True,
@@ -1186,7 +1142,7 @@ def route_edit_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 
 def route_edit_next(state: RepoOperatorGraphState) -> str:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     if not action:
         return END
     if action.type == "generate_edit":
@@ -1197,7 +1153,7 @@ def route_edit_next(state: RepoOperatorGraphState) -> str:
 
 
 def edit_plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     proposal = plan_change_set(
         list(action.target_files if action else []),
         action.reason_summary if action else "Plan proposal-only change set.",
@@ -1344,9 +1300,12 @@ def final_build_response_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def final_emit_message_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     request = _request(state)
     core = _core_state_from_graph(state)
-    response = _controller().build_final_response(core, request)
+    response = _response_with_change_set_payload(
+        _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"}),
+        state,
+    )
     return {
-        "response_model": response,
+        "response_snapshot": response_to_snapshot(response),
         "events_to_emit": [_graph_transition_event(state, "emit_final_message", subgraph="finalization_graph", operation="emit_final_message")],
     }
 
@@ -1364,7 +1323,7 @@ def supervisor_build_worker_tasks_node(state: RepoOperatorGraphState) -> dict[st
 
 
 def supervisor_run_worker_tasks_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    reports = [_run_worker_task(task) for task in state.get("worker_tasks") or []]
+    reports = [_run_worker_task(task, state=state) for task in state.get("worker_tasks") or []]
     return {
         "worker_reports": reports,
         "events_to_emit": [_graph_transition_event(state, "run_worker_task", subgraph="supervisor", operation="run_worker_task")],
@@ -1387,14 +1346,14 @@ def supervisor_reduce_worker_reports_node(state: RepoOperatorGraphState) -> dict
 
 
 def _execute_if_action_type(state: RepoOperatorGraphState, action_types: set[str], subgraph: str, node_name: str) -> dict[str, Any]:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     if action and action.type in action_types:
         return _execute_pending_action(state, subgraph=subgraph, node_name=node_name)
     return {"events_to_emit": [_graph_transition_event(state, node_name, subgraph=subgraph, operation="skip")]}
 
 
 def _execute_pending_action(state: RepoOperatorGraphState, *, subgraph: str | None, node_name: str | None = None) -> dict[str, Any]:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     if not action:
         return {
             "routing_stage": "after_tool_result",
@@ -1440,7 +1399,7 @@ def _execute_pending_action(state: RepoOperatorGraphState, *, subgraph: str | No
 
 
 def _route_to_final_or_action(state: RepoOperatorGraphState) -> str:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     if not action:
         return "final_synthesis"
     if action.type == "final_answer":
@@ -1461,7 +1420,7 @@ def _route_to_final_or_action(state: RepoOperatorGraphState) -> str:
 def _should_use_supervisor(state: RepoOperatorGraphState) -> bool:
     if state.get("supervisor_mode"):
         return False
-    frame = state.get("task_frame")
+    frame = _task_frame(state)
     if frame is None:
         return False
     text = " ".join([str(getattr(frame, "user_goal", "")), *[str(item) for item in getattr(frame, "requested_outputs", [])]]).lower()
@@ -1493,8 +1452,8 @@ def _delta_state(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any
 def _updates_from_core(before: RepoOperatorGraphState, core: AgentCoreState) -> dict[str, Any]:
     update: dict[str, Any] = {
         "context_packet": core.context_packet,
-        "request_understanding": core.request_understanding,
-        "classifier_result": core.classifier_result,
+        "request_understanding_snapshot": request_understanding_to_snapshot(core.request_understanding),
+        "classifier_snapshot": classifier_to_snapshot(core.classifier_result),
         "plan": list(core.plan),
         "current_subtask_id": core.current_subtask_id,
         "pending_approval": core.pending_approval,
@@ -1509,7 +1468,7 @@ def _updates_from_core(before: RepoOperatorGraphState, core: AgentCoreState) -> 
         "max_file_reads": core.max_file_reads,
         "max_commands": core.max_commands,
         "max_edits": core.max_edits,
-        "subtasks": list(core.subtasks),
+        "subtasks": [subtask_to_snapshot(subtask) for subtask in core.subtasks],
         "current_step": core.current_step,
         "zero_result_queries": list(core.zero_result_queries),
         "failed_action_signatures": list(core.failed_action_signatures),
@@ -1521,7 +1480,12 @@ def _updates_from_core(before: RepoOperatorGraphState, core: AgentCoreState) -> 
         old = before.get(field_name) or []
         new = getattr(core, field_name) or []
         if len(new) > len(old):
-            update[field_name] = list(new[len(old):])
+            if field_name == "actions_taken":
+                update[field_name] = [action_to_snapshot(item) for item in new[len(old):]]
+            elif field_name == "action_results":
+                update[field_name] = [result_to_snapshot(item) for item in new[len(old):]]
+            else:
+                update[field_name] = list(new[len(old):])
     return {key: value for key, value in update.items() if value is not None or key in {"pending_approval", "stop_reason"}}
 
 
@@ -1532,8 +1496,8 @@ def _updates_from_core_after_action(
     result: ActionResult,
 ) -> dict[str, Any]:
     update = _updates_from_core(before, core)
-    update["actions_taken"] = [action]
-    update["action_results"] = [result]
+    update["actions_taken"] = [action_to_snapshot(action)]
+    update["action_results"] = [result_to_snapshot(result)]
     if result.files_changed:
         update["files_changed"] = list(result.files_changed)
     if result.files_read:
@@ -1554,13 +1518,15 @@ def _core_state_from_graph(state: RepoOperatorGraphState) -> AgentCoreState:
         branch=state.get("branch"),
         user_task=request.task,
     )
-    core.classifier_result = state.get("classifier_result") or ClassifierResult()
-    core.request_understanding = state.get("request_understanding")
+    core.classifier_result = classifier_from_snapshot(state.get("classifier_snapshot") or state.get("classifier_result"))  # type: ignore[typeddict-item]
+    core.request_understanding = request_understanding_from_snapshot(
+        state.get("request_understanding_snapshot") or state.get("request_understanding")  # type: ignore[typeddict-item]
+    )
     core.plan = list(state.get("plan") or [])
     core.current_step = state.get("current_step")
     core.observations = list(state.get("observations") or [])
-    core.actions_taken = list(state.get("actions_taken") or [])
-    core.action_results = list(state.get("action_results") or [])
+    core.actions_taken = [action for action in (action_from_snapshot(item) for item in state.get("actions_taken") or []) if action]
+    core.action_results = [result for result in (result_from_snapshot(item) for item in state.get("action_results") or []) if result]
     core.files_read = list(state.get("files_read") or [])
     core.files_changed = list(state.get("files_changed") or [])
     core.commands_run = list(state.get("commands_run") or [])
@@ -1577,7 +1543,7 @@ def _core_state_from_graph(state: RepoOperatorGraphState) -> AgentCoreState:
     core.max_file_reads = int(state.get("max_file_reads") or (state.get("budgets") or {}).get("max_file_reads") or 40)
     core.max_commands = int(state.get("max_commands") or (state.get("budgets") or {}).get("max_commands") or 8)
     core.max_edits = int(state.get("max_edits") or (state.get("budgets") or {}).get("max_edits") or 6)
-    core.subtasks = list(state.get("subtasks") or [])
+    core.subtasks = [subtask_from_snapshot(item) for item in state.get("subtasks") or []]
     core.current_subtask_id = state.get("current_subtask_id")
     core.zero_result_queries = list(state.get("zero_result_queries") or [])
     core.failed_action_signatures = list(state.get("failed_action_signatures") or [])
@@ -1586,15 +1552,26 @@ def _core_state_from_graph(state: RepoOperatorGraphState) -> AgentCoreState:
 
 
 def _request(state: RepoOperatorGraphState) -> AgentRunRequest:
-    request = state.get("request")
-    if not isinstance(request, AgentRunRequest):
-        raise ValueError("RepoOperatorGraphState requires an AgentRunRequest under 'request'.")
-    return request
+    snapshot = state.get("request_snapshot")
+    if isinstance(snapshot, dict):
+        return request_from_snapshot(snapshot)
+    request = state.get("request")  # type: ignore[typeddict-item]
+    if isinstance(request, AgentRunRequest):
+        return request
+    raise ValueError("RepoOperatorGraphState requires request_snapshot.")
+
+
+def _pending_action(state: RepoOperatorGraphState) -> AgentAction | None:
+    return action_from_snapshot(state.get("pending_action"))
+
+
+def _task_frame(state: RepoOperatorGraphState) -> Any | None:
+    return task_frame_from_snapshot(state.get("task_frame_snapshot") or state.get("task_frame"))  # type: ignore[typeddict-item]
 
 
 def _latest_result(state: RepoOperatorGraphState) -> ActionResult | None:
     results = state.get("action_results") or []
-    return results[-1] if results else None
+    return result_from_snapshot(results[-1]) if results else None
 
 
 def _change_set_from_latest_result(state: RepoOperatorGraphState, result: ActionResult | None) -> dict[str, Any] | None:
@@ -1649,13 +1626,81 @@ def _normalize_approval_decision(value: Any) -> dict[str, Any]:
     return {"decision": "deny"}
 
 
+def _response_with_change_set_payload(response: AgentRunResponse, state: RepoOperatorGraphState) -> AgentRunResponse:
+    proposal = state.get("change_set_proposal")
+    if not isinstance(proposal, dict) or not proposal.get("changes"):
+        return response
+    validation = proposal.get("validation") if isinstance(proposal.get("validation"), dict) else {}
+    validation_status = str(validation.get("status") or proposal.get("status") or "planned")
+    errors = [str(item) for item in validation.get("errors") or proposal.get("proposal_errors") or []]
+    archive = [_edit_archive_record_from_change(change, validation_status) for change in proposal.get("changes") or [] if isinstance(change, dict)]
+    archive = [item for item in archive if item]
+    first = (proposal.get("changes") or [{}])[0]
+    response_type = "change_proposal" if validation_status == "valid" else "proposal_error"
+    updates: dict[str, Any] = {
+        "response_type": response_type,
+        "change_set_proposal": json_safe(proposal),
+        "edit_archive": archive,
+        "proposal_validation_status": validation_status,
+        "validation_status": validation_status,
+    }
+    if errors:
+        updates["proposal_error_details"] = "; ".join(errors)
+    if isinstance(first, dict):
+        updates.update(
+            {
+                "proposal_relative_path": first.get("path"),
+                "proposal_original_content": first.get("original_content") or "",
+                "proposal_proposed_content": first.get("proposed_content") or "",
+                "proposal_context_summary": ((proposal.get("plan") or {}).get("summary") if isinstance(proposal.get("plan"), dict) else None),
+                "selected_target_file": first.get("path"),
+            }
+        )
+    return response.model_copy(update=json_safe(updates))
+
+
+def _edit_archive_record_from_change(change: dict[str, Any], validation_status: str) -> dict[str, Any]:
+    path = str(change.get("path") or "")
+    if not path:
+        return {}
+    operation = str(change.get("operation") or "modify")
+    original = str(change.get("original_content") or "")
+    proposed = "" if operation == "delete" else str(change.get("proposed_content") or "")
+    if operation == "create":
+        original = ""
+    diff = "\n".join(
+        difflib.unified_diff(
+            original.splitlines(),
+            proposed.splitlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        )
+    )
+    additions = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    deletions = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
+    return {
+        "file_path": path,
+        "file": path,
+        "operation": operation,
+        "status": "proposed" if validation_status == "valid" else "failed",
+        "summary": str(change.get("summary") or ""),
+        "additions": additions,
+        "deletions": deletions,
+        "diff": diff,
+        "diff_available": bool(diff.strip()),
+        "proposal_id": "proposal:" + path,
+        "validation_status": validation_status,
+    }
+
+
 def _response_from_interrupted_state(state: dict[str, Any], request: AgentRunRequest) -> AgentRunResponse:
     state = dict(state)
-    state.setdefault("request", request)
+    state.setdefault("request_snapshot", request_to_snapshot(request))
     core = _core_state_from_graph(state)
     if not core.stop_reason:
         core.stop_reason = "waiting_approval"
-    return _controller().build_final_response(core, request)
+    return _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"})
 
 
 def _graph_transition_event(
@@ -1760,7 +1805,7 @@ def _action_operation(action_type: str) -> str:
 
 
 def _evidence_report(state: RepoOperatorGraphState, result: ActionResult | None) -> dict[str, Any]:
-    action = state.get("pending_action")
+    action = _pending_action(state)
     return {
         "worker": "EvidenceAgent",
         "action_type": action.type if action else None,
@@ -1786,54 +1831,105 @@ def _worker_tasks_from_groups(groups: dict[str, list[str]], *, roles: list[str])
         for group, files in groups.items():
             if not files:
                 continue
-            tasks.append({"role": role, "group": group, "files": files[:8], "task_id": f"{role}:{group}"})
+            tasks.append(
+                {
+                    "id": f"{role}:{group}",
+                    "task_id": f"{role}:{group}",
+                    "role": role,
+                    "scope": group,
+                    "group": group,
+                    "input_files": files[:8],
+                    "files": files[:8],
+                    "goal": f"Analyze {group} files for the current repository task.",
+                    "status": "pending",
+                }
+            )
     return tasks[:12]
 
 
-def _run_worker_task(task: dict[str, Any]) -> dict[str, Any]:
+def _run_worker_task(task: dict[str, Any], *, state: RepoOperatorGraphState) -> dict[str, Any]:
     role = str(task.get("role") or "AnalysisAgent")
     if role == "AnalysisAgent":
-        return _run_analysis_worker_task(task)
+        return _run_analysis_worker_task(task, state=state)
+    files = [str(item) for item in task.get("input_files") or task.get("files") or []]
     if role == "EvidenceAgent":
+        read = _worker_read_files(state, files[:1])
         return {
             "worker": role,
             "task_id": task.get("task_id"),
-            "group": task.get("group"),
-            "files": list(task.get("files") or []),
+            "role": role,
+            "scope": task.get("scope") or task.get("group"),
+            "files_analyzed": read["files_read"],
+            "files": files,
+            "findings": ["Located bounded evidence candidates for the requested scope."],
             "summary": "Located bounded evidence candidates for the requested scope.",
+            "status": read["status"],
         }
     if role == "EditPlanningAgent":
         return {
             "worker": role,
             "task_id": task.get("task_id"),
-            "group": task.get("group"),
-            "files": list(task.get("files") or []),
+            "role": role,
+            "scope": task.get("scope") or task.get("group"),
+            "files": files,
+            "files_analyzed": files,
+            "findings": ["Identified files that may participate in a proposal-only change plan."],
+            "recommended_next_actions": ["Generate and validate a ChangeSetProposal before presenting edits."],
             "summary": "Identified files that may participate in a proposal-only change plan.",
             "risk_notes": ["Change plan still requires proposal validation before it can be shown as valid."],
+            "status": "completed",
         }
     if role == "ValidationAgent":
-        return {"worker": role, "task_id": task.get("task_id"), "summary": "Validation should run through ToolOrchestrator-backed checks."}
+        return {"worker": role, "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Validation should run through ToolOrchestrator-backed checks."], "summary": "Validation should run through ToolOrchestrator-backed checks.", "status": "completed"}
     if role == "DocumentationAgent":
-        return {"worker": role, "task_id": task.get("task_id"), "summary": "Documentation impact should be considered if behavior changes."}
+        return {"worker": role, "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Documentation impact should be considered if behavior changes."], "summary": "Documentation impact should be considered if behavior changes.", "status": "completed"}
     if role == "TestAgent":
-        return {"worker": role, "task_id": task.get("task_id"), "summary": "Tests or safe validation commands may be needed after a proposal."}
-    return {"worker": role, "task_id": task.get("task_id"), "summary": "Worker completed bounded scoped analysis."}
+        return {"worker": role, "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Tests or safe validation commands may be needed after a proposal."], "summary": "Tests or safe validation commands may be needed after a proposal.", "status": "completed"}
+    return {"worker": role, "task_id": task.get("task_id"), "role": role, "files": files, "files_analyzed": [], "findings": ["Worker completed bounded scoped analysis."], "summary": "Worker completed bounded scoped analysis.", "status": "completed"}
 
 
-def _run_analysis_worker_task(task: dict[str, Any]) -> dict[str, Any]:
-    files = list(task.get("files") or [])
+def _run_analysis_worker_task(task: dict[str, Any], *, state: RepoOperatorGraphState | None = None) -> dict[str, Any]:
+    files = [str(item) for item in task.get("input_files") or task.get("files") or []]
+    read = _worker_read_files(state, files[:1]) if state is not None else {"files_read": [], "status": "completed"}
     return {
         "worker": "AnalysisAgent",
         "task_id": task.get("task_id"),
+        "role": "AnalysisAgent",
+        "scope": task.get("scope") or task.get("group"),
         "group": task.get("group"),
         "files": files,
-        "role": f"{task.get('group') or 'files'} analysis batch",
+        "files_analyzed": read["files_read"] or files,
+        "file_role": f"{task.get('group') or 'files'} analysis batch",
+        "findings": [f"Grouped {len(files)} file(s) for bounded file-role analysis."],
+        "recommended_next_actions": ["Reduce this report into the parent graph evidence summary."],
         "summary": f"Grouped {len(files)} file(s) for bounded file-role analysis.",
+        "status": read["status"],
     }
 
 
+def _worker_read_files(state: RepoOperatorGraphState | None, files: list[str]) -> dict[str, Any]:
+    if state is None or not files:
+        return {"files_read": [], "status": "skipped"}
+    action = AgentAction(
+        type="read_file",
+        reason_summary="Worker reads a bounded file sample through ToolOrchestrator.",
+        target_files=files,
+        expected_output="Bounded worker evidence sample.",
+        payload={"worker": True},
+    )
+    orchestrator = ToolOrchestrator(
+        run_id=str(state.get("run_id") or "run_controller"),
+        request=_request(state),
+        registry=get_default_tool_registry(),
+        hook_manager=HookManager(),
+    )
+    result = orchestrator.execute_action(action)
+    _append_action_event(str(state.get("run_id") or "run_controller"), action, result)
+    return {"files_read": list(result.files_read or []), "status": result.status}
+
+
 def _frame_is_edit_like(state: RepoOperatorGraphState) -> bool:
-    frame = state.get("task_frame")
+    frame = _task_frame(state)
     if frame is None:
         try:
             frame = build_task_frame(_request(state), _core_state_from_graph(state))
@@ -1849,32 +1945,6 @@ def _with_checkpoint_bump(update: dict[str, Any]) -> dict[str, Any]:
 
 def _is_langgraph_checkpointer(value: Any) -> bool:
     return value is not None and hasattr(value, "put") and hasattr(value, "get_tuple")
-
-
-def _is_compat_checkpoint_adapter(value: Any) -> bool:
-    return value is not None and hasattr(value, "save") and hasattr(value, "load_latest")
-
-
-def _save_checkpoint(adapter: GraphCheckpointAdapter, state: RepoOperatorGraphState, node: str) -> None:
-    identity = GraphCheckpointIdentity(
-        run_id=str(state.get("run_id") or "run_controller"),
-        thread_id=state.get("thread_id"),
-        repo=str(state.get("repo") or ""),
-        branch=state.get("branch"),
-    )
-    sequence = int(state.get("checkpoint_sequence") or 0)
-    adapter.save(identity, sequence, node, state)
-
-
-def _checkpointable_state(state: RepoOperatorGraphState) -> dict[str, Any]:
-    payload = dict(state)
-    request = payload.get("request")
-    if isinstance(request, AgentRunRequest):
-        payload["request"] = request.model_dump()
-    response = payload.get("response_model")
-    if isinstance(response, AgentRunResponse):
-        payload["response_model"] = response.model_dump()
-    return payload
 
 
 def _stream_final_delta(run_id: str):
@@ -1903,41 +1973,3 @@ def _controller() -> Any:
     from repooperator_worker.agent_core import controller_graph
 
     return controller_graph
-
-
-def _noop_node(state: RepoOperatorGraphState, node: str, *, subgraph: str, operation: str) -> dict[str, Any]:
-    return {"events_to_emit": [_graph_transition_event(state, node, subgraph=subgraph, operation=operation)]}
-
-
-__all__ = [
-    "GraphCheckpointAdapter",
-    "GraphCheckpointIdentity",
-    "GraphCheckpointRecord",
-    "InMemoryGraphCheckpointAdapter",
-    "RepoOperatorGraphState",
-    "append_items",
-    "append_unique_items",
-    "build_analysis_graph",
-    "build_compiled_repooperator_graph",
-    "build_edit_graph",
-    "build_evidence_gathering_graph",
-    "build_finalization_graph",
-    "build_repooperator_state_graph",
-    "build_supervisor_graph",
-    "build_validation_graph",
-    "get_default_langgraph_checkpointer",
-    "graph_config_for_request",
-    "get_default_checkpoint_adapter",
-    "initial_graph_state",
-    "route_after_approval",
-    "route_after_change_plan",
-    "route_after_evidence",
-    "route_after_interrupt_resume",
-    "route_after_tool_result",
-    "route_after_understanding",
-    "route_after_validation",
-    "route_to_final_or_continue",
-    "resume_langgraph_controller",
-    "run_langgraph_controller",
-    "stream_langgraph_controller",
-]
