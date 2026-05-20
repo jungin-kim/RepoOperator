@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import time
@@ -91,6 +92,10 @@ def run_controller_graph(
     run_id: str | None = None,
     stream_final_answer: bool = False,
 ) -> AgentRunResponse:
+    if _use_langgraph_runtime():
+        from repooperator_worker.agent_core.langgraph_runtime import run_langgraph_controller
+
+        return run_langgraph_controller(request, run_id=run_id, stream_final_answer=stream_final_answer)
     run_id = run_id or "run_controller"
     _validate_active_repository(request)
     state = _initial_state(request, run_id)
@@ -841,6 +846,11 @@ def _validate_active_repository(request: AgentRunRequest) -> None:
 
 
 def stream_controller_graph(request: AgentRunRequest, *, run_id: str | None = None) -> Iterator[dict[str, Any]]:
+    if _use_langgraph_runtime():
+        from repooperator_worker.agent_core.langgraph_runtime import stream_langgraph_controller
+
+        yield from stream_langgraph_controller(request, run_id=run_id)
+        return
     before_sequence = _latest_sequence(run_id) if run_id else 0
     response = run_controller_graph(request, run_id=run_id, stream_final_answer=True)
     for event in list_run_events(run_id or response.run_id or "", after_sequence=before_sequence):
@@ -866,6 +876,10 @@ def _initial_state(request: AgentRunRequest, run_id: str) -> AgentCoreState:
         branch=request.branch,
         user_task=request.task,
     )
+
+
+def _use_langgraph_runtime() -> bool:
+    return os.getenv("REPOOPERATOR_AGENT_RUNTIME", "legacy").strip().lower() == "langgraph"
 
 
 def _safe_observation(action: AgentAction, result: ActionResult) -> str:
