@@ -13,6 +13,7 @@ from repooperator_worker.agent_core.graph.adapters import (
     _graph_transition_event,
     _invoke_subgraph_delta,
     _latest_result,
+    _merge_updates,
     _pending_action,
     _request,
     _with_checkpoint_bump,
@@ -20,12 +21,28 @@ from repooperator_worker.agent_core.graph.adapters import (
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState, append_unique_items
 from repooperator_worker.agent_core.planner import build_task_frame, candidate_files_from_results, edit_requested
 from repooperator_worker.agent_core.task_policy import next_evidence_gathering_action
+from repooperator_worker.agent_core.graph_state import action_to_snapshot
+from repooperator_worker.agent_core.understanding_context import append_visible_rationale, evidence_basis_update
 
 def gather_evidence_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     from repooperator_worker.agent_core.graph.builder import build_evidence_gathering_graph
 
     update = _invoke_subgraph_delta(build_evidence_gathering_graph, state)
     update["routing_stage"] = "after_evidence"
+    next_state = _merge_updates(dict(state), update)
+    update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="gather_evidence"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="gather_evidence",
+            action=None,
+            summary="I updated the evidence basis from the repository reads and searches completed in this evidence-gathering step.",
+            basis_refs=[{"kind": "file", "path": path} for path in (next_state.get("files_read") or [])[:8]],
+            safety_note=None,
+            uncertainty=[],
+        ),
+    )
     update.setdefault("events_to_emit", []).append(
         _graph_transition_event(state, "gather_evidence", subgraph="evidence_gathering_graph", operation="gather_evidence")
     )
@@ -108,13 +125,15 @@ def update_evidence_store_node(state: RepoOperatorGraphState) -> dict[str, Any]:
             evidence["files_read"] = append_unique_items(evidence.get("files_read"), latest.files_read)
         if latest.payload.get("contents"):
             evidence.setdefault("contents", {}).update(latest.payload.get("contents") or {})
-    return {
+    update = {
         "evidence_store": evidence,
         "evidence_reports": [_evidence_report(state, latest)] if latest else [],
         "events_to_emit": [
             _graph_transition_event(state, "update_evidence_store", subgraph="evidence_gathering_graph", operation="update_evidence_store")
         ],
     }
+    next_state = _merge_updates(dict(state), update)
+    return _merge_updates(update, evidence_basis_update(next_state, trigger_node="update_evidence_store"))
 
 def _evidence_report(state: RepoOperatorGraphState, result: ActionResult | None) -> dict[str, Any]:
     action = _pending_action(state)

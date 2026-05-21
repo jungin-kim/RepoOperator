@@ -17,6 +17,7 @@ from repooperator_worker.agent_core.graph.adapters import (
 from repooperator_worker.agent_core.graph.nodes.supervisor import _frame_is_edit_like, _should_use_supervisor
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
+from repooperator_worker.agent_core.understanding_context import evidence_basis_update
 from repooperator_worker.services.json_safe import json_safe
 
 def load_context_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -80,7 +81,7 @@ def refresh_context_pack_update(
         "omitted_files": report.get("omitted_files") or [],
         "retained_web_sources": report.get("retained_web_sources") or [],
     }
-    return {
+    update = {
         "context_packet": json_safe(merged_packet),
         "model_profile_snapshot": packet.get("model_profile"),
         "context_pack_summary": json_safe(summary),
@@ -95,6 +96,9 @@ def refresh_context_pack_update(
             )
         ],
     }
+    next_state = {**dict(state), **{key: value for key, value in update.items() if key != "events_to_emit"}}
+    update.update(evidence_basis_update(next_state, trigger_node=trigger_node))
+    return update
 
 def _context_kind_for_state(state: RepoOperatorGraphState) -> str:
     from repooperator_worker.agent_core.graph.nodes.web import _web_research_needed

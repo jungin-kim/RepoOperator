@@ -25,6 +25,7 @@ from repooperator_worker.agent_core.graph.adapters import (
 )
 from repooperator_worker.agent_core.graph.nodes.context import refresh_context_pack_update
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
+from repooperator_worker.agent_core.understanding_context import append_visible_rationale, evidence_basis_update
 from repooperator_worker.services.json_safe import json_safe
 
 def plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -34,8 +35,7 @@ def plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         action.reason_summary if action else "Plan proposal-only change set.",
     ).model_dump()
     proposal["action_id"] = action.action_id if action else None
-    return _with_checkpoint_bump(
-        {
+    update = {
             "change_set_proposal": proposal,
             "proposal_id": proposal.get("proposal_id"),
             "proposal_status": proposal.get("status"),
@@ -52,7 +52,21 @@ def plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                 )
             ],
         }
+    next_state = _merge_updates(dict(state), update)
+    update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="plan_change_set"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="plan_change_set",
+            action=action,
+            summary="I created a proposal-only change-set plan so file writes remain behind validation and approval.",
+            basis_refs=[{"kind": "file", "path": path} for path in (proposal.get("plan") or {}).get("target_files") or []],
+            safety_note="Planning a change set does not modify files.",
+            uncertainty=[],
+        ),
     )
+    return _with_checkpoint_bump(update)
 
 def generate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     from repooperator_worker.agent_core.graph.builder import build_edit_graph
@@ -61,6 +75,20 @@ def generate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     working_state = _state_with_context_update(state, context_update)
     update = _invoke_subgraph_delta(build_edit_graph, working_state)
     update["routing_stage"] = "after_change_plan"
+    next_state = _merge_updates(working_state, update)
+    update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="generate_change_set"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="generate_change_set",
+            action=_pending_action(state),
+            summary="I generated a proposal from the retained file evidence; the result still needs validation before approval.",
+            basis_refs=[{"kind": "file", "path": path} for path in (next_state.get("files_read") or [])[:8]],
+            safety_note="Proposal generation is not an apply operation.",
+            uncertainty=[],
+        ),
+    )
     update.setdefault("events_to_emit", []).append(
         _graph_transition_event(state, "generate_change_set", subgraph="edit_graph", operation="generate_change_set")
     )
@@ -97,8 +125,7 @@ def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         }
         stop_reason = "waiting_approval"
         final_response = _final_text_for_change_set(state, proposal)
-    return _with_checkpoint_bump(
-        {
+    update = {
             "change_set_proposal": proposal,
             "pending_approval": pending_approval if pending_approval is not None else state.get("pending_approval"),
             "proposal_id": proposal.get("proposal_id") if isinstance(proposal, dict) else None,
@@ -121,7 +148,26 @@ def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                 )
             ],
         }
+    next_state = _merge_updates(dict(state), update)
+    rationale_summary = (
+        "The change set is valid but not applied, so I am asking for approval before writing files."
+        if pending_approval
+        else "I recorded the change-set validation result so the proposal can be repaired or summarized from concrete errors."
     )
+    update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="validate_change_set"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="validate_change_set",
+            action=None,
+            summary=rationale_summary,
+            basis_refs=[{"kind": "file", "path": path} for path in validation["proposal_files"]] + [{"kind": "validation", "id": "validation:active_proposal"}],
+            safety_note="Validation does not grant permission to apply; approval is still required for file writes." if pending_approval else None,
+            uncertainty=validation["errors"],
+        ),
+    )
+    return _with_checkpoint_bump(update)
 
 def repair_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     context_update = refresh_context_pack_update(state, kind="repair", trigger_node="repair_change_set")
@@ -134,6 +180,18 @@ def repair_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
             _graph_transition_event(state, "repair_change_set", subgraph="edit_graph", operation="repair_change_set", status="completed")
         ],
     }
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            state,
+            node="repair_change_set",
+            action=None,
+            summary="The proposal validation reported errors, so I am shifting to repair instead of asking for apply approval.",
+            basis_refs=[{"kind": "validation", "id": "validation:active_proposal"}],
+            safety_note="Invalid proposals are not applied.",
+            uncertainty=[str(item) for item in state.get("proposal_errors") or []],
+        ),
+    )
     return _with_checkpoint_bump(_merge_updates(context_update, update))
 
 def edit_locate_targets_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -267,6 +325,7 @@ def _final_text_for_change_set(state: RepoOperatorGraphState, proposal: dict[str
     return "\n".join(
         [
             "I prepared a ChangeSetProposal. No files were modified.",
+            f"Proposal id: {proposal.get('proposal_id') or 'unknown'}.",
             "",
             "Proposed files:",
             *(files or ["- No files"]),

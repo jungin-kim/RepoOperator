@@ -11,11 +11,13 @@ from repooperator_worker.agent_core.actions import AgentAction
 from repooperator_worker.agent_core.graph.adapters import (
     _execute_pending_action,
     _graph_transition_event,
+    _merge_updates,
     _request,
     _with_checkpoint_bump,
 )
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import action_to_snapshot, result_from_snapshot
+from repooperator_worker.agent_core.understanding_context import append_visible_rationale, evidence_basis_update
 from repooperator_worker.services.json_safe import json_safe
 
 def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -26,8 +28,7 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     if pending.get("kind") == "change_set_apply" or payload.get("kind") == "change_set_apply":
         proposal_id = str(pending.get("proposal_id") or payload.get("proposal_id") or "")
         if normalized.get("decision") == "allow":
-            return _with_checkpoint_bump(
-                {
+            update = {
                     "pending_action": action_to_snapshot(
                         AgentAction(
                             type="apply_change_set",
@@ -57,12 +58,23 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                         )
                     ],
                 }
+            update = _merge_updates(
+                update,
+                append_visible_rationale(
+                    state,
+                    node="await_change_approval",
+                    action=update["pending_action"],
+                    summary="The user approved this ChangeSetProposal, so I am moving to the apply action.",
+                    basis_refs=[{"kind": "file", "path": str(item.get("path"))} for item in (state.get("change_set_proposal") or {}).get("changes") or [] if isinstance(item, dict)],
+                    safety_note="The apply action still runs through the approved change-set path.",
+                    uncertainty=[],
+                ),
             )
+            return _with_checkpoint_bump(update)
         proposal = dict(state.get("change_set_proposal") or {})
         if proposal:
             proposal.update({"status": "rejected", "apply_status": "rejected"})
-        return _with_checkpoint_bump(
-            {
+        update = {
                 "stop_reason": "approval_denied",
                 "final_response": "The change-set proposal was not applied. No files were modified.",
                 "pending_approval": None,
@@ -81,7 +93,19 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     )
                 ],
             }
+        update = _merge_updates(
+            update,
+            append_visible_rationale(
+                state,
+                node="await_change_approval",
+                action=None,
+                summary="The apply request was denied, so I am stopping without modifying files.",
+                basis_refs=[{"kind": "validation", "id": "validation:active_proposal"}],
+                safety_note="Denied approval means no file write is performed.",
+                uncertainty=[],
+            ),
         )
+        return _with_checkpoint_bump(update)
     if pending.get("kind") in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"} or payload.get("kind") in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
         kind = str(pending.get("kind") or payload.get("kind") or "")
         if normalized.get("decision") == "allow":
@@ -89,8 +113,7 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
             action_payload = {**json_safe(pending.get("approval_payload") or {}), "approval_decision": normalized}
             if kind == "git_push":
                 action_payload.update({"remote": pending.get("remote") or "origin", "branch": pending.get("branch") or state.get("branch") or "HEAD"})
-            return _with_checkpoint_bump(
-                {
+            update = {
                     "pending_action": action_to_snapshot(
                         AgentAction(
                             type=action_type,
@@ -113,9 +136,20 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                         )
                     ],
                 }
+            update = _merge_updates(
+                update,
+                append_visible_rationale(
+                    state,
+                    node="await_approval",
+                    action=update["pending_action"],
+                    summary=f"The user approved {kind}, so I am continuing through the gated git action.",
+                    basis_refs=[{"kind": "file", "path": path} for path in pending.get("files") or []],
+                    safety_note="Git writes stay behind explicit approval.",
+                    uncertainty=[],
+                ),
             )
-        return _with_checkpoint_bump(
-            {
+            return _with_checkpoint_bump(update)
+        update = {
                 "stop_reason": "approval_denied",
                 "final_response": f"I did not run {kind} because approval was denied. No git write was performed.",
                 "pending_approval": None,
@@ -131,12 +165,23 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     )
                 ],
             }
+        update = _merge_updates(
+            update,
+            append_visible_rationale(
+                state,
+                node="await_approval",
+                action=None,
+                summary=f"The {kind} request was denied, so I am stopping before any git write.",
+                basis_refs=[],
+                safety_note="Denied approval blocks the git operation.",
+                uncertainty=[],
+            ),
         )
+        return _with_checkpoint_bump(update)
     if pending.get("kind") in {"search_web", "fetch_url"} or payload.get("kind") in {"search_web", "fetch_url"}:
         kind = str(pending.get("kind") or payload.get("kind") or "")
         if normalized.get("decision") == "allow":
-            return _with_checkpoint_bump(
-                {
+            update = {
                     "pending_action": action_to_snapshot(
                         AgentAction(
                             type=kind,
@@ -151,9 +196,20 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     "approval_decision": normalized,
                     "events_to_emit": [_graph_transition_event(state, "await_approval", operation="approval_resume", status="completed", aggregate={"kind": kind, "decision": "allow"})],
                 }
+            update = _merge_updates(
+                update,
+                append_visible_rationale(
+                    state,
+                    node="await_approval",
+                    action=update["pending_action"],
+                    summary=f"The user approved {kind}, so I am continuing with untrusted web evidence collection.",
+                    basis_refs=[],
+                    safety_note="External web content is untrusted and used only as source evidence.",
+                    uncertainty=[],
+                ),
             )
-        return _with_checkpoint_bump(
-            {
+            return _with_checkpoint_bump(update)
+        update = {
                 "stop_reason": "approval_denied",
                 "final_response": f"I did not run {kind} because network approval was denied.",
                 "pending_approval": None,
@@ -161,12 +217,23 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                 "approval_decision": normalized,
                 "events_to_emit": [_graph_transition_event(state, "await_approval", operation="approval_gate", status="completed", aggregate={"kind": kind, "decision": "deny"})],
             }
+        update = _merge_updates(
+            update,
+            append_visible_rationale(
+                state,
+                node="await_approval",
+                action=None,
+                summary=f"The {kind} request was denied, so I am not using network evidence.",
+                basis_refs=[],
+                safety_note="Denied network approval prevents web fetch/search.",
+                uncertainty=[],
+            ),
         )
+        return _with_checkpoint_bump(update)
     if normalized.get("decision") == "allow":
         command = list((state.get("pending_approval") or {}).get("command") or payload.get("command") or [])
         approval_id = str((state.get("pending_approval") or {}).get("approval_id") or payload.get("approval_id") or "")
-        return _with_checkpoint_bump(
-            {
+        update = {
                 "pending_action": action_to_snapshot(
                     AgentAction(
                         type="run_approved_command",
@@ -190,10 +257,21 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     )
                 ],
             }
+        update = _merge_updates(
+            update,
+            append_visible_rationale(
+                state,
+                node="await_approval",
+                action=update["pending_action"],
+                summary="The user approved the command, so I am running it through the approved command path.",
+                basis_refs=[],
+                safety_note="The command approval applies only to this gated command action.",
+                uncertainty=[],
+            ),
         )
+        return _with_checkpoint_bump(update)
     final_response = "I did not run the command because approval was denied. No command was executed."
-    return _with_checkpoint_bump(
-        {
+    update = {
             "stop_reason": "approval_denied",
             "final_response": final_response,
             "pending_approval": None,
@@ -209,7 +287,19 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                 )
             ],
         }
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            state,
+            node="await_approval",
+            action=None,
+            summary="The command approval was denied, so I stopped before execution.",
+            basis_refs=[],
+            safety_note="Denied approval prevents the command from running.",
+            uncertainty=[],
+        ),
     )
+    return _with_checkpoint_bump(update)
 
 def apply_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     update = _execute_pending_action(state, subgraph=None, node_name="apply_change_set")
@@ -234,6 +324,20 @@ def apply_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
             "final_response": _final_text_for_applied_change_set(state, payload) if applied else _final_text_for_failed_apply(payload),
         }
     )
+    next_state = _merge_updates(dict(state), update)
+    update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="apply_change_set"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="apply_change_set",
+            action=None,
+            summary="I applied the approved ChangeSetProposal and recorded the files changed by the apply result." if applied else "The approved ChangeSetProposal did not apply successfully, so I recorded the failure.",
+            basis_refs=[{"kind": "file", "path": path} for path in files_changed],
+            safety_note="Only the approved proposal path can write these files.",
+            uncertainty=[] if applied else [str(item) for item in payload.get("errors") or []],
+        ),
+    )
     return _with_checkpoint_bump(update)
 
 def post_apply_validation_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -243,8 +347,7 @@ def post_apply_validation_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     proposal = dict(state.get("change_set_proposal") or {})
     if proposal:
         proposal["post_apply_validation_status"] = status
-    return _with_checkpoint_bump(
-        {
+    update = {
             "post_apply_validation_status": status,
             "change_set_proposal": proposal or state.get("change_set_proposal"),
             "validation_results": [{"kind": "post_apply", "status": status, "errors": []}],
@@ -259,7 +362,21 @@ def post_apply_validation_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                 )
             ],
         }
+    next_state = _merge_updates(dict(state), update)
+    update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="post_apply_validation"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="post_apply_validation",
+            action=None,
+            summary="I recorded the post-apply validation status so the final answer can distinguish applied files from unchecked follow-up work.",
+            basis_refs=[{"kind": "validation", "id": "validation:post_apply"}],
+            safety_note=None,
+            uncertainty=[] if status != "not_run" else ["No post-apply command was selected."],
+        ),
     )
+    return _with_checkpoint_bump(update)
 
 def _approval_interrupt_payload(state: RepoOperatorGraphState) -> dict[str, Any]:
     approval = state.get("pending_approval") or {}

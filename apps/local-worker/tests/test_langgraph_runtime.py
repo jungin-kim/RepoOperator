@@ -183,6 +183,10 @@ class LangGraphRuntimeTests(unittest.TestCase):
     def test_initial_graph_state_and_snapshots_are_json_safe(self) -> None:
         request = self._request()
         state = initial_graph_state(request, run_id="run-json-safe")
+        self.assertIn("visible_rationale_log", state)
+        self.assertEqual(state["visible_rationale_log"], [])
+        self.assertIsNone(state["user_understanding_context"])
+        self.assertIsNone(state["evidence_basis"])
         action = AgentAction(type="read_file", reason_summary="Read.", target_files=["README.md"])
         result = ActionResult(action_id=action.action_id, status="success", files_read=["README.md"])
         action_snapshot = action_to_snapshot(action)
@@ -211,6 +215,7 @@ class LangGraphRuntimeTests(unittest.TestCase):
         result = ActionResult(action_id=action.action_id, status="success")
         self.assertEqual(append_items([], [action]), [action])
         self.assertEqual(append_items([result], []), [result])
+        self.assertEqual(append_items([{"id": "a"}], [{"id": "b"}]), [{"id": "a"}, {"id": "b"}])
 
     def test_langgraph_route_does_not_call_legacy_chooser(self) -> None:
         request = self._request("Summarize README.md")

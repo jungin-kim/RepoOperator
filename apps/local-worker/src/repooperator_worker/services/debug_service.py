@@ -1,5 +1,7 @@
 from repooperator_worker.config import get_settings
+from repooperator_worker.agent_core.graph_checkpoints import GRAPH_CHECKPOINT_EVENT
 from repooperator_worker.agent_core.model_profile import detect_model_profile
+from repooperator_worker.agent_core.understanding_context import debug_context_payload
 from repooperator_worker.services.active_repository import get_active_repository
 from repooperator_worker.services.composio_service import get_composio_status
 from repooperator_worker.services.event_service import get_active_runs, list_recent_runs, list_run_events
@@ -56,10 +58,14 @@ def get_debug_context_status() -> dict:
     model_profile = detect_model_profile(settings=settings).model_dump()
     packs = _recent_context_pack_events()
     latest = packs[0] if packs else None
+    state_payload = debug_context_payload(_latest_graph_state() or {})
     return {
         "model_profile": model_profile,
         "latest_pack": latest,
         "recent_packs": packs,
+        "user_understanding_context": state_payload.get("user_understanding_context") or {},
+        "evidence_basis": state_payload.get("evidence_basis") or {},
+        "visible_rationale_log": state_payload.get("visible_rationale_log") or [],
     }
 
 
@@ -129,4 +135,28 @@ def _context_pack_summary_from_event(event: dict) -> dict | None:
         return event["change_set_summary"]
     if event.get("operation") == "context_pack":
         return aggregate
+    return None
+
+
+def _latest_graph_state() -> dict | None:
+    run_ids: list[str] = []
+    for run in [*get_active_runs(), *list_recent_runs(limit=30)]:
+        run_id = str(run.get("id") or "")
+        if run_id and run_id not in run_ids:
+            run_ids.append(run_id)
+    for run_id in run_ids[:30]:
+        for event in reversed(list_run_events(run_id)):
+            if event.get("type") != GRAPH_CHECKPOINT_EVENT:
+                continue
+            checkpoint = event.get("checkpoint") if isinstance(event.get("checkpoint"), dict) else {}
+            values = checkpoint.get("channel_values") if isinstance(checkpoint.get("channel_values"), dict) else None
+            if values is None:
+                values = checkpoint.get("values") if isinstance(checkpoint.get("values"), dict) else None
+            if isinstance(values, dict):
+                state = dict(values)
+                state.setdefault("run_id", run_id)
+                state.setdefault("thread_id", event.get("thread_id"))
+                state.setdefault("repo", event.get("repo"))
+                state.setdefault("branch", event.get("branch"))
+                return state
     return None

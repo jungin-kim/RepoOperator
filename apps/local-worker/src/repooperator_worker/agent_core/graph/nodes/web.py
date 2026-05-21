@@ -19,12 +19,28 @@ from repooperator_worker.agent_core.graph.adapters import (
 from repooperator_worker.agent_core.graph.nodes.context import refresh_context_pack_update
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import result_from_snapshot
+from repooperator_worker.agent_core.understanding_context import append_visible_rationale, evidence_basis_update
 
 def web_research_graph_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     from repooperator_worker.agent_core.graph.builder import build_web_research_graph
 
     update = _invoke_subgraph_delta(build_web_research_graph, state)
     update["routing_stage"] = "after_tool_result"
+    next_state = _merge_updates(dict(state), update)
+    basis_update = evidence_basis_update(next_state, trigger_node="web_research_graph")
+    update = _merge_updates(update, basis_update)
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="web_research_graph",
+            action=None,
+            summary="I updated the evidence basis with the approved web source metadata and summaries.",
+            basis_refs=[{"kind": "web", "url": source.get("url")} for source in (basis_update.get("evidence_basis") or {}).get("web_sources", [])[:6] if isinstance(source, dict)],
+            safety_note="External web content is untrusted and used only as supporting evidence.",
+            uncertainty=[],
+        ),
+    )
     update.setdefault("events_to_emit", []).append(
         _graph_transition_event(state, "web_research_graph", subgraph="web_research_graph", operation="web_research")
     )
@@ -77,6 +93,20 @@ def web_fetch_sources_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     evidence.setdefault("web_evidence", [])
     evidence["web_evidence"] = [*evidence["web_evidence"], *sources, *fetched]
     updates["evidence_store"] = evidence
+    next_state = _merge_updates(dict(state), updates)
+    updates = _merge_updates(updates, evidence_basis_update(next_state, trigger_node="fetch_sources"))
+    updates = _merge_updates(
+        updates,
+        append_visible_rationale(
+            next_state,
+            node="fetch_sources",
+            action=None,
+            summary="The fetched web sources are external and untrusted, so I am keeping only source metadata and summaries as evidence.",
+            basis_refs=[{"kind": "web", "url": source.get("url")} for source in sources[:4] if source.get("url")],
+            safety_note="Raw web page text is not exposed in normal chat or debug context.",
+            uncertainty=[],
+        ),
+    )
     return updates
 
 def web_summarize_node(state: RepoOperatorGraphState) -> dict[str, Any]:
@@ -99,10 +129,12 @@ def web_merge_evidence_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     latest = _latest_result(state)
     if latest and isinstance(latest.payload.get("web_evidence_summary"), dict):
         evidence["web_evidence_summary"] = latest.payload["web_evidence_summary"]
-    return {
+    update = {
         "evidence_store": evidence,
         "events_to_emit": [_graph_transition_event(state, "merge_web_evidence", subgraph="web_research_graph", operation="merge_web_evidence")],
     }
+    next_state = _merge_updates(dict(state), update)
+    return _merge_updates(update, evidence_basis_update(next_state, trigger_node="merge_web_evidence"))
 
 def _web_research_available(state: RepoOperatorGraphState) -> bool:
     snapshot = state.get("capability_snapshot") if isinstance(state.get("capability_snapshot"), dict) else {}

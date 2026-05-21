@@ -33,9 +33,20 @@ from repooperator_worker.agent_core.request_understanding import (  # noqa: E402
     request_understanding_to_classifier_result,
     understand_request,
 )
+from repooperator_worker.agent_core.actions import AgentAction  # noqa: E402
+from repooperator_worker.agent_core.graph.state import append_items, initial_graph_state  # noqa: E402
+from repooperator_worker.agent_core.understanding_context import (  # noqa: E402
+    append_visible_rationale,
+    build_evidence_basis,
+    build_user_understanding_context,
+    debug_context_payload,
+    evidence_basis_update,
+    redact_context_for_user,
+)
 from repooperator_worker.agent_core.request_parsing import extract_file_tokens  # noqa: E402
 from repooperator_worker.agent_core.planner import TaskFrame, edit_requested, edit_requested_text  # noqa: E402
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
+from repooperator_worker.services.debug_service import get_debug_context_status  # noqa: E402
 
 
 def _req(task: str = "what does this repo do?", **kwargs) -> AgentRunRequest:
@@ -306,6 +317,174 @@ class TestParseJson(unittest.TestCase):
 
     def test_invalid_returns_empty(self):
         self.assertEqual(_parse_json("not json"), {})
+
+
+class TestPublicUnderstandingEvidenceContracts(unittest.TestCase):
+    def test_initial_state_has_contract_defaults(self):
+        state = initial_graph_state(_req("Summarize README.md"), run_id="run-contract-defaults")
+        self.assertIsNone(state["user_understanding_context"])
+        self.assertIsNone(state["evidence_basis"])
+        self.assertEqual(state["visible_rationale_log"], [])
+        self.assertEqual(state["evidence_basis_history"], [])
+        self.assertEqual(state["understanding_history"], [])
+        json.dumps(state, ensure_ascii=False, default=str)
+
+    def test_user_understanding_context_contains_request_shape(self):
+        request = _req("세이브 파일 깨졌을 때 복구 가능하게 해줘.")
+        state = {
+            "request_understanding_snapshot": {
+                "user_goal": "세이브 파일 복구 기능을 추가한다.",
+                "requested_outputs": ["code_change_proposal"],
+                "likely_needed_tools": ["search_text", "read_file", "generate_edit"],
+                "constraints": ["No direct file writes before approval."],
+            },
+            "task_frame_snapshot": {
+                "requested_outputs": ["edit_proposal"],
+                "likely_capabilities": ["edit_proposal"],
+                "uncertainty": ["Need to locate the save-file implementation."],
+            },
+            "edit_mode": "proposal_only",
+        }
+        context = build_user_understanding_context(request, state)
+        self.assertEqual(context["language"], "ko")
+        self.assertIn("change_set_proposal", context["requested_outputs"])
+        self.assertIn("proposal_only", context["requested_outputs"])
+        self.assertIn("generate_edit", context["likely_needed_tools"])
+        self.assertIn("Need to locate", " ".join(context["ambiguities"]))
+        self.assertNotIn("requested_workflow", json.dumps(context))
+        self.assertNotIn("retrieval_goal", json.dumps(context))
+
+    def test_evidence_basis_summarizes_sources_without_raw_contents(self):
+        state = {
+            "files_read": ["README.md", "main.py"],
+            "evidence_store": {
+                "contents": {
+                    "README.md": "# Demo\nRAW_FILE_CONTENT",
+                    "main.py": "print('hello')\n" * 100,
+                },
+                "web_evidence": [
+                    {
+                        "title": "Docs",
+                        "url": "https://docs.example.com",
+                        "source": "docs.example.com",
+                        "text": "RAW_WEB_TEXT",
+                    }
+                ],
+            },
+            "context_pack_report": {
+                "retained_files": ["README.md"],
+                "omitted_files": [{"path": "main.py", "reason": "budget"}],
+            },
+            "short_term_memory": {"files_read_summaries": [{"path": "README.md", "summary": "Project overview."}]},
+            "validation_results": [{"kind": "change_set", "status": "invalid", "errors": ["syntax error"]}],
+            "change_set_proposal": {
+                "proposal_id": "p1",
+                "status": "invalid",
+                "changes": [{"path": "main.py", "operation": "modify", "original_content": "old", "proposed_content": "new"}],
+            },
+            "worker_reports": [{"task_id": "w1", "role": "AnalysisAgent", "summary": "Checked app files.", "files_analyzed": ["main.py"]}],
+        }
+        basis = build_evidence_basis(state, "test")
+        self.assertEqual({item["path"] for item in basis["files"]}, {"README.md", "main.py"})
+        omitted = [item for item in basis["files"] if item["path"] == "main.py"][0]
+        self.assertFalse(omitted["retained"])
+        self.assertEqual(basis["web_sources"][0]["untrusted"], True)
+        self.assertEqual(basis["validation"][0]["errors"], ["syntax error"])
+        self.assertEqual(basis["active_proposal"]["proposal_id"], "p1")
+        self.assertEqual(basis["worker_reports"][0]["worker_task_id"], "w1")
+        encoded = json.dumps(basis, ensure_ascii=False)
+        self.assertNotIn("RAW_FILE_CONTENT", encoded)
+        self.assertNotIn("RAW_WEB_TEXT", encoded)
+        self.assertNotIn("original_content", encoded)
+        self.assertNotIn("proposed_content", encoded)
+
+    def test_visible_rationale_log_is_append_safe_and_public(self):
+        state = {}
+        action = AgentAction(type="read_file", reason_summary="Read README.", target_files=["README.md"])
+        first = append_visible_rationale(
+            state,
+            node="route_next",
+            action=action,
+            summary="README.md is explicitly named, so I am reading it before answering.",
+            basis_refs=[{"kind": "file", "path": "README.md"}],
+            safety_note=None,
+            uncertainty=[],
+        )
+        second = append_visible_rationale(
+            state,
+            node="final_synthesis",
+            action=None,
+            summary="I am preparing the final answer from gathered evidence.",
+            basis_refs=[],
+            safety_note="No raw context dump is included.",
+            uncertainty=[],
+        )
+        combined = append_items(first["visible_rationale_log"], second["visible_rationale_log"])
+        self.assertEqual(len(combined), 2)
+        encoded = json.dumps(combined)
+        self.assertNotIn("<think>", encoded)
+        self.assertNotIn("chain of thought", encoded.lower())
+        self.assertTrue(combined[0]["visible"])
+        self.assertEqual(combined[0]["basis_refs"][0]["path"], "README.md")
+
+    def test_redaction_removes_forbidden_and_raw_keys(self):
+        payload = {
+            "reasoning": "do not show",
+            "private_reasoning": "do not show",
+            "chain_of_thought": "do not show",
+            "safe_reasoning_summary": "safe public note",
+            "contents": {"README.md": "raw content"},
+        }
+        redacted = redact_context_for_user(payload)
+        self.assertNotIn("reasoning", redacted)
+        self.assertNotIn("private_reasoning", redacted)
+        self.assertNotIn("chain_of_thought", redacted)
+        self.assertEqual(redacted["safe_reasoning_summary"], "safe public note")
+        self.assertTrue(redacted["contents"]["redacted"])
+
+    def test_debug_context_payload_caps_and_redacts(self):
+        state = {
+            "user_understanding_context": {"normalized_goal": "Explain repo", "raw": {"contents": "secret"}},
+            "evidence_basis": {
+                "files": [{"path": f"file_{index}.py", "summary": "x"} for index in range(60)],
+                "web_sources": [{"url": "https://example.com", "text": "raw"}],
+            },
+            "visible_rationale_log": [{"id": str(index), "summary": "safe"} for index in range(60)],
+        }
+        payload = debug_context_payload(state)
+        self.assertEqual(len(payload["evidence_basis"]["files"]), 40)
+        self.assertEqual(len(payload["visible_rationale_log"]), 30)
+        self.assertNotIn("secret", json.dumps(payload))
+
+    def test_evidence_basis_update_history_is_json_safe(self):
+        update = evidence_basis_update({"files_read": ["README.md"]}, trigger_node="read_files")
+        json.dumps(update, ensure_ascii=False)
+        self.assertEqual(update["evidence_basis"]["files"][0]["path"], "README.md")
+        self.assertEqual(update["evidence_basis_history"][0]["last_updated_by"], "read_files")
+
+    def test_debug_endpoint_payload_includes_new_fields_from_checkpoint(self):
+        checkpoint_event = {
+            "type": "langgraph_checkpoint",
+            "checkpoint": {
+                "channel_values": {
+                    "user_understanding_context": {"normalized_goal": "Explain README.md"},
+                    "evidence_basis": {"files": [{"path": "README.md", "retained": True, "contents": "raw"}]},
+                    "visible_rationale_log": [{"id": "r1", "summary": "Read README.md first."}],
+                }
+            },
+        }
+        model_profile = type("Profile", (), {"model_dump": lambda self: {"model_name": "test"}})()
+        with patch("repooperator_worker.services.debug_service.detect_model_profile", return_value=model_profile), patch(
+            "repooperator_worker.services.debug_service.get_active_runs", return_value=[]
+        ), patch("repooperator_worker.services.debug_service.list_recent_runs", return_value=[{"id": "run-debug"}]), patch(
+            "repooperator_worker.services.debug_service.list_run_events", return_value=[checkpoint_event]
+        ):
+            payload = get_debug_context_status()
+        self.assertIn("user_understanding_context", payload)
+        self.assertIn("evidence_basis", payload)
+        self.assertIn("visible_rationale_log", payload)
+        self.assertEqual(payload["user_understanding_context"]["normalized_goal"], "Explain README.md")
+        self.assertNotIn('"contents": "raw"', json.dumps(payload["evidence_basis"]))
 
 
 if __name__ == "__main__":

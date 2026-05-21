@@ -10,6 +10,7 @@ from repooperator_worker.agent_core.graph.adapters import (
     _core_state_from_graph,
     _graph_transition_event,
     _invoke_subgraph_delta,
+    _merge_updates,
     _request,
     _task_frame,
     _with_checkpoint_bump,
@@ -19,6 +20,7 @@ from repooperator_worker.agent_core.hooks import HookManager
 from repooperator_worker.agent_core.planner import build_task_frame, edit_requested
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
+from repooperator_worker.agent_core.understanding_context import append_visible_rationale, evidence_basis_update
 
 def decompose_task_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     from repooperator_worker.agent_core.tasks import decompose_complex_task
@@ -103,13 +105,28 @@ def supervisor_reduce_worker_reports_node(state: RepoOperatorGraphState) -> dict
     evidence_reports = [report for report in reports if report.get("worker") in {"EvidenceAgent", "AnalysisAgent"}]
     proposed_changes = [report for report in reports if report.get("worker") == "EditPlanningAgent"]
     risk_notes = [str(note) for report in reports for note in report.get("risk_notes") or []]
-    return {
+    update = {
         "file_role_reports": file_role_reports,
         "evidence_reports": evidence_reports,
         "proposed_changes": proposed_changes,
         "risk_notes": risk_notes,
         "events_to_emit": [_graph_transition_event(state, "reduce_worker_reports", subgraph="supervisor", operation="reduce_worker_reports")],
     }
+    next_state = _merge_updates(dict(state), update)
+    update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="reduce_worker_reports"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="reduce_worker_reports",
+            action=None,
+            summary="I reduced the worker reports into the evidence basis so broad analysis stays auditable by worker scope and files analyzed.",
+            basis_refs=[{"kind": "file", "path": path} for report in reports for path in (report.get("files_analyzed") or report.get("files") or [])[:2]][:8],
+            safety_note="Worker reports are summaries and do not include private reasoning.",
+            uncertainty=[],
+        ),
+    )
+    return update
 
 def _supervisor_file_groups(state: RepoOperatorGraphState) -> dict[str, list[str]]:
     try:

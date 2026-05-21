@@ -21,6 +21,7 @@ from repooperator_worker.agent_core.graph.nodes.context import refresh_context_p
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import response_to_snapshot
 from repooperator_worker.agent_core.graph.nodes.web import _web_source_notes_for_final
+from repooperator_worker.agent_core.understanding_context import append_visible_rationale, build_evidence_basis, evidence_basis_update
 from repooperator_worker.schemas import AgentRunResponse
 from repooperator_worker.services.event_service import append_run_event
 from repooperator_worker.services.json_safe import json_safe
@@ -40,15 +41,26 @@ def ask_clarification_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         else "Could you clarify which files or workflow you want me to inspect?"
     )
     del request
-    return _with_checkpoint_bump(
-        {
+    update = {
             "stop_reason": "needs_clarification",
             "final_response": final_response,
             "events_to_emit": [
                 _graph_transition_event(state, "ask_clarification", operation="clarification", action_type="ask_clarification")
             ],
         }
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            state,
+            node="ask_clarification",
+            action=action,
+            summary="The available request context is still ambiguous, so I am asking for clarification instead of guessing.",
+            basis_refs=[],
+            safety_note="Clarifying preserves tool safety and avoids writing or claiming unsupported work.",
+            uncertainty=[final_response],
+        ),
     )
+    return _with_checkpoint_bump(update)
 
 def final_synthesis_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     from repooperator_worker.agent_core.graph.builder import build_finalization_graph
@@ -56,6 +68,20 @@ def final_synthesis_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     context_update = refresh_context_pack_update(state, trigger_node="final_synthesis")
     working_state = {**dict(state), **{key: value for key, value in context_update.items() if key != "events_to_emit"}}
     update = _invoke_subgraph_delta(build_finalization_graph, working_state)
+    next_state = _merge_updates(working_state, update)
+    update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="final_synthesis"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="final_synthesis",
+            action=None,
+            summary="I am synthesizing the final answer from the current understanding, evidence basis, validation status, and proposal state.",
+            basis_refs=[{"kind": "file", "path": path} for path in (next_state.get("files_read") or [])[:8]],
+            safety_note="The final answer may cite evidence but must not dump raw context or non-public reasoning.",
+            uncertainty=[],
+        ),
+    )
     update.setdefault("events_to_emit", []).append(
         _graph_transition_event(state, "final_synthesis", subgraph="finalization_graph", operation="final_synthesis")
     )
@@ -100,6 +126,7 @@ def final_build_response_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     source_notes = _web_source_notes_for_final(state)
     if source_notes and "Source notes:" not in core.final_response:
         core.final_response = core.final_response.rstrip() + "\n\nSource notes:\n" + "\n".join(source_notes)
+    core.final_response = _ensure_final_evidence_grounding(core.final_response, state)
     if core.final_response != draft_response:
         from repooperator_worker.agent_core.events import append_work_trace
 
@@ -218,6 +245,26 @@ def _is_explanation_only_edit_request(state: RepoOperatorGraphState) -> bool:
     asks_how = bool(re.search(r"\bhow\s+(would|do|can|should)\b", lowered)) or any(term in text for term in ("어떻게", "어떤 식으로"))
     mentions_change = bool(re.search(r"\b(change|edit|add|fix|implement|refactor|update)\b", lowered)) or any(term in text for term in ("추가", "고쳐", "구현", "수정"))
     return asks_how and mentions_change
+
+def _ensure_final_evidence_grounding(text: str, state: RepoOperatorGraphState) -> str:
+    if not text.strip():
+        return text
+    lowered = text.lower()
+    if "context_pack_report" in lowered or "evidence_basis" in lowered or "visible_rationale_log" in lowered:
+        return text
+    basis = state.get("evidence_basis") if isinstance(state.get("evidence_basis"), dict) else build_evidence_basis(dict(state), "final_synthesis")
+    files = [
+        str(item.get("path"))
+        for item in basis.get("files", []) if isinstance(item, dict) and item.get("path") and item.get("retained") is not False
+    ]
+    proposal = basis.get("active_proposal") if isinstance(basis.get("active_proposal"), dict) else None
+    if proposal and proposal.get("proposal_id") and str(proposal.get("proposal_id")) not in text:
+        return text.rstrip() + f"\n\nProposal id: {proposal.get('proposal_id')}."
+    missing_files = [path for path in files[:3] if path not in text]
+    if missing_files and not any(marker in lowered for marker in ("could you clarify", "please clarify", "waiting for approval")):
+        cited = ", ".join(f"`{path}`" for path in missing_files)
+        return text.rstrip() + f"\n\nBased on: {cited}."
+    return text
 
 def _stream_final_delta(run_id: str):
     def emit(delta: str) -> None:

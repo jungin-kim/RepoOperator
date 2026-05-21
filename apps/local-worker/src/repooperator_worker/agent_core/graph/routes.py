@@ -21,6 +21,13 @@ from repooperator_worker.agent_core.graph.nodes.git import _git_workflow_request
 from repooperator_worker.agent_core.graph.nodes.supervisor import _should_use_supervisor
 from repooperator_worker.agent_core.graph.nodes.web import _has_web_evidence, _web_research_available, _web_research_needed
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
+from repooperator_worker.agent_core.understanding_context import (
+    append_visible_rationale,
+    rationale_basis_refs_for_action,
+    rationale_safety_note_for_action,
+    rationale_summary_for_action,
+    rationale_uncertainty_for_action,
+)
 
 def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     request = _request(state)
@@ -28,20 +35,30 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     existing_action = _pending_action(state)
     if existing_action:
         route = route_by_stage(state)
-        return _with_checkpoint_bump(
-            {
-                "next_node": route,
-                "events_to_emit": [
-                    _graph_transition_event(
-                        state,
-                        "route_next",
-                        operation="route_existing_action",
-                        action_type=existing_action.type,
-                        next_node=route,
-                    )
-                ],
-            }
+        update = {
+            "next_node": route,
+            "events_to_emit": [
+                _graph_transition_event(
+                    state,
+                    "route_next",
+                    operation="route_existing_action",
+                    action_type=existing_action.type,
+                    next_node=route,
+                )
+            ],
+        }
+        update.update(
+            append_visible_rationale(
+                state,
+                node="route_next",
+                action=existing_action,
+                summary=rationale_summary_for_action(existing_action, fallback=f"I am continuing the pending {existing_action.type} action via {route}."),
+                basis_refs=rationale_basis_refs_for_action(existing_action),
+                safety_note=rationale_safety_note_for_action(existing_action),
+                uncertainty=rationale_uncertainty_for_action(existing_action),
+            )
         )
+        return _with_checkpoint_bump(update)
     if state.get("stop_reason") == "waiting_approval":
         return {"next_node": "await_approval", "events_to_emit": [_graph_transition_event(state, "route_next", operation="approval_gate")]}
     if state.get("stop_reason") in {"needs_clarification"}:
@@ -59,6 +76,17 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     if not should_continue:
         update.update({"next_node": "final_synthesis", "pending_action": None})
         update["events_to_emit"] = [_graph_transition_event(state, "route_next", operation="stop_budget")]
+        update.update(
+            append_visible_rationale(
+                state,
+                node="route_next",
+                action=None,
+                summary="I reached a run boundary, so I am stopping tool selection and moving to final synthesis.",
+                basis_refs=[],
+                safety_note="Stopping does not bypass approval or tool safety.",
+                uncertainty=[],
+            )
+        )
         return _with_checkpoint_bump(update)
 
     _controller().check_cancel(core, request)
@@ -93,6 +121,17 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                 )
             ],
         }
+    )
+    update.update(
+        append_visible_rationale(
+            {**dict(state), **update},
+            node="route_next",
+            action=action,
+            summary=rationale_summary_for_action(action, fallback=f"I selected {action.type} as the next visible action because it matches the current evidence need."),
+            basis_refs=rationale_basis_refs_for_action(action),
+            safety_note=rationale_safety_note_for_action(action),
+            uncertainty=rationale_uncertainty_for_action(action),
+        )
     )
     return _with_checkpoint_bump(update)
 

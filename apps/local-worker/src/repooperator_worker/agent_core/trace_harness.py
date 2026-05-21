@@ -89,6 +89,7 @@ class AgentTraceSnapshot:
     expected_disk_changes_before_approval: dict[str, Any]
     expected_disk_changes_after_approval: dict[str, Any]
     expected_artifacts: dict[str, Any]
+    expected_state_contracts: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return json_safe(
@@ -105,6 +106,7 @@ class AgentTraceSnapshot:
                 "expected_disk_changes_before_approval": self.expected_disk_changes_before_approval,
                 "expected_disk_changes_after_approval": self.expected_disk_changes_after_approval,
                 "expected_artifacts": self.expected_artifacts,
+                "expected_state_contracts": self.expected_state_contracts,
             }
         )
 
@@ -175,6 +177,7 @@ def run_agent_trace(fixture: str | RepoFixture, scenario: str | TraceScenario) -
         expected_disk_changes_before_approval=before_approval,
         expected_disk_changes_after_approval=after_approval,
         expected_artifacts=artifacts,
+        expected_state_contracts=_materialize_state_contracts(resolved_scenario),
     )
 
 
@@ -324,6 +327,28 @@ def validate_trace_contract(snapshot: AgentTraceSnapshot) -> list[str]:
         }
         if not proposal_ids.issubset(surfaced):
             issues.append("proposal ids are not surfaced in transcript edit groups")
+
+    contracts = snapshot.expected_state_contracts
+    if contracts.get("user_understanding_context", {}).get("required"):
+        if not contracts["user_understanding_context"].get("normalized_goal"):
+            issues.append("user_understanding_context is missing normalized goal")
+        if "requested_outputs" not in contracts["user_understanding_context"]:
+            issues.append("user_understanding_context is missing requested outputs")
+    if contracts.get("evidence_basis", {}).get("required"):
+        if not contracts["evidence_basis"].get("sources"):
+            issues.append("evidence_basis is missing source categories")
+        if contracts["evidence_basis"].get("web_untrusted_required") and "web_sources" not in contracts["evidence_basis"].get("sources", []):
+            issues.append("web trace evidence_basis must expose untrusted web sources")
+    if contracts.get("visible_rationale_log", {}).get("required"):
+        if contracts["visible_rationale_log"].get("minimum_entries", 0) < 1:
+            issues.append("visible_rationale_log must require at least one public entry")
+        for marker in FORBIDDEN_VISIBLE_MARKERS:
+            if marker.lower() in json.dumps(contracts["visible_rationale_log"], ensure_ascii=False).lower():
+                issues.append(f"visible_rationale_log contract contains forbidden marker: {marker}")
+    debug_contract = contracts.get("debug_context_visibility", {})
+    for required in ("user_understanding_context", "evidence_basis", "visible_rationale_log"):
+        if required not in debug_contract.get("includes", []):
+            issues.append(f"debug context contract is missing {required}")
     return issues
 
 
@@ -465,11 +490,83 @@ def _materialize_artifacts(scenario: TraceScenario) -> dict[str, Any]:
     return artifacts
 
 
+def _materialize_state_contracts(scenario: TraceScenario) -> dict[str, Any]:
+    tool_names = [str(call.get("name") or "") for call in scenario.tool_calls]
+    evidence_sources: list[str] = []
+    if any(name in {"read_file", "inspect_repo_tree", "search_files", "search_text", "analyze_repository"} for name in tool_names):
+        evidence_sources.append("files")
+    if any(name in WEB_TOOLS for name in tool_names):
+        evidence_sources.append("web_sources")
+    if any(name in {"run_approved_command", "inspect_git_state", "preview_command"} for name in tool_names):
+        evidence_sources.append("commands")
+    if any("change_set" in name or name.startswith("validate") for name in tool_names) or scenario.change_set:
+        evidence_sources.append("validation")
+        evidence_sources.append("active_proposal")
+    if "supervisor" in scenario.graph_nodes or "reduce_work_reports" in scenario.graph_nodes:
+        evidence_sources.append("worker_reports")
+    requested_outputs = _trace_requested_outputs(scenario)
+    return {
+        "user_understanding_context": {
+            "required": True,
+            "normalized_goal": scenario.user_request,
+            "requested_outputs": requested_outputs,
+            "follow_up_expected": bool(scenario.change_set and scenario.change_set.approval_decision),
+        },
+        "evidence_basis": {
+            "required": True,
+            "sources": _dedupe(evidence_sources),
+            "web_untrusted_required": any(name in WEB_TOOLS for name in tool_names),
+            "active_proposal_required": bool(scenario.change_set),
+        },
+        "visible_rationale_log": {
+            "required": True,
+            "minimum_entries": 1,
+            "safe_only": True,
+            "normal_transcript_uses_safe_summary": True,
+        },
+        "debug_context_visibility": {
+            "includes": ["user_understanding_context", "evidence_basis", "visible_rationale_log"],
+            "redacted": True,
+            "raw_context_packet_hidden": True,
+        },
+    }
+
+
+def _trace_requested_outputs(scenario: TraceScenario) -> list[str]:
+    text = scenario.user_request.lower()
+    outputs: list[str] = []
+    if scenario.change_set:
+        outputs.extend(["change_set_proposal", "proposal_only"])
+        if scenario.change_set.approval_decision == "allow":
+            outputs.append("apply_approved")
+    elif "how would" in text or "without changing files" in text:
+        outputs.append("explanation_only")
+    else:
+        outputs.append("assistant_answer")
+    if any(call.get("name") in WEB_TOOLS for call in scenario.tool_calls):
+        outputs.append("web_research")
+    if any(call.get("name") in GIT_WRITE_TOOLS or call.get("name") == "inspect_git_state" for call in scenario.tool_calls):
+        outputs.append("git_workflow")
+    if scenario.runtime == "routine":
+        outputs.append("routine")
+    if "supervisor" in scenario.graph_nodes:
+        outputs.append("broad_analysis")
+    return _dedupe(outputs)
+
+
 def _claims_applied_write(text: str) -> bool:
     lowered = text.lower()
     if "no files were modified" in lowered or "no files were changed" in lowered or "not applied" in lowered:
         return False
     return bool(re.search(r"\b(i|we)\s+(applied|modified|changed|wrote|saved|committed)\b", lowered))
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out
 
 
 PYTHON_SERVICE_FILES = {

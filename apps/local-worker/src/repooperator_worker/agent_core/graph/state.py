@@ -28,6 +28,9 @@ APPEND_REDUCER_FIELDS = {
     "worker_reports",
     "proposal_errors",
     "attempts",
+    "visible_rationale_log",
+    "evidence_basis_history",
+    "understanding_history",
 }
 
 UNIQUE_APPEND_REDUCER_FIELDS = {
@@ -68,6 +71,11 @@ class RepoOperatorGraphState(TypedDict, total=False):
     context_pack_report: dict[str, Any] | None
     short_term_memory: dict[str, Any] | None
     request_understanding_snapshot: dict[str, Any] | None
+    user_understanding_context: dict[str, Any] | None
+    evidence_basis: dict[str, Any] | None
+    visible_rationale_log: Annotated[list[dict[str, Any]], append_items]
+    evidence_basis_history: Annotated[list[dict[str, Any]], append_items]
+    understanding_history: Annotated[list[dict[str, Any]], append_items]
     classifier_snapshot: dict[str, Any]
     task_frame_snapshot: dict[str, Any] | None
     subtasks: list[dict[str, Any]]
@@ -162,6 +170,11 @@ def initial_graph_state(
         "context_pack_report": None,
         "short_term_memory": None,
         "request_understanding_snapshot": None,
+        "user_understanding_context": None,
+        "evidence_basis": None,
+        "visible_rationale_log": [],
+        "evidence_basis_history": [],
+        "understanding_history": [],
         "classifier_snapshot": classifier_to_snapshot(ClassifierResult()),
         "task_frame_snapshot": None,
         "subtasks": [],

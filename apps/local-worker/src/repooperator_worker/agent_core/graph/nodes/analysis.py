@@ -4,15 +4,30 @@ from __future__ import annotations
 
 from typing import Any
 
-from repooperator_worker.agent_core.graph.adapters import _execute_if_action_type, _graph_transition_event, _invoke_subgraph_delta, _with_checkpoint_bump
+from repooperator_worker.agent_core.graph.adapters import _execute_if_action_type, _graph_transition_event, _invoke_subgraph_delta, _merge_updates, _with_checkpoint_bump
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph.nodes.supervisor import _run_analysis_worker_task, _supervisor_file_groups, _worker_tasks_from_groups
+from repooperator_worker.agent_core.understanding_context import append_visible_rationale, evidence_basis_update
 
 def analysis_graph_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     from repooperator_worker.agent_core.graph.builder import build_analysis_graph
 
     update = _invoke_subgraph_delta(build_analysis_graph, state)
     update["routing_stage"] = "after_evidence"
+    next_state = _merge_updates(dict(state), update)
+    update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="analysis_graph"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            next_state,
+            node="analysis_graph",
+            action=None,
+            summary="I summarized broad repository analysis into worker and file evidence before returning to the main route.",
+            basis_refs=[{"kind": "file", "path": path} for path in (next_state.get("files_read") or [])[:8]],
+            safety_note="Analysis is read-only evidence gathering.",
+            uncertainty=[],
+        ),
+    )
     update.setdefault("events_to_emit", []).append(
         _graph_transition_event(state, "analysis_graph", subgraph="analysis_graph", operation="analyze")
     )

@@ -26,6 +26,14 @@ from repooperator_worker.agent_core.state import AgentCoreState
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.agent_core.graph.state import APPEND_REDUCER_FIELDS, UNIQUE_APPEND_REDUCER_FIELDS, RepoOperatorGraphState
+from repooperator_worker.agent_core.understanding_context import (
+    append_visible_rationale,
+    evidence_basis_update,
+    rationale_basis_refs_for_action,
+    rationale_safety_note_for_action,
+    rationale_summary_for_action,
+    rationale_uncertainty_for_action,
+)
 from repooperator_worker.schemas import AgentRunRequest
 from repooperator_worker.services.event_service import append_run_event
 from repooperator_worker.services.json_safe import json_safe
@@ -45,10 +53,17 @@ def _execute_pending_action(state: RepoOperatorGraphState, *, subgraph: str | No
         }
     request = _request(state)
     core = _core_state_from_graph(state)
+    rationale_update: dict[str, Any] = {}
     if action.type != "final_answer":
-        from repooperator_worker.agent_core.agent_loop import _emit_action_decision
-
-        _emit_action_decision(core, request, action)
+        rationale_update = append_visible_rationale(
+            state,
+            node=node_name or "execute_tool",
+            action=action,
+            summary=rationale_summary_for_action(action, fallback="I am running the next visible action through the safe tool boundary."),
+            basis_refs=rationale_basis_refs_for_action(action),
+            safety_note=rationale_safety_note_for_action(action),
+            uncertainty=rationale_uncertainty_for_action(action),
+        )
     orchestrator = ToolOrchestrator(
         run_id=str(state.get("run_id") or "run_controller"),
         request=request,
@@ -79,7 +94,9 @@ def _execute_pending_action(state: RepoOperatorGraphState, *, subgraph: str | No
         )
     ]
     update["pending_action"] = None
-    return update
+    combined = _merge_updates(rationale_update, update)
+    next_state = _merge_updates(dict(state), combined)
+    return _merge_updates(combined, evidence_basis_update(next_state, trigger_node=node_name or "execute_tool"))
 
 def _execute_ad_hoc_action(state: RepoOperatorGraphState, action: AgentAction, *, subgraph: str | None, node_name: str) -> dict[str, Any]:
     working = {**dict(state), "pending_action": action_to_snapshot(action)}

@@ -85,6 +85,35 @@ type ContextDebug = {
   model_profile?: ModelProfileDebug;
   latest_pack?: ContextPackDebug | null;
   recent_packs?: ContextPackDebug[];
+  user_understanding_context?: {
+    normalized_goal?: string;
+    requested_outputs?: string[];
+    likely_needed_tools?: string[];
+    likely_capabilities?: string[];
+    mentioned_files?: string[];
+    mentioned_symbols?: string[];
+    ambiguities?: string[];
+    edit_mode?: string | null;
+  };
+  evidence_basis?: {
+    files?: Array<{ path?: string; retained?: boolean; omitted_reason?: string | null; source?: string; summary?: string | null }>;
+    web_sources?: Array<{ title?: string | null; url?: string; source?: string | null; untrusted?: boolean }>;
+    validation?: Array<{ kind?: string; status?: string; errors?: string[] }>;
+    active_proposal?: { proposal_id?: string | null; status?: string | null; files?: string[]; operation_counts?: Record<string, number> } | null;
+    worker_reports?: Array<{ worker_task_id?: string; role?: string; summary?: string; files_analyzed?: string[] }>;
+    missing_evidence?: string[];
+    uncertainty?: string[];
+  };
+  visible_rationale_log?: Array<{
+    id?: string;
+    timestamp?: string;
+    node?: string;
+    action_type?: string | null;
+    summary?: string;
+    basis_refs?: Array<{ kind?: string; path?: string; url?: string; id?: string; query?: string }>;
+    safety_note?: string | null;
+    uncertainty?: string[];
+  }>;
 };
 
 const tabs = ["Dashboard", "Agents", "Context", "Memory", "Skills", "Integrations", "Tools", "Events / Runs", "Settings"] as const;
@@ -264,8 +293,56 @@ function ContextPanel({ context }: { context: ContextDebug | null }) {
         <Row label="Omitted files" value={latest?.omitted_files?.map((file) => `${file.path ?? "unknown"} (${file.reason ?? "omitted"})`).join(", ") || "-"} />
         <Row label="Web sources" value={latest?.retained_web_sources?.map((source) => source.url || source.title || source.source || "source").join(", ") || "-"} />
       </Card>
+      <Card title="User Understanding">
+        <Row label="Goal" value={context?.user_understanding_context?.normalized_goal ?? "-"} />
+        <Row label="Requested outputs" value={context?.user_understanding_context?.requested_outputs?.join(", ") || "-"} />
+        <Row label="Likely tools" value={context?.user_understanding_context?.likely_needed_tools?.join(", ") || "-"} />
+        <Row label="Capabilities" value={context?.user_understanding_context?.likely_capabilities?.join(", ") || "-"} />
+        <Row label="Mentioned files" value={context?.user_understanding_context?.mentioned_files?.join(", ") || "-"} />
+        <Row label="Mentioned symbols" value={context?.user_understanding_context?.mentioned_symbols?.join(", ") || "-"} />
+        <Row label="Ambiguities" value={context?.user_understanding_context?.ambiguities?.join(" · ") || "-"} />
+        <Row label="Edit mode" value={context?.user_understanding_context?.edit_mode ?? "-"} />
+      </Card>
+      <Card title="Evidence Basis">
+        <Row label="Files used" value={context?.evidence_basis?.files?.filter((file) => file.retained !== false).map((file) => file.path).filter(Boolean).join(", ") || "-"} />
+        <Row label="Files omitted" value={context?.evidence_basis?.files?.filter((file) => file.retained === false).map((file) => `${file.path ?? "unknown"} (${file.omitted_reason ?? "omitted"})`).join(", ") || "-"} />
+        <Row label="Web sources" value={context?.evidence_basis?.web_sources?.map((source) => source.url || source.title || source.source || "source").join(", ") || "-"} />
+        <Row label="Validation errors" value={context?.evidence_basis?.validation?.flatMap((item) => item.errors || []).join(" · ") || "-"} />
+        <Row label="Active proposal" value={formatActiveProposal(context?.evidence_basis?.active_proposal)} />
+        <Row label="Worker reports" value={context?.evidence_basis?.worker_reports?.map((report) => `${report.role ?? "worker"}: ${report.summary ?? ""}`).join(" · ") || "-"} />
+        <Row label="Missing evidence" value={context?.evidence_basis?.missing_evidence?.join(" · ") || "-"} />
+        <Row label="Uncertainty" value={context?.evidence_basis?.uncertainty?.join(" · ") || "-"} />
+      </Card>
+      <Card title="Visible Rationale">
+        {context?.visible_rationale_log?.length ? (
+          <ul className="debug-list">
+            {context.visible_rationale_log.slice(-8).reverse().map((item) => (
+              <li className="debug-list-item" key={item.id ?? `${item.timestamp}-${item.node}`}>
+                <strong>{item.node ?? "node"}</strong>
+                <span>{item.action_type ? ` · ${item.action_type}` : ""}</span>
+                <p>{item.summary ?? "-"}</p>
+                <small>{formatBasisRefs(item.basis_refs)}{item.safety_note ? ` · ${item.safety_note}` : ""}</small>
+              </li>
+            ))}
+          </ul>
+        ) : <div className="debug-placeholder">No visible rationale entries recorded yet.</div>}
+      </Card>
     </>
   );
+}
+
+function formatActiveProposal(proposal?: { proposal_id?: string | null; status?: string | null; files?: string[] } | null): string {
+  if (!proposal || typeof proposal !== "object") return "-";
+  const files = proposal.files?.length ? ` · ${proposal.files.join(", ")}` : "";
+  return `${proposal.proposal_id ?? "proposal"} (${proposal.status ?? "unknown"})${files}`;
+}
+
+function formatBasisRefs(refs?: Array<{ kind?: string; path?: string; url?: string; id?: string; query?: string }>): string {
+  if (!refs?.length) return "No source refs";
+  return refs
+    .map((ref) => ref.path || ref.url || ref.id || ref.query || ref.kind || "ref")
+    .filter(Boolean)
+    .join(", ");
 }
 
 function MemoryPanel({ memory }: { memory: MemoryDebug | null }) {

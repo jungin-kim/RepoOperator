@@ -18,6 +18,11 @@ from repooperator_worker.agent_core.graph.nodes.context import refresh_context_p
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import task_frame_to_snapshot
 from repooperator_worker.agent_core.planner import edit_requested
+from repooperator_worker.agent_core.understanding_context import (
+    append_visible_rationale,
+    evidence_basis_update,
+    update_user_understanding_context,
+)
 
 def understand_request_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     request = _request(state)
@@ -35,6 +40,20 @@ def understand_request_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         "max_commands": core.max_commands,
         "max_edits": core.max_edits,
     }
+    working_with_update = _merge_updates(working_state, update)
+    update = _merge_updates(update, update_user_understanding_context(working_with_update, request, "understand_request"))
+    update = _merge_updates(
+        update,
+        append_visible_rationale(
+            working_with_update,
+            node="understand_request",
+            action=None,
+            summary="I separated the request into expected output, constraints, mentioned files, and evidence needs before choosing actions.",
+            basis_refs=[],
+            safety_note="This request understanding is inspectable context, not hard routing.",
+            uncertainty=[],
+        ),
+    )
     update["events_to_emit"] = [_graph_transition_event(state, "understand_request", operation="understand_request")]
     return _with_checkpoint_bump(_merge_updates(context_update, update))
 
@@ -44,6 +63,9 @@ def build_task_plan_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     _controller().create_initial_plan(core)
     _controller().emit_plan_update(core, request, "Created initial plan")
     update = _updates_from_core(state, core)
+    working_with_update = _merge_updates(dict(state), update)
+    update = _merge_updates(update, update_user_understanding_context(working_with_update, request, "build_task_plan"))
+    update = _merge_updates(update, evidence_basis_update(working_with_update, trigger_node="build_task_plan"))
     update["events_to_emit"] = [_graph_transition_event(state, "build_task_plan", operation="plan")]
     return _with_checkpoint_bump(update)
 
