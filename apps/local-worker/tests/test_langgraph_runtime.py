@@ -32,6 +32,7 @@ from repooperator_worker.agent_core.langgraph_runtime import (  # noqa: E402
     graph_config_for_request,
     initial_graph_state,
     resume_langgraph_controller,
+    run_langgraph_controller,
     route_after_change_plan,
     route_after_tool_result,
     route_after_understanding,
@@ -134,6 +135,22 @@ class LangGraphRuntimeTests(unittest.TestCase):
         self.assertTrue(expected.issubset(set(graph.nodes)))
         self.assertIsNotNone(build_compiled_repooperator_graph())
 
+    def test_split_graph_modules_reexport_compatibility_entrypoints(self) -> None:
+        from repooperator_worker.agent_core import langgraph_runtime as facade
+        from repooperator_worker.agent_core.graph import builder as graph_builder
+        from repooperator_worker.agent_core.graph import routes as graph_routes
+        from repooperator_worker.agent_core.graph import runtime as graph_runtime
+        from repooperator_worker.agent_core.graph import state as graph_state
+        from repooperator_worker.agent_core.graph.nodes import finalization
+
+        self.assertIs(facade.RepoOperatorGraphState, graph_state.RepoOperatorGraphState)
+        self.assertIs(facade.build_repooperator_state_graph, graph_builder.build_repooperator_state_graph)
+        self.assertIs(facade.build_compiled_repooperator_graph, graph_runtime.build_compiled_repooperator_graph)
+        self.assertIs(facade.run_langgraph_controller, graph_runtime.run_langgraph_controller)
+        self.assertIs(facade.resume_langgraph_controller, graph_runtime.resume_langgraph_controller)
+        self.assertIs(facade.route_after_tool_result, graph_routes.route_after_tool_result)
+        self.assertIs(facade.final_emit_message_node, finalization.final_emit_message_node)
+
     def test_major_work_subgraphs_compile(self) -> None:
         subgraphs = [
             build_evidence_gathering_graph(),
@@ -147,6 +164,16 @@ class LangGraphRuntimeTests(unittest.TestCase):
         ]
         for graph in subgraphs:
             self.assertIsNotNone(graph.compile())
+
+    def test_run_langgraph_controller_direct_entrypoint_works(self) -> None:
+        request = self._request("Summarize README.md")
+        with patch("repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None), patch(
+            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()
+        ):
+            response = run_langgraph_controller(request, run_id="run-direct-langgraph")
+        self.assertEqual(response.agent_flow, "langgraph")
+        self.assertIn("README.md", response.files_read)
+        self.assertIn("README.md evidence", response.response)
 
     def test_graph_compiles_with_langgraph_checkpointer(self) -> None:
         checkpointer = InMemorySaver()
