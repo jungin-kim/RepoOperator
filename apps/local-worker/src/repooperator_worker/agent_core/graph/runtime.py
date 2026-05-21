@@ -30,7 +30,7 @@ def run_langgraph_controller(
 ) -> AgentRunResponse:
     run_id = run_id or "run_controller"
     _controller()._validate_active_repository(request)
-    skills_context, skills_used = enabled_skill_context()
+    skills_context, skills_used = enabled_skill_context(task=request.task)
     initial_state = initial_graph_state(
         request,
         run_id=run_id,

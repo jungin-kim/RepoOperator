@@ -100,7 +100,7 @@ def run_controller_graph(
     run_id = run_id or "run_controller"
     _validate_active_repository(request)
     state = _initial_state(request, run_id)
-    skills_context, skills_used = enabled_skill_context()
+    skills_context, skills_used = enabled_skill_context(task=request.task)
     state.skills_used = skills_used
     registry = get_default_tool_registry()
     hook_manager = HookManager()

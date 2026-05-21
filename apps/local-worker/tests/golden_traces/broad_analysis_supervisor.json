@@ -1,0 +1,136 @@
+{
+  "expected_artifacts": {},
+  "expected_disk_changes_after_approval": {
+    "changed_files": [],
+    "contents": {},
+    "created_files": [],
+    "deleted_files": []
+  },
+  "expected_disk_changes_before_approval": {
+    "changed_files": [],
+    "contents": {},
+    "created_files": [],
+    "deleted_files": []
+  },
+  "expected_final_response_contract": {
+    "claims_files_applied": false,
+    "must_include": [
+      "app logic",
+      "storage boundary",
+      "tests"
+    ],
+    "must_not_include": [
+      "Work log",
+      "Technical Log",
+      "hidden reasoning",
+      "<think>"
+    ],
+    "response_type": "assistant_answer",
+    "text": "The codebase groups into app logic, storage boundary, tests, and architecture docs based on read-only supervisor evidence."
+  },
+  "expected_graph_nodes": [
+    "load_context",
+    "understand_request",
+    "supervisor",
+    "decompose_task",
+    "dispatch_work_units",
+    "reduce_work_reports",
+    "final_synthesis"
+  ],
+  "expected_permission_decisions": [
+    {
+      "decision": "allow",
+      "reason": "read-only broad analysis",
+      "tool": "analyze_repository"
+    },
+    {
+      "decision": "allow",
+      "reason": "read-only architecture evidence",
+      "tool": "read_file"
+    }
+  ],
+  "expected_state_contracts": {
+    "debug_context_visibility": {
+      "includes": [
+        "user_understanding_context",
+        "evidence_basis",
+        "visible_rationale_log"
+      ],
+      "raw_context_packet_hidden": true,
+      "redacted": true
+    },
+    "evidence_basis": {
+      "active_proposal_required": false,
+      "required": true,
+      "sources": [
+        "files",
+        "worker_reports"
+      ],
+      "web_untrusted_required": false
+    },
+    "user_understanding_context": {
+      "follow_up_expected": false,
+      "normalized_goal": "Analyze the whole codebase and summarize each major file group.",
+      "requested_outputs": [
+        "assistant_answer",
+        "broad_analysis"
+      ],
+      "required": true
+    },
+    "visible_rationale_log": {
+      "minimum_entries": 1,
+      "normal_transcript_uses_safe_summary": true,
+      "required": true,
+      "safe_only": true
+    }
+  },
+  "expected_tool_calls": [
+    {
+      "name": "analyze_repository",
+      "result": {
+        "files_read": [
+          "README.md",
+          "src/app.py",
+          "src/storage.py",
+          "tests/test_app.py",
+          "docs/architecture.md"
+        ]
+      },
+      "status": "success",
+      "target": "."
+    },
+    {
+      "name": "read_file",
+      "result": {
+        "files_read": [
+          "docs/architecture.md"
+        ]
+      },
+      "status": "success",
+      "target_files": [
+        "docs/architecture.md"
+      ]
+    }
+  ],
+  "expected_transcript_sections": [
+    {
+      "actions": [
+        {
+          "kind": "analysis",
+          "target": "."
+        },
+        {
+          "kind": "read_file",
+          "target": "docs/architecture.md"
+        }
+      ],
+      "edits": [],
+      "status": "completed",
+      "status_text": "Delegated broad read-only analysis and reduced the worker reports."
+    }
+  ],
+  "name": "broad_analysis_supervisor",
+  "repo_fixture": "broad_python_service",
+  "runtime": "langgraph+deterministic-fakes",
+  "user_request": "Analyze the whole codebase and summarize each major file group."
+}

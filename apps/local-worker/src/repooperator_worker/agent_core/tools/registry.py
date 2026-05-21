@@ -190,6 +190,7 @@ class ToolRegistry:
         keywords: Iterable[str] | None = None,
         limit: int = 12,
         model_specs: bool = True,
+        include_external: bool = True,
     ) -> list[dict]:
         from repooperator_worker.agent_core.tools.tool_search import ToolSearch
 
@@ -201,6 +202,7 @@ class ToolRegistry:
             keywords=keywords,
             limit=limit,
             model_specs=model_specs,
+            include_external=include_external,
         )
 
     def capabilities_for_tool(self, tool_name: str, *, available_only: bool = False) -> list[str]:
@@ -475,6 +477,12 @@ def _dedupe(items: Iterable[Any]) -> list[str]:
 
 
 def get_default_tool_registry() -> ToolRegistry:
+    try:
+        from repooperator_worker.agent_core.mcp import configured_mcp_tool_adapters
+
+        mcp_tools = configured_mcp_tool_adapters()
+    except Exception:
+        mcp_tools = []
     return ToolRegistry(
         [
             InspectRepoTreeTool(),
@@ -510,5 +518,6 @@ def get_default_tool_registry() -> ToolRegistry:
             GenerateEditTool(),
             AskClarificationTool(),
             FinalAnswerTool(),
+            *mcp_tools,
         ]
     )

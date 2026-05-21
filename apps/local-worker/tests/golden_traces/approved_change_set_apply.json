@@ -1,0 +1,151 @@
+{
+  "expected_artifacts": {
+    "artifacts": [
+      {
+        "file": "src/app.py",
+        "id": "proposal:857e9d3431eb",
+        "kind": "proposal_card"
+      }
+    ],
+    "proposal_ids": [
+      "proposal:857e9d3431eb"
+    ]
+  },
+  "expected_disk_changes_after_approval": {
+    "changed_files": [
+      "src/app.py"
+    ],
+    "contents": {
+      "src/app.py": "def greeting(name: str) -> str:\n    return f\"Hello, {name}!\"\n\n\ndef main() -> str:\n    return \"RepoOperator ready\"\n"
+    },
+    "created_files": [],
+    "deleted_files": []
+  },
+  "expected_disk_changes_before_approval": {
+    "changed_files": [],
+    "contents": {},
+    "created_files": [],
+    "deleted_files": []
+  },
+  "expected_final_response_contract": {
+    "applied_disk_write_exact": {
+      "changed_files": [
+        "src/app.py"
+      ],
+      "contents": {
+        "src/app.py": "def greeting(name: str) -> str:\n    return f\"Hello, {name}!\"\n\n\ndef main() -> str:\n    return \"RepoOperator ready\"\n"
+      },
+      "created_files": [],
+      "deleted_files": []
+    },
+    "claims_files_applied": true,
+    "must_include": [
+      "Applied",
+      "src/app.py"
+    ],
+    "must_not_include": [
+      "Work log",
+      "Technical Log",
+      "hidden reasoning",
+      "<think>"
+    ],
+    "response_type": "edit_applied",
+    "text": "Applied the approved change set to src/app.py."
+  },
+  "expected_graph_nodes": [
+    "load_context",
+    "await_change_approval",
+    "apply_change_set",
+    "post_apply_validation",
+    "final_synthesis"
+  ],
+  "expected_permission_decisions": [
+    {
+      "decision": "ask",
+      "reason": "writing validated change set requires approval",
+      "tool": "apply_change_set"
+    },
+    {
+      "decision": "allow",
+      "reason": "user approved this proposal id",
+      "tool": "apply_change_set"
+    }
+  ],
+  "expected_state_contracts": {
+    "debug_context_visibility": {
+      "includes": [
+        "user_understanding_context",
+        "evidence_basis",
+        "visible_rationale_log"
+      ],
+      "raw_context_packet_hidden": true,
+      "redacted": true
+    },
+    "evidence_basis": {
+      "active_proposal_required": true,
+      "required": true,
+      "sources": [
+        "validation",
+        "active_proposal"
+      ],
+      "web_untrusted_required": false
+    },
+    "user_understanding_context": {
+      "follow_up_expected": true,
+      "normalized_goal": "Apply the approved ready-message change set.",
+      "requested_outputs": [
+        "change_set_proposal",
+        "proposal_only",
+        "apply_approved"
+      ],
+      "required": true
+    },
+    "visible_rationale_log": {
+      "minimum_entries": 1,
+      "normal_transcript_uses_safe_summary": true,
+      "required": true,
+      "safe_only": true
+    }
+  },
+  "expected_tool_calls": [
+    {
+      "name": "validate_change_set",
+      "proposal_id": "proposal:857e9d3431eb",
+      "status": "success",
+      "target_files": [
+        "src/app.py"
+      ]
+    },
+    {
+      "name": "apply_change_set",
+      "proposal_id": "proposal:857e9d3431eb",
+      "status": "success",
+      "target_files": [
+        "src/app.py"
+      ]
+    }
+  ],
+  "expected_transcript_sections": [
+    {
+      "actions": [
+        {
+          "kind": "validation",
+          "target": "src/app.py"
+        }
+      ],
+      "edits": [
+        {
+          "path": "src/app.py",
+          "proposal_id": "proposal:857e9d3431eb",
+          "status": "applied"
+        }
+      ],
+      "status": "completed",
+      "status_text": "Applied the approved change set and checked the resulting file."
+    }
+  ],
+  "name": "approved_change_set_apply",
+  "repo_fixture": "python_service",
+  "runtime": "langgraph+deterministic-fakes",
+  "user_request": "Apply the approved ready-message change set."
+}

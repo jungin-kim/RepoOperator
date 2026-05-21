@@ -1,0 +1,169 @@
+{
+  "expected_artifacts": {
+    "artifacts": [
+      {
+        "file": "src/app.py",
+        "id": "proposal:218a1f905df6",
+        "kind": "proposal_card"
+      }
+    ],
+    "proposal_ids": [
+      "proposal:218a1f905df6"
+    ]
+  },
+  "expected_disk_changes_after_approval": {
+    "changed_files": [],
+    "contents": {},
+    "created_files": [],
+    "deleted_files": []
+  },
+  "expected_disk_changes_before_approval": {
+    "changed_files": [],
+    "contents": {},
+    "created_files": [],
+    "deleted_files": []
+  },
+  "expected_final_response_contract": {
+    "claims_files_applied": false,
+    "must_include": [
+      "ChangeSetProposal",
+      "No files were modified"
+    ],
+    "must_not_include": [
+      "Work log",
+      "Technical Log",
+      "hidden reasoning",
+      "<think>"
+    ],
+    "response_type": "change_proposal",
+    "text": "I prepared a ChangeSetProposal for src/app.py. No files were modified. Review the proposal card before applying it."
+  },
+  "expected_graph_nodes": [
+    "load_context",
+    "understand_request",
+    "build_task_plan",
+    "gather_evidence",
+    "plan_change_set",
+    "generate_change_set",
+    "validate_change_set",
+    "await_change_approval",
+    "final_synthesis"
+  ],
+  "expected_permission_decisions": [
+    {
+      "decision": "allow",
+      "reason": "read-only target discovery",
+      "tool": "search_files"
+    },
+    {
+      "decision": "allow",
+      "reason": "read-only file evidence",
+      "tool": "read_file"
+    },
+    {
+      "decision": "allow",
+      "reason": "proposal-only edit generation",
+      "tool": "generate_change_set"
+    },
+    {
+      "decision": "ask",
+      "reason": "validated change set would write to disk",
+      "tool": "apply_change_set"
+    }
+  ],
+  "expected_state_contracts": {
+    "debug_context_visibility": {
+      "includes": [
+        "user_understanding_context",
+        "evidence_basis",
+        "visible_rationale_log"
+      ],
+      "raw_context_packet_hidden": true,
+      "redacted": true
+    },
+    "evidence_basis": {
+      "active_proposal_required": true,
+      "required": true,
+      "sources": [
+        "files",
+        "validation",
+        "active_proposal"
+      ],
+      "web_untrusted_required": false
+    },
+    "user_understanding_context": {
+      "follow_up_expected": false,
+      "normalized_goal": "Add an excited greeting option.",
+      "requested_outputs": [
+        "change_set_proposal",
+        "proposal_only"
+      ],
+      "required": true
+    },
+    "visible_rationale_log": {
+      "minimum_entries": 1,
+      "normal_transcript_uses_safe_summary": true,
+      "required": true,
+      "safe_only": true
+    }
+  },
+  "expected_tool_calls": [
+    {
+      "name": "search_files",
+      "query": "greeting",
+      "result": {
+        "candidates": [
+          "src/app.py"
+        ]
+      },
+      "status": "success"
+    },
+    {
+      "name": "read_file",
+      "result": {
+        "files_read": [
+          "src/app.py"
+        ]
+      },
+      "status": "success",
+      "target_files": [
+        "src/app.py"
+      ]
+    },
+    {
+      "name": "generate_change_set",
+      "proposal_id": "proposal:218a1f905df6",
+      "status": "success",
+      "target_files": [
+        "src/app.py"
+      ]
+    }
+  ],
+  "expected_transcript_sections": [
+    {
+      "actions": [
+        {
+          "kind": "search",
+          "query": "greeting"
+        },
+        {
+          "kind": "read_file",
+          "target": "src/app.py"
+        }
+      ],
+      "edits": [
+        {
+          "path": "src/app.py",
+          "proposal_id": "proposal:218a1f905df6",
+          "status": "proposed"
+        }
+      ],
+      "status": "completed",
+      "status_text": "Resolved the greeting implementation before preparing a proposal."
+    }
+  ],
+  "name": "feature_request_no_explicit_file",
+  "repo_fixture": "python_service",
+  "runtime": "langgraph+deterministic-fakes",
+  "user_request": "Add an excited greeting option."
+}

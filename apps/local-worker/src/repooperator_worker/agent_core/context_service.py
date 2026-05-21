@@ -64,7 +64,7 @@ class ContextService:
         if cached and now - cached[0] <= self.ttl_seconds and not (force_refresh or request_refresh or active_changed):
             return replace(cached[1], cache_hit=True, invalidation_reason=None)
 
-        skills_context, _skills_used = enabled_skill_context()
+        skills_context, _skills_used = enabled_skill_context(task=request.task)
         packet = ContextPacket(
             repo_root_name=repo.name,
             repo_path=str(repo),

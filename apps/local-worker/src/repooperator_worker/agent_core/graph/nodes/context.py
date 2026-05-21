@@ -16,6 +16,9 @@ from repooperator_worker.agent_core.graph.adapters import (
 )
 from repooperator_worker.agent_core.graph.nodes.supervisor import _frame_is_edit_like, _should_use_supervisor
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
+from repooperator_worker.agent_core.mcp import get_default_mcp_registry
+from repooperator_worker.agent_core.plugins import get_default_plugin_registry
+from repooperator_worker.agent_core.skills import get_default_skill_registry
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.agent_core.understanding_context import evidence_basis_update
 from repooperator_worker.services.json_safe import json_safe
@@ -31,11 +34,22 @@ def load_context_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def capability_discovery_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     registry = get_default_capability_registry()
     tool_registry = get_default_tool_registry()
+    skill_registry = get_default_skill_registry()
+    plugin_registry = get_default_plugin_registry()
+    mcp_registry = get_default_mcp_registry()
+    request = _request(state)
+    selected_skills = skill_registry.specs_for_model(task=request.task, limit=4)
     snapshot = {
         "capabilities": registry.specs_for_model(),
         "tool_capabilities": registry.tool_map(),
         "available_tools": [item["name"] for item in tool_registry.specs_for_model()],
         "all_tools": tool_registry.allowed_action_types(),
+        "skills": skill_registry.specs_for_model(),
+        "selected_skills": selected_skills,
+        "plugins": plugin_registry.specs_for_model(enabled_only=True),
+        "plugin_tools": plugin_registry.tool_metadata(enabled_only=True),
+        "mcp_servers": mcp_registry.specs_for_model(enabled_only=True),
+        "mcp_tools": mcp_registry.tool_metadata(enabled_only=True),
     }
     return _with_checkpoint_bump(
         {
@@ -45,7 +59,12 @@ def capability_discovery_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     state,
                     "capability_discovery",
                     operation="capability_discovery",
-                    aggregate={"available_capabilities": registry.selectable_names()},
+                    aggregate={
+                        "available_capabilities": registry.selectable_names(),
+                        "selected_skills": [item.get("id") for item in selected_skills],
+                        "enabled_plugins": [item.get("id") for item in snapshot["plugins"]],
+                        "enabled_mcp_servers": [item.get("id") for item in snapshot["mcp_servers"]],
+                    },
                 )
             ],
         }

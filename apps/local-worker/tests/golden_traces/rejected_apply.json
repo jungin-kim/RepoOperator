@@ -1,0 +1,134 @@
+{
+  "expected_artifacts": {
+    "artifacts": [
+      {
+        "file": "src/app.py",
+        "id": "proposal:db544b9708b9",
+        "kind": "proposal_card"
+      }
+    ],
+    "proposal_ids": [
+      "proposal:db544b9708b9"
+    ]
+  },
+  "expected_disk_changes_after_approval": {
+    "changed_files": [],
+    "contents": {},
+    "created_files": [],
+    "deleted_files": []
+  },
+  "expected_disk_changes_before_approval": {
+    "changed_files": [],
+    "contents": {},
+    "created_files": [],
+    "deleted_files": []
+  },
+  "expected_final_response_contract": {
+    "claims_files_applied": false,
+    "must_include": [
+      "not applied",
+      "No files were modified"
+    ],
+    "must_not_include": [
+      "Work log",
+      "Technical Log",
+      "hidden reasoning",
+      "<think>"
+    ],
+    "response_type": "change_proposal",
+    "text": "The proposed change was rejected and not applied. No files were modified."
+  },
+  "expected_graph_nodes": [
+    "load_context",
+    "await_change_approval",
+    "final_synthesis"
+  ],
+  "expected_permission_decisions": [
+    {
+      "decision": "ask",
+      "reason": "writing validated change set requires approval",
+      "tool": "apply_change_set"
+    },
+    {
+      "decision": "deny",
+      "reason": "user rejected this proposal",
+      "tool": "apply_change_set"
+    }
+  ],
+  "expected_state_contracts": {
+    "debug_context_visibility": {
+      "includes": [
+        "user_understanding_context",
+        "evidence_basis",
+        "visible_rationale_log"
+      ],
+      "raw_context_packet_hidden": true,
+      "redacted": true
+    },
+    "evidence_basis": {
+      "active_proposal_required": true,
+      "required": true,
+      "sources": [
+        "validation",
+        "active_proposal"
+      ],
+      "web_untrusted_required": false
+    },
+    "user_understanding_context": {
+      "follow_up_expected": true,
+      "normalized_goal": "Reject the proposed CLI text change.",
+      "requested_outputs": [
+        "change_set_proposal",
+        "proposal_only"
+      ],
+      "required": true
+    },
+    "visible_rationale_log": {
+      "minimum_entries": 1,
+      "normal_transcript_uses_safe_summary": true,
+      "required": true,
+      "safe_only": true
+    }
+  },
+  "expected_tool_calls": [
+    {
+      "name": "validate_change_set",
+      "proposal_id": "proposal:db544b9708b9",
+      "status": "success",
+      "target_files": [
+        "src/app.py"
+      ]
+    },
+    {
+      "name": "apply_change_set",
+      "proposal_id": "proposal:db544b9708b9",
+      "status": "skipped",
+      "target_files": [
+        "src/app.py"
+      ]
+    }
+  ],
+  "expected_transcript_sections": [
+    {
+      "actions": [
+        {
+          "kind": "validation",
+          "target": "src/app.py"
+        }
+      ],
+      "edits": [
+        {
+          "path": "src/app.py",
+          "proposal_id": "proposal:db544b9708b9",
+          "status": "rejected"
+        }
+      ],
+      "status": "completed",
+      "status_text": "The apply request was rejected, so the proposal stayed unapplied."
+    }
+  ],
+  "name": "rejected_apply",
+  "repo_fixture": "python_service",
+  "runtime": "langgraph+deterministic-fakes",
+  "user_request": "Reject the proposed CLI text change."
+}
