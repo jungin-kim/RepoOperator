@@ -285,6 +285,10 @@ def _is_read_only_command(argv: list[str]) -> bool:
         ("git", "rev-parse"),
     }:
         return True
+    if tuple(lowered[:2]) == ("node", "--check") and len(lowered) >= 3:
+        return True
+    if tuple(lowered[:3]) == ("npm", "run", "typecheck"):
+        return True
     if tuple(lowered[:3]) == ("glab", "auth", "status"):
         return True
     if tuple(lowered[:3]) in {

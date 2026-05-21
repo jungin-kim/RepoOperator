@@ -3532,6 +3532,61 @@ select {
   padding: 8px;
 }
 
+.workflow-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.workflow-card-passed {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.workflow-card-failed {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+}
+
+.workflow-card-git {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+}
+
+.workflow-card-heading {
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.workflow-command-list {
+  display: grid;
+  gap: 6px;
+}
+
+.workflow-command-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.workflow-command-row code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.workflow-card-output {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ── Responsive ───────────────────────────────────── */
 
 @media (max-width: 960px) {

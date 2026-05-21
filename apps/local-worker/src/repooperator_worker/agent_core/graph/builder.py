@@ -56,9 +56,13 @@ from repooperator_worker.agent_core.graph.nodes.git import (
     git_await_push_approval_node,
     git_commit_node,
     git_create_review_node,
+    git_diff_node,
     git_propose_commit_summary_node,
     git_push_node,
+    git_route_node,
+    git_status_node,
     git_workflow_graph_node,
+    route_git_workflow_next,
 )
 from repooperator_worker.agent_core.graph.nodes.routine import routine_enqueue_node
 from repooperator_worker.agent_core.graph.nodes.supervisor import (
@@ -73,6 +77,11 @@ from repooperator_worker.agent_core.graph.nodes.supervisor import (
 from repooperator_worker.agent_core.graph.nodes.understanding import build_task_plan_node, understand_request_node
 from repooperator_worker.agent_core.graph.nodes.validation import (
     execute_tool_node,
+    await_validation_approval_node,
+    parse_validation_result_node,
+    preview_selected_validation_command_node,
+    run_selected_validation_command_node,
+    select_validation_commands_node,
     validate_result_node,
     validation_approval_interrupt_node,
     validation_choose_node,
@@ -115,6 +124,11 @@ def build_repooperator_state_graph() -> StateGraph:
     graph.add_node("await_change_approval", await_approval_node)
     graph.add_node("apply_change_set", apply_change_set_node)
     graph.add_node("post_apply_validation", post_apply_validation_node)
+    graph.add_node("select_validation_commands", select_validation_commands_node)
+    graph.add_node("preview_command", preview_selected_validation_command_node)
+    graph.add_node("await_validation_approval", await_validation_approval_node)
+    graph.add_node("run_validation_command", run_selected_validation_command_node)
+    graph.add_node("parse_validation_result", parse_validation_result_node)
     graph.add_node("web_research_graph", web_research_graph_node)
     graph.add_node("git_workflow_graph", git_workflow_graph_node)
     graph.add_node("routine_enqueue_node", routine_enqueue_node)
@@ -147,6 +161,11 @@ def build_repooperator_state_graph() -> StateGraph:
             "await_change_approval": "await_change_approval",
             "apply_change_set": "apply_change_set",
             "post_apply_validation": "post_apply_validation",
+            "select_validation_commands": "select_validation_commands",
+            "preview_command": "preview_command",
+            "await_validation_approval": "await_validation_approval",
+            "run_validation_command": "run_validation_command",
+            "parse_validation_result": "parse_validation_result",
             "web_research_graph": "web_research_graph",
             "git_workflow_graph": "git_workflow_graph",
             "routine_enqueue_node": "routine_enqueue_node",
@@ -179,7 +198,12 @@ def build_repooperator_state_graph() -> StateGraph:
     graph.add_edge("ask_clarification", "final_synthesis")
     graph.add_edge("await_approval", "route_next")
     graph.add_edge("await_change_approval", "route_next")
-    graph.add_edge("apply_change_set", "post_apply_validation")
+    graph.add_edge("apply_change_set", "select_validation_commands")
+    graph.add_edge("select_validation_commands", "preview_command")
+    graph.add_edge("preview_command", "await_validation_approval")
+    graph.add_edge("await_validation_approval", "run_validation_command")
+    graph.add_edge("run_validation_command", "parse_validation_result")
+    graph.add_edge("parse_validation_result", "route_next")
     graph.add_edge("post_apply_validation", "route_next")
     graph.add_edge("web_research_graph", "validate_result")
     graph.add_edge("git_workflow_graph", "route_next")
@@ -310,6 +334,9 @@ def build_web_research_graph() -> StateGraph:
 
 def build_git_workflow_graph() -> StateGraph:
     graph = StateGraph(RepoOperatorGraphState)
+    graph.add_node("route_git_workflow", git_route_node)
+    graph.add_node("git_status", git_status_node)
+    graph.add_node("git_diff", git_diff_node)
     graph.add_node("propose_commit_summary", git_propose_commit_summary_node)
     graph.add_node("await_commit_approval", git_await_commit_approval_node)
     graph.add_node("git_commit", git_commit_node)
@@ -317,7 +344,22 @@ def build_git_workflow_graph() -> StateGraph:
     graph.add_node("git_push", git_push_node)
     graph.add_node("await_pr_approval", git_await_pr_approval_node)
     graph.add_node("create_pr_or_mr", git_create_review_node)
-    graph.add_edge(START, "propose_commit_summary")
+    graph.add_edge(START, "route_git_workflow")
+    graph.add_conditional_edges(
+        "route_git_workflow",
+        route_git_workflow_next,
+        {
+            "git_status": "git_status",
+            "git_diff": "git_diff",
+            "propose_commit_summary": "propose_commit_summary",
+            "git_commit": "git_commit",
+            "git_push": "git_push",
+            "create_pr_or_mr": "create_pr_or_mr",
+            END: END,
+        },
+    )
+    graph.add_edge("git_status", "route_git_workflow")
+    graph.add_edge("git_diff", "route_git_workflow")
     graph.add_edge("propose_commit_summary", "await_commit_approval")
     graph.add_edge("await_commit_approval", END)
     graph.add_edge("git_commit", "await_push_approval")

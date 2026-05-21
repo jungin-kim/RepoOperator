@@ -233,14 +233,22 @@ def await_approval_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     if normalized.get("decision") == "allow":
         command = list((state.get("pending_approval") or {}).get("command") or payload.get("command") or [])
         approval_id = str((state.get("pending_approval") or {}).get("approval_id") or payload.get("approval_id") or "")
+        approval_kind = str((state.get("pending_approval") or {}).get("kind") or payload.get("kind") or "")
+        tool_name = str((state.get("pending_approval") or {}).get("tool_name") or "")
+        action_type = "run_validation_command" if approval_kind == "validation_command_approval" or tool_name == "run_validation_command" else "run_approved_command"
         update = {
                 "pending_action": action_to_snapshot(
                     AgentAction(
-                        type="run_approved_command",
+                        type=action_type,
                         reason_summary="Run command after user approval.",
                         command=command,
                         expected_output="Command output after approval.",
-                        payload={"approval_id": approval_id, "approval_decision": normalized},
+                        payload={
+                            "approval_id": approval_id,
+                            "approval_decision": normalized,
+                            "remember_for_session": bool(normalized.get("remember_for_session")),
+                            "validation_candidate": (state.get("pending_approval") or {}).get("validation_candidate"),
+                        },
                     )
                 ),
                 "pending_approval": None,

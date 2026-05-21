@@ -48,6 +48,13 @@ from repooperator_worker.agent_core.graph_state import (  # noqa: E402
     result_from_snapshot,
     result_to_snapshot,
 )
+from repooperator_worker.agent_core.graph.nodes.apply import await_approval_node  # noqa: E402
+from repooperator_worker.agent_core.graph.nodes.git import (  # noqa: E402
+    git_await_pr_approval_node,
+    git_await_push_approval_node,
+    git_propose_commit_summary_node,
+)
+from repooperator_worker.agent_core.graph.nodes.validation import parse_validation_result_node  # noqa: E402
 from repooperator_worker.agent_core.change_set import (  # noqa: E402
     ProposedFileChange,
     ChangePlan,
@@ -56,6 +63,7 @@ from repooperator_worker.agent_core.change_set import (  # noqa: E402
 )
 from repooperator_worker.agent_core.controller_graph import run_controller_graph  # noqa: E402
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator  # noqa: E402
+from repooperator_worker.agent_core.validation_selector import ValidationCommandSelector  # noqa: E402
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
 from repooperator_worker.services.agent_run_coordinator import resume_approval, wait_for_approval  # noqa: E402
 from repooperator_worker.services.event_service import get_run, list_run_events, start_active_run  # noqa: E402
@@ -121,6 +129,11 @@ class LangGraphRuntimeTests(unittest.TestCase):
             "await_change_approval",
             "apply_change_set",
             "post_apply_validation",
+            "select_validation_commands",
+            "preview_command",
+            "await_validation_approval",
+            "run_validation_command",
+            "parse_validation_result",
             "final_synthesis",
             "supervisor",
             "capability_discovery",
@@ -164,6 +177,150 @@ class LangGraphRuntimeTests(unittest.TestCase):
         ]
         for graph in subgraphs:
             self.assertIsNotNone(graph.compile())
+
+    def test_python_changed_file_selects_py_compile_validation(self) -> None:
+        selection = ValidationCommandSelector().select(
+            project_path=str(self.repo),
+            changed_files=["app.py"],
+            user_request="Update app.py",
+            permission_mode="basic",
+        )
+        self.assertIsNotNone(selection.selected)
+        self.assertEqual(["python", "-m", "py_compile", "app.py"], selection.selected.command)
+        self.assertEqual("syntax_only", selection.selected.safety_classification)
+
+    def test_node_package_selects_npm_scripts_only_if_present(self) -> None:
+        (self.repo / "package.json").write_text('{"scripts":{"build":"vite build"}}', encoding="utf-8")
+        (self.repo / "src.js").write_text("const ok = true;\n", encoding="utf-8")
+        selection = ValidationCommandSelector().select(
+            project_path=str(self.repo),
+            changed_files=["src.js"],
+            user_request="Update JS",
+            permission_mode="basic",
+        )
+        commands = [candidate.command for candidate in selection.candidates]
+        self.assertIn(["node", "--check", "src.js"], commands)
+        self.assertIn(["npm", "run", "build"], commands)
+        self.assertNotIn(["npm", "test"], commands)
+
+    def test_unsafe_validation_command_requires_approval(self) -> None:
+        (self.repo / "package.json").write_text('{"scripts":{"test":"vitest run"}}', encoding="utf-8")
+        (self.repo / "src.js").write_text("const ok = true;\n", encoding="utf-8")
+        selection = ValidationCommandSelector().select(
+            project_path=str(self.repo),
+            changed_files=["src.js"],
+            user_request="Update JS",
+            permission_mode="basic",
+        )
+        npm_test = next(candidate for candidate in selection.candidates if candidate.command == ["npm", "test"])
+        self.assertTrue(npm_test.requires_approval)
+
+    def test_validation_failure_appears_in_final_answer(self) -> None:
+        state = {
+            "request_snapshot": request_to_snapshot(self._request("Apply the approved change set.")),
+            "run_id": "run-validation-failed",
+            "repo": str(self.repo),
+            "apply_status": "applied",
+            "files_changed": ["app.js"],
+            "final_response": "Applied the approved ChangeSetProposal.",
+            "validation_command_selection": {
+                "selected": {"command": ["node", "--check", "app.js"], "display_command": "node --check app.js"},
+                "candidates": [],
+            },
+            "action_results": [
+                result_to_snapshot(
+                    ActionResult(
+                        action_id="act-validation",
+                        status="failed",
+                        observation="SyntaxError: Unexpected token",
+                        command_result={
+                            "command": ["node", "--check", "app.js"],
+                            "display_command": "node --check app.js",
+                            "exit_code": 1,
+                            "stderr": "SyntaxError: Unexpected token",
+                        },
+                    )
+                )
+            ],
+        }
+        update = parse_validation_result_node(state)
+        self.assertEqual("failed", update["post_apply_validation_status"])
+        self.assertIn("Post-apply validation failed", update["final_response"])
+        self.assertIn("SyntaxError", update["final_response"])
+
+    def test_commit_requires_approval_and_summary_includes_files_and_validation(self) -> None:
+        state = {
+            "request_snapshot": request_to_snapshot(self._request("Apply the approved change set.")),
+            "run_id": "run-commit",
+            "repo": str(self.repo),
+            "apply_status": "applied",
+            "post_apply_validation_status": "passed",
+            "files_changed": ["app.py"],
+            "git_workflow": {"status_checked": True, "diff_checked": True},
+            "change_set_proposal": {"plan": {"summary": "Update app behavior"}, "changes": [{"path": "app.py"}]},
+        }
+        update = git_propose_commit_summary_node(state)
+        self.assertEqual("waiting_approval", update["stop_reason"])
+        self.assertEqual("git_commit", update["pending_approval"]["kind"])
+        summary = update["git_workflow"]["commit_summary"]
+        self.assertEqual(["app.py"], summary["files"])
+        self.assertEqual("passed", summary["validation_status"])
+
+    def test_push_and_pr_require_approval(self) -> None:
+        push = git_await_push_approval_node(
+            {
+                "request_snapshot": request_to_snapshot(self._request("Apply, commit, and push this change.")),
+                "run_id": "run-push",
+                "repo": str(self.repo),
+                "branch": "feature/test",
+                "files_changed": ["app.py"],
+            }
+        )
+        self.assertEqual("waiting_approval", push["stop_reason"])
+        self.assertEqual("git_push", push["pending_approval"]["kind"])
+
+        pr = git_await_pr_approval_node(
+            {
+                "request_snapshot": request_to_snapshot(self._request("Push and open a PR for this change.")),
+                "run_id": "run-pr",
+                "repo": str(self.repo),
+                "branch": "feature/test",
+                "files_changed": ["app.py"],
+                "git_workflow": {"commit_summary": {"message": "Update app", "files": ["app.py"], "validation_status": "passed"}},
+            }
+        )
+        self.assertEqual("waiting_approval", pr["stop_reason"])
+        self.assertEqual("github_create_pr", pr["pending_approval"]["kind"])
+
+    def test_no_git_write_without_applied_change_set_unless_explicit_git_workflow(self) -> None:
+        update = git_propose_commit_summary_node(
+            {
+                "request_snapshot": request_to_snapshot(self._request("Summarize the current result.")),
+                "run_id": "run-no-git",
+                "repo": str(self.repo),
+                "files_changed": ["app.py"],
+                "git_workflow": {"status_checked": True, "diff_checked": True},
+            }
+        )
+        self.assertNotIn("pending_approval", update)
+        self.assertTrue(update["git_workflow"]["blocked"])
+
+    def test_denied_commit_and_push_finalize_safely(self) -> None:
+        for kind, pending in (
+            ("git_commit", {"kind": "git_commit", "message": "Update app", "files": ["app.py"]}),
+            ("git_push", {"kind": "git_push", "remote": "origin", "branch": "feature/test"}),
+        ):
+            with self.subTest(kind=kind), patch("repooperator_worker.agent_core.graph.nodes.apply.interrupt", return_value={"decision": "deny"}):
+                update = await_approval_node(
+                    {
+                        "request_snapshot": request_to_snapshot(self._request("Run git workflow.")),
+                        "run_id": f"run-denied-{kind}",
+                        "repo": str(self.repo),
+                        "pending_approval": pending,
+                    }
+                )
+            self.assertEqual("approval_denied", update["stop_reason"])
+            self.assertIn("No git write was performed", update["final_response"])
 
     def test_run_langgraph_controller_direct_entrypoint_works(self) -> None:
         request = self._request("Summarize README.md")

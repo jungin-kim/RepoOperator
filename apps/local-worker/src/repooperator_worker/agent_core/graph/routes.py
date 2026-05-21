@@ -96,6 +96,22 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         update["events_to_emit"] = [_graph_transition_event(state, "route_next", operation="cancelled")]
         return _with_checkpoint_bump(update)
 
+    if _git_workflow_requested(state) and not state.get("git_workflow") and not state.get("pending_action"):
+        update.update({"next_node": "git_workflow_graph", "pending_action": None})
+        update["events_to_emit"] = [_graph_transition_event(state, "route_next", operation="route_git_workflow", next_node="git_workflow_graph")]
+        update.update(
+            append_visible_rationale(
+                state,
+                node="route_next",
+                action=None,
+                summary="The user explicitly asked for a git workflow, so I am starting with read-only status and diff before any approval-gated write.",
+                basis_refs=[],
+                safety_note="Git writes remain behind explicit approval.",
+                uncertainty=[],
+            )
+        )
+        return _with_checkpoint_bump(update)
+
     from repooperator_worker.agent_core.steering import consume_steering_for_state
 
     consume_steering_for_state(core, request)
@@ -159,6 +175,8 @@ def route_by_stage(state: RepoOperatorGraphState) -> str:
 def route_after_understanding(state: RepoOperatorGraphState) -> str:
     if _should_use_supervisor(state):
         return "decompose_task"
+    if _git_workflow_requested(state) and not state.get("pending_action"):
+        return "git_workflow_graph"
     return _route_to_final_or_action(state)
 
 def route_after_evidence(state: RepoOperatorGraphState) -> str:
@@ -178,8 +196,10 @@ def route_after_validation(state: RepoOperatorGraphState) -> str:
     latest = _latest_result(state)
     if latest and latest.status == "waiting_approval":
         return "await_approval"
-    if state.get("stop_reason") in {"cancelled", "timed_out"}:
+    if state.get("stop_reason") in {"cancelled", "timed_out", "failed"}:
         return "final_synthesis"
+    if _should_start_post_apply_git_workflow(state):
+        return "git_workflow_graph"
     return route_to_final_or_continue(state)
 
 def route_after_change_plan(state: RepoOperatorGraphState) -> str:
@@ -200,8 +220,6 @@ def route_after_approval(state: RepoOperatorGraphState) -> str:
     return route_to_final_or_continue(state)
 
 def route_after_apply(state: RepoOperatorGraphState) -> str:
-    if state.get("apply_status") == "applied" and _git_workflow_requested(state) and not (state.get("git_workflow") or {}).get("commit_proposed"):
-        return "git_workflow_graph"
     return route_to_final_or_continue(state)
 
 def route_after_interrupt_resume(state: RepoOperatorGraphState) -> str:
@@ -209,7 +227,9 @@ def route_after_interrupt_resume(state: RepoOperatorGraphState) -> str:
         if _pending_action(state).type == "apply_change_set":
             return "apply_change_set"
         if _pending_action(state).type in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
-            return "execute_tool"
+            return "git_workflow_graph"
+        if _pending_action(state).type == "run_validation_command":
+            return "run_validation_command"
         return "execute_tool"
     if state.get("stop_reason") == "approval_denied":
         return "final_synthesis"
@@ -240,6 +260,14 @@ def _route_to_final_or_action(state: RepoOperatorGraphState) -> str:
         return "apply_change_set"
     if action.type in {"git_status", "git_diff", "git_log", "git_branch_create", "git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
         return "execute_tool"
-    if action.type in {"preview_command", "inspect_git_state", "run_approved_command", "request_command_approval"}:
+    if action.type in {"preview_command", "inspect_git_state", "run_approved_command", "run_validation_command", "request_command_approval"}:
         return "execute_tool"
     return "execute_tool"
+
+def _should_start_post_apply_git_workflow(state: RepoOperatorGraphState) -> bool:
+    if state.get("apply_status") != "applied":
+        return False
+    if state.get("post_apply_validation_status") == "failed":
+        return False
+    workflow = state.get("git_workflow") if isinstance(state.get("git_workflow"), dict) else {}
+    return not bool(workflow.get("commit_proposed") or workflow.get("blocked"))

@@ -161,7 +161,7 @@ export type AgentRunPayload = {
   files_read: string[];
   response: string;
   // Response metadata
-  response_type?: "assistant_answer" | "change_proposal" | "edit_applied" | "permission_required" | "clarification" | "proposal_error" | "command_approval" | "command_result" | "command_denied" | "command_error" | "agent_error";
+  response_type?: "assistant_answer" | "change_proposal" | "edit_applied" | "permission_required" | "clarification" | "proposal_error" | "command_approval" | "command_result" | "command_denied" | "command_error" | "git_approval" | "agent_error";
   proposal_relative_path?: string | null;
   proposal_original_content?: string | null;
   proposal_proposed_content?: string | null;
@@ -214,8 +214,86 @@ export type AgentRunPayload = {
   apply_status?: string | null;
   applied_change_set_id?: string | null;
   post_apply_validation_status?: string | null;
+  validation_command_selection?: ValidationCommandSelectionPayload | null;
+  validation_result?: ValidationResultPayload | null;
+  validation_commands?: ValidationCommandCandidatePayload[];
+  git_workflow?: GitWorkflowPayload | null;
+  git_approval?: GitApprovalPayload | null;
   loop_iteration?: number;
   stop_reason?: string | null;
+};
+
+export type ValidationCommandCandidatePayload = {
+  command: string[];
+  display_command?: string;
+  reason?: string;
+  safety_classification?: string;
+  language?: string;
+  project_type?: string;
+  requires_approval?: boolean;
+  blocked?: boolean;
+  preview?: Record<string, unknown>;
+};
+
+export type ValidationCommandSelectionPayload = {
+  changed_files?: string[];
+  repo_files?: string[];
+  language?: string;
+  project_type?: string;
+  user_request?: string;
+  available_scripts?: Record<string, string>;
+  permission_mode?: string;
+  candidates?: ValidationCommandCandidatePayload[];
+  selected_index?: number | null;
+  selected?: ValidationCommandCandidatePayload | null;
+  reason?: string;
+};
+
+export type ValidationResultPayload = {
+  kind?: string;
+  status?: string;
+  command?: string[];
+  display_command?: string;
+  candidate_commands?: ValidationCommandCandidatePayload[];
+  errors?: string[];
+  output?: string;
+  reason?: string;
+};
+
+export type GitWorkflowPayload = {
+  status_checked?: boolean;
+  diff_checked?: boolean;
+  commit_proposed?: boolean;
+  commit_message?: string;
+  files?: string[];
+  commit_summary?: {
+    message?: string;
+    files?: string[];
+    validation_status?: string;
+    status_text?: string;
+    diff_excerpt?: string;
+  };
+  commit_completed?: boolean;
+  commit_sha?: string;
+  push_completed?: boolean;
+  blocked?: boolean;
+  block_reason?: string;
+};
+
+export type GitApprovalPayload = {
+  kind: "git_commit" | "git_push" | "github_create_pr" | "gitlab_create_mr" | string;
+  title?: string;
+  message?: string | null;
+  files?: string[];
+  remote?: string | null;
+  branch?: string | null;
+  source_branch?: string | null;
+  target_branch?: string | null;
+  review_title?: string | null;
+  body?: string | null;
+  reason?: string;
+  commit_summary?: GitWorkflowPayload["commit_summary"];
+  command_approval?: CommandApprovalPayload;
 };
 
 export type ChangeSetProposalPayload = {

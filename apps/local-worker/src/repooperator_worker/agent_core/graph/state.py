@@ -93,6 +93,7 @@ class RepoOperatorGraphState(TypedDict, total=False):
     pending_approval: dict[str, Any] | None
     change_set_proposal: dict[str, Any] | None
     validation_results: Annotated[list[dict[str, Any]], append_items]
+    validation_command_selection: dict[str, Any] | None
     repair_attempts: int
     final_response: str
     response_snapshot: dict[str, Any] | None
@@ -192,6 +193,7 @@ def initial_graph_state(
         "pending_approval": None,
         "change_set_proposal": None,
         "validation_results": [],
+        "validation_command_selection": None,
         "repair_attempts": 0,
         "final_response": "",
         "response_snapshot": None,

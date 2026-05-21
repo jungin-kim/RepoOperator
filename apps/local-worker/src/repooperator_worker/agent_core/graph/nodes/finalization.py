@@ -159,9 +159,10 @@ def final_emit_message_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     }
 
 def _response_with_change_set_payload(response: AgentRunResponse, state: RepoOperatorGraphState) -> AgentRunResponse:
+    workflow_updates = _workflow_response_updates(state)
     proposal = state.get("change_set_proposal")
     if not isinstance(proposal, dict) or not proposal.get("changes"):
-        return response
+        return response.model_copy(update=json_safe(workflow_updates)) if workflow_updates else response
     validation = proposal.get("validation") if isinstance(proposal.get("validation"), dict) else {}
     validation_status = str(validation.get("status") or proposal.get("status") or "planned")
     errors = [str(item) for item in validation.get("errors") or proposal.get("proposal_errors") or []]
@@ -176,6 +177,7 @@ def _response_with_change_set_payload(response: AgentRunResponse, state: RepoOpe
     else:
         response_type = "change_proposal" if validation_status == "valid" else "proposal_error"
     updates: dict[str, Any] = {
+        **workflow_updates,
         "response_type": response_type,
         "change_set_proposal": json_safe(proposal),
         "edit_archive": archive,
@@ -200,7 +202,100 @@ def _response_with_change_set_payload(response: AgentRunResponse, state: RepoOpe
                 "selected_target_file": first.get("path"),
             }
         )
+    if workflow_updates.get("git_approval"):
+        updates["response_type"] = "git_approval"
+        updates["response"] = workflow_updates.get("response")
+        updates["command_approval"] = workflow_updates.get("command_approval")
     return response.model_copy(update=json_safe(updates))
+
+def _workflow_response_updates(state: RepoOperatorGraphState) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    selection = state.get("validation_command_selection") if isinstance(state.get("validation_command_selection"), dict) else None
+    validation_results = [item for item in state.get("validation_results") or [] if isinstance(item, dict)]
+    latest_validation = validation_results[-1] if validation_results else None
+    if selection:
+        updates["validation_command_selection"] = json_safe(selection)
+        updates["validation_commands"] = list(selection.get("candidates") or [])
+    if latest_validation:
+        updates["validation_result"] = json_safe(latest_validation)
+    if state.get("post_apply_validation_status"):
+        updates["post_apply_validation_status"] = state.get("post_apply_validation_status")
+
+    workflow = state.get("git_workflow") if isinstance(state.get("git_workflow"), dict) else None
+    if workflow:
+        updates["git_workflow"] = json_safe(workflow)
+    pending = state.get("pending_approval") if isinstance(state.get("pending_approval"), dict) else {}
+    if pending.get("kind") in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+        git_approval = _git_approval_payload(pending)
+        updates["git_approval"] = git_approval
+        updates["command_approval"] = git_approval.get("command_approval")
+        updates["response_type"] = "git_approval"
+        updates["response"] = _git_approval_text(git_approval)
+    return updates
+
+def _git_approval_payload(pending: dict[str, Any]) -> dict[str, Any]:
+    kind = str(pending.get("kind") or "")
+    command: list[str]
+    title: str
+    if kind == "git_commit":
+        message = str(pending.get("message") or "")
+        command = ["git", "commit", "-m", message]
+        title = "Commit approval required"
+    elif kind == "git_push":
+        remote = str(pending.get("remote") or "origin")
+        branch = str(pending.get("branch") or "HEAD")
+        command = ["git", "push", "--set-upstream", remote, branch]
+        title = "Push approval required"
+    elif kind == "gitlab_create_mr":
+        title = "Merge request approval required"
+        command = ["glab", "mr", "create", "--title", str(pending.get("title") or "RepoOperator change set")]
+    else:
+        title = "Pull request approval required"
+        command = ["gh", "pr", "create", "--title", str(pending.get("title") or "RepoOperator change set")]
+    command_approval = {
+        "type": "command_approval",
+        "approval_id": str(pending.get("approval_id") or f"{kind}:approval"),
+        "command": command,
+        "display_command": " ".join(command),
+        "cwd": None,
+        "risk": "medium",
+        "read_only": False,
+        "needs_network": kind in {"git_push", "github_create_pr", "gitlab_create_mr"},
+        "touches_outside_repo": False,
+        "needs_approval": True,
+        "blocked": False,
+        "reason": str(pending.get("reason") or f"{kind} requires approval."),
+        "pattern": " ".join(command[:3]),
+        "options": ["yes", "no_explain"],
+    }
+    return {
+        "kind": kind,
+        "title": title,
+        "message": pending.get("message"),
+        "files": pending.get("files") or [],
+        "remote": pending.get("remote"),
+        "branch": pending.get("branch"),
+        "source_branch": pending.get("source_branch"),
+        "target_branch": pending.get("target_branch"),
+        "review_title": pending.get("title"),
+        "body": pending.get("body") or pending.get("description"),
+        "commit_summary": pending.get("commit_summary"),
+        "reason": command_approval["reason"],
+        "command_approval": command_approval,
+    }
+
+def _git_approval_text(approval: dict[str, Any]) -> str:
+    lines = [str(approval.get("title") or "Git approval required"), str(approval.get("reason") or "This git action requires approval.")]
+    summary = approval.get("commit_summary") if isinstance(approval.get("commit_summary"), dict) else {}
+    if approval.get("message"):
+        lines.append(f"Proposed message: {approval.get('message')}")
+    if summary.get("validation_status"):
+        lines.append(f"Validation status: {summary.get('validation_status')}")
+    files = [str(path) for path in approval.get("files") or []]
+    if files:
+        lines.append("Changed files: " + ", ".join(f"`{path}`" for path in files))
+    lines.append("No git write has been performed yet.")
+    return "\n".join(lines)
 
 def _edit_archive_record_from_change(change: dict[str, Any], validation_status: str) -> dict[str, Any]:
     path = str(change.get("path") or "")

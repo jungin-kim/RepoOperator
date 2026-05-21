@@ -243,6 +243,11 @@ class AgentRunResponse(BaseModel):
     apply_status: str | None = None
     applied_change_set_id: str | None = None
     post_apply_validation_status: str | None = None
+    validation_command_selection: dict | None = None
+    validation_result: dict | None = None
+    validation_commands: list[dict] = []
+    git_workflow: dict | None = None
+    git_approval: dict | None = None
     loop_iteration: int = 0
     stop_reason: str | None = None
 

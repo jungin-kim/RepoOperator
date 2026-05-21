@@ -96,6 +96,124 @@ function CommandResultCard({ result }: { result: CommandResultPayload }) {
   );
 }
 
+function ValidationResultCard({ metadata }: { metadata: AgentRunPayload }) {
+  const result = metadata.validation_result;
+  const status = result?.status || metadata.post_apply_validation_status;
+  if (!status) return null;
+  const commands = result?.candidate_commands || metadata.validation_commands || metadata.validation_command_selection?.candidates || [];
+  return (
+    <div className={`workflow-card workflow-card-${status === "failed" ? "failed" : status === "passed" ? "passed" : "neutral"}`}>
+      <div className="workflow-card-heading">Validation result</div>
+      <dl className="command-card-grid">
+        <div>
+          <dt>Status</dt>
+          <dd>{status}</dd>
+        </div>
+        {result?.display_command ? (
+          <div>
+            <dt>Command</dt>
+            <dd><code>{result.display_command}</code></dd>
+          </div>
+        ) : null}
+        {metadata.validation_command_selection?.language ? (
+          <div>
+            <dt>Project</dt>
+            <dd>{metadata.validation_command_selection.project_type || metadata.validation_command_selection.language}</dd>
+          </div>
+        ) : null}
+      </dl>
+      {commands.length ? (
+        <div className="workflow-command-list">
+          {commands.slice(0, 4).map((candidate) => (
+            <div key={candidate.display_command || candidate.command.join(" ")} className="workflow-command-row">
+              <code>{candidate.display_command || candidate.command.join(" ")}</code>
+              <span>{candidate.requires_approval ? "approval required" : "safe"}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {result?.errors?.length ? <pre className="workflow-card-output">{result.errors.join("\n")}</pre> : null}
+    </div>
+  );
+}
+
+function GitApprovalCard({
+  metadata,
+  onDecision,
+}: {
+  metadata: AgentRunPayload;
+  onDecision?: (metadata: AgentRunPayload, decision: "yes" | "yes_session" | "no_explain") => void;
+}) {
+  const approval = metadata.git_approval;
+  const commandApproval = approval?.command_approval;
+  if (!approval || !commandApproval) return null;
+  const decisionMetadata = { ...metadata, command_approval: commandApproval };
+  return (
+    <div className="workflow-card workflow-card-git">
+      <div className="workflow-card-heading">{approval.title || "Git approval required"}</div>
+      <p>{approval.reason}</p>
+      <dl className="command-card-grid">
+        <div>
+          <dt>Action</dt>
+          <dd>{approval.kind}</dd>
+        </div>
+        {approval.message ? (
+          <div>
+            <dt>Message</dt>
+            <dd>{approval.message}</dd>
+          </div>
+        ) : null}
+        {approval.commit_summary?.validation_status ? (
+          <div>
+            <dt>Validation</dt>
+            <dd>{approval.commit_summary.validation_status}</dd>
+          </div>
+        ) : null}
+        {approval.branch ? (
+          <div>
+            <dt>Branch</dt>
+            <dd>{approval.branch}</dd>
+          </div>
+        ) : null}
+      </dl>
+      {approval.files?.length ? (
+        <div className="workflow-command-list">
+          {approval.files.map((file) => <div key={file} className="workflow-command-row"><code>{file}</code></div>)}
+        </div>
+      ) : null}
+      <div className="command-card-actions">
+        <button type="button" onClick={() => onDecision?.(decisionMetadata, "yes")}>Approve</button>
+        <button type="button" onClick={() => onDecision?.(decisionMetadata, "no_explain")}>Deny</button>
+      </div>
+    </div>
+  );
+}
+
+function CommitSummaryCard({ metadata }: { metadata: AgentRunPayload }) {
+  const summary = metadata.git_workflow?.commit_summary;
+  if (!summary || metadata.git_approval) return null;
+  return (
+    <div className="workflow-card workflow-card-git">
+      <div className="workflow-card-heading">Commit summary preview</div>
+      <dl className="command-card-grid">
+        <div>
+          <dt>Message</dt>
+          <dd>{summary.message}</dd>
+        </div>
+        <div>
+          <dt>Validation</dt>
+          <dd>{summary.validation_status || "unknown"}</dd>
+        </div>
+      </dl>
+      {summary.files?.length ? (
+        <div className="workflow-command-list">
+          {summary.files.map((file) => <div key={file} className="workflow-command-row"><code>{file}</code></div>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ChangedFilesArchive({ records }: { records?: EditArchiveRecord[] }) {
   const [selected, setSelected] = useState<EditArchiveRecord | null>(null);
   if (!records?.length) return null;
@@ -591,6 +709,13 @@ export function ChatMessages({
                     writeMode={writeMode}
                     onStatusChange={onProposalStatusChange ?? (() => {})}
                   />
+                  {msg.metadata ? (
+                    <>
+                      <ValidationResultCard metadata={msg.metadata} />
+                      <CommitSummaryCard metadata={msg.metadata} />
+                      <GitApprovalCard metadata={msg.metadata} onDecision={onCommandDecision} />
+                    </>
+                  ) : null}
                 </>
               ) : msg.role === "assistant" && msg.metadata?.response_type === "permission_required" ? (
                 <div className="message-bubble message-bubble-permission">
@@ -622,6 +747,8 @@ export function ChatMessages({
                 </div>
               ) : msg.role === "assistant" && msg.metadata?.response_type === "command_approval" ? (
                 <CommandApprovalCard metadata={msg.metadata} onDecision={onCommandDecision} />
+              ) : msg.role === "assistant" && msg.metadata?.response_type === "git_approval" ? (
+                <GitApprovalCard metadata={msg.metadata} onDecision={onCommandDecision} />
               ) : msg.role === "assistant" && msg.metadata?.response_type === "command_result" && msg.metadata.command_result ? (
                 <CommandResultCard result={msg.metadata.command_result as CommandResultPayload} />
               ) : msg.role === "assistant" && msg.metadata?.response_type === "command_denied" ? (
@@ -646,6 +773,12 @@ export function ChatMessages({
                     <AgentActivityTranscript steps={msg.progressSteps} done={true} />
                   ) : null}
                   <ChangedFilesArchive records={msg.metadata?.edit_archive} />
+                  {msg.metadata ? (
+                    <>
+                      <ValidationResultCard metadata={msg.metadata} />
+                      <CommitSummaryCard metadata={msg.metadata} />
+                    </>
+                  ) : null}
                   <MarkdownContent content={msg.content} />
                 </div>
               ) : msg.role === "system" ? (
