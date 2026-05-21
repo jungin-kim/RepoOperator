@@ -34,7 +34,8 @@ def capability_discovery_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     snapshot = {
         "capabilities": registry.specs_for_model(),
         "tool_capabilities": registry.tool_map(),
-        "available_tools": tool_registry.allowed_action_types(),
+        "available_tools": [item["name"] for item in tool_registry.specs_for_model()],
+        "all_tools": tool_registry.allowed_action_types(),
     }
     return _with_checkpoint_bump(
         {

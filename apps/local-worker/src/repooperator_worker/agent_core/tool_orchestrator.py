@@ -177,7 +177,7 @@ class ToolOrchestrator:
                     "permission_audit": audit.model_dump(),
                 },
             )
-        result = self._cap_result(result, max_chars=tool.spec.max_result_chars, tool_name=tool_name)
+        result = self._cap_result(result, max_chars=tool.spec.max_result_size_chars, tool_name=tool_name)
         post_hook = self.hook_manager.run_post_tool(tool_name=tool_name, payload=validated, result=result, run_id=self.run_id, request=self.request)
         if not post_hook.continue_ or post_hook.decision == "deny":
             return ToolResult(

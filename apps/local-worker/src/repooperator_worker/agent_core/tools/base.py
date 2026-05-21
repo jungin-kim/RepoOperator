@@ -10,6 +10,9 @@ from repooperator_worker.services.json_safe import json_safe
 
 
 ToolStatus = Literal["success", "skipped", "failed", "waiting_approval", "cancelled", "timed_out"]
+ToolSideEffectLevel = Literal["none", "read", "write", "command", "network", "remote_write"]
+ToolInterruptBehavior = Literal["none", "approval", "cancellable", "background"]
+OversizedResultStrategy = Literal["inline_preview", "artifact_ref", "reject"]
 ToolOperation = Literal[
     "list_files",
     "search",
@@ -44,16 +47,71 @@ class ToolSpec:
     read_only: bool
     concurrency_safe: bool
     requires_approval_by_default: bool = False
-    max_result_chars: int = 100_000
-    side_effect_level: Literal["none", "read", "write", "command"] = "none"
-    permission_required: bool = False
-    parallel_safe: bool = True
+    side_effect_level: ToolSideEffectLevel = "none"
+    is_destructive: bool = False
+    is_open_world: bool = False
     workspace_bound: bool = True
     network_access: bool = False
+    interrupt_behavior: ToolInterruptBehavior = "none"
+    can_be_retried: bool = True
+    idempotent: bool = True
+    should_defer: bool = False
+    always_load: bool = False
+    tool_search_keywords: tuple[str, ...] = ()
+    capability_names: tuple[str, ...] = ()
+    prompt_summary: str = ""
+    input_schema_summary: str = ""
+    output_schema_summary: str = ""
+    max_result_size_chars: int = 100_000
+    oversized_result_strategy: OversizedResultStrategy = "artifact_ref"
     produces_artifact: bool = False
     produces_evidence: bool = False
-    can_be_retried: bool = True
+    evidence_kind: str | None = None
+    progress_kind: str = "none"
+    ui_renderer_kind: str = "text"
+    grouped_display_key: str = ""
+    compact_label_template: str = ""
+    rejected_message_template: str = ""
+    error_message_template: str = ""
+    permission_matcher_kind: str = "none"
+    required_permissions: tuple[str, ...] = ()
+    denial_recovery_hint: str = ""
+    max_result_chars: int = 100_000
+    permission_required: bool = False
+    parallel_safe: bool = True
     capabilities: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.max_result_chars != 100_000 and self.max_result_size_chars == 100_000:
+            max_result_size = int(self.max_result_chars)
+        else:
+            max_result_size = int(self.max_result_size_chars or self.max_result_chars or 100_000)
+        object.__setattr__(self, "max_result_size_chars", max_result_size)
+        object.__setattr__(self, "max_result_chars", max_result_size)
+        if not self.prompt_summary:
+            object.__setattr__(self, "prompt_summary", self.description)
+        if not self.input_schema_summary:
+            object.__setattr__(self, "input_schema_summary", summarize_input_schema(self.input_schema))
+        if not self.output_schema_summary:
+            object.__setattr__(
+                self,
+                "output_schema_summary",
+                "Returns status, observation, payload metadata, files read/changed, and optional command result.",
+            )
+        if not self.compact_label_template:
+            object.__setattr__(self, "compact_label_template", self.name.replace("_", " "))
+        if not self.grouped_display_key:
+            object.__setattr__(self, "grouped_display_key", self.operation)
+        if not self.rejected_message_template:
+            object.__setattr__(self, "rejected_message_template", "{tool_name} was not approved.")
+        if not self.error_message_template:
+            object.__setattr__(self, "error_message_template", "{tool_name} failed.")
+        if not self.denial_recovery_hint:
+            object.__setattr__(self, "denial_recovery_hint", "Adjust the request or ask for explicit approval before retrying.")
+        if not self.capability_names and self.capabilities:
+            object.__setattr__(self, "capability_names", tuple(self.capabilities))
+        if not self.capabilities and self.capability_names:
+            object.__setattr__(self, "capabilities", tuple(self.capability_names))
 
     def model_dump(self) -> dict[str, Any]:
         return json_safe(
@@ -65,18 +123,57 @@ class ToolSpec:
                 "read_only": self.read_only,
                 "concurrency_safe": self.concurrency_safe,
                 "requires_approval_by_default": self.requires_approval_by_default,
-                "max_result_chars": self.max_result_chars,
                 "side_effect_level": self.side_effect_level,
-                "permission_required": self.permission_required,
-                "parallel_safe": self.parallel_safe,
+                "is_destructive": self.is_destructive,
+                "is_open_world": self.is_open_world,
                 "workspace_bound": self.workspace_bound,
                 "network_access": self.network_access,
+                "interrupt_behavior": self.interrupt_behavior,
+                "can_be_retried": self.can_be_retried,
+                "idempotent": self.idempotent,
+                "should_defer": self.should_defer,
+                "always_load": self.always_load,
+                "tool_search_keywords": list(self.tool_search_keywords),
+                "capability_names": list(self.capability_names),
+                "prompt_summary": self.prompt_summary,
+                "input_schema_summary": self.input_schema_summary,
+                "output_schema_summary": self.output_schema_summary,
+                "max_result_size_chars": self.max_result_size_chars,
+                "oversized_result_strategy": self.oversized_result_strategy,
                 "produces_artifact": self.produces_artifact,
                 "produces_evidence": self.produces_evidence,
-                "can_be_retried": self.can_be_retried,
+                "evidence_kind": self.evidence_kind,
+                "progress_kind": self.progress_kind,
+                "ui_renderer_kind": self.ui_renderer_kind,
+                "grouped_display_key": self.grouped_display_key,
+                "compact_label_template": self.compact_label_template,
+                "rejected_message_template": self.rejected_message_template,
+                "error_message_template": self.error_message_template,
+                "permission_matcher_kind": self.permission_matcher_kind,
+                "required_permissions": list(self.required_permissions),
+                "denial_recovery_hint": self.denial_recovery_hint,
+                "max_result_chars": self.max_result_chars,
+                "permission_required": self.permission_required,
+                "parallel_safe": self.parallel_safe,
                 "capabilities": list(self.capabilities),
             }
         )
+
+
+def summarize_input_schema(schema: dict[str, Any]) -> str:
+    if not isinstance(schema, dict):
+        return "Accepts a JSON object."
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = [str(item) for item in schema.get("required") or [] if str(item)]
+    parts: list[str] = []
+    if required:
+        parts.append("required: " + ", ".join(required[:8]))
+    optional = [str(name) for name in properties if str(name) not in required]
+    if optional:
+        parts.append("optional: " + ", ".join(optional[:10]))
+    if not parts:
+        return "Accepts a JSON object."
+    return "; ".join(parts) + "."
 
 
 @dataclass

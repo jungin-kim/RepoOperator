@@ -85,6 +85,11 @@ def propose_next_action_with_model(
     model_client_factory: Callable[[], Any] = OpenAICompatibleModelClient,
 ) -> AgentAction | None:
     registry = get_default_tool_registry()
+    available_tool_specs = registry.specs_for_model(
+        capabilities=_capability_hints_for_model(registry, task_frame),
+        tool_names=task_frame.likely_needed_tools,
+    )
+    available_actions = [str(item["name"]) for item in available_tool_specs if item.get("name")]
     try:
         raw = model_client_factory().generate_text(
             ModelGenerationRequest(
@@ -94,8 +99,8 @@ def propose_next_action_with_model(
                         "task": request.task,
                         "task_frame": json_safe(task_frame),
                         "context_packet": json_safe(state.context_packet or {}),
-                        "available_actions": registry.allowed_action_types(),
-                        "available_tools": registry.specs_for_model(),
+                        "available_actions": available_actions,
+                        "available_tools": available_tool_specs,
                         "state": {
                             "observations": state.observations[-8:],
                             "files_read": state.files_read,
@@ -125,6 +130,13 @@ def propose_next_action_with_model(
     except Exception:
         return None
     return validate_model_next_action(payload, request, state, task_frame)
+
+
+def _capability_hints_for_model(registry, task_frame: TaskFrame) -> list[str]:
+    hints = [str(item).strip() for item in task_frame.likely_capabilities if str(item).strip()]
+    for tool_hint in task_frame.likely_needed_tools:
+        hints.extend(registry.capabilities_for_tool(str(tool_hint), available_only=True))
+    return _dedupe(hints)
 
 
 def validate_model_next_action(payload: dict[str, Any], request: AgentRunRequest, state: AgentCoreState, task_frame: TaskFrame) -> AgentAction | None:
