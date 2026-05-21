@@ -12,6 +12,7 @@ from typing import Any, Iterator
 from repooperator_worker.agent_core.agent_loop import AgentLoop, AgentLoopDeps
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult
 from repooperator_worker.agent_core.context_service import get_default_context_service
+from repooperator_worker.agent_core.context_packer import pack_context
 from repooperator_worker.agent_core.events import append_activity_event, append_work_trace
 from repooperator_worker.agent_core.final_synthesis import (
     _answer_with_model,
@@ -119,6 +120,7 @@ def run_controller_graph(
         )
 
     def synthesize(state_for_answer: AgentCoreState, request_for_answer: AgentRunRequest) -> str:
+        refresh_context_pack_for_core(state_for_answer, request_for_answer, _context_kind_for_core_answer(state_for_answer, request_for_answer), "final_synthesis")
         on_delta = _stream_final_delta(run_id) if stream_final_answer else None
         packet_context = ""
         if isinstance(state_for_answer.context_packet, dict):
@@ -144,7 +146,7 @@ def run_controller_graph(
             check_cancel=check_cancel,
             consume_steering=consume_steering_for_state,
             choose_next_action=controller_choose_next_action,
-            execute_action=orchestrator.execute_action,
+            execute_action=lambda action: _execute_action_with_context_pack(orchestrator, state, request, action),
             append_action_event=append_action_event,
             observe_result=observe_result,
             update_plan=update_plan,
@@ -189,6 +191,7 @@ def classify(state: AgentCoreState, request: AgentRunRequest) -> None:
         understand_request,
         request_understanding_to_classifier_result,
     )
+    refresh_context_pack_for_core(state, request, "summary", "understand_request")
     ru = understand_request(request)
     state.request_understanding = ru
     state.classifier_result = request_understanding_to_classifier_result(ru, request)
@@ -211,6 +214,110 @@ def classify(state: AgentCoreState, request: AgentRunRequest) -> None:
         observation=f"Goal framed with {len(frame.mentioned_files)} mentioned file(s) and {len(frame.likely_capabilities)} likely capability hint(s).",
         aggregate={"task_frame": json_safe(frame), "loop_budget": json_safe(budget)},
     )
+
+
+def refresh_context_pack_for_core(state: AgentCoreState, request: AgentRunRequest, kind: str, trigger_node: str) -> dict[str, Any]:
+    base_context = state.context_packet if isinstance(state.context_packet, dict) else {}
+    packet = pack_context(kind, request, state=_core_context_pack_state(state), base_context=base_context)
+    state.context_packet = json_safe({**dict(base_context or {}), **packet})
+    report = packet.get("context_pack_report") if isinstance(packet.get("context_pack_report"), dict) else {}
+    summary = {
+        "kind": packet.get("kind") or kind,
+        "trigger_node": trigger_node,
+        "compression_ratio": report.get("compression_ratio"),
+        "estimated_input_tokens": report.get("estimated_input_tokens"),
+        "estimated_output_reserve": report.get("estimated_output_reserve"),
+        "included_sections": report.get("included_sections") or [],
+        "excluded_sections": report.get("excluded_sections") or [],
+        "warnings": report.get("warnings") or [],
+        "retained_files": report.get("retained_files") or [],
+        "omitted_files": report.get("omitted_files") or [],
+        "retained_web_sources": report.get("retained_web_sources") or [],
+    }
+    append_activity_event(
+        run_id=state.run_id,
+        request=request,
+        activity_id=f"context-pack:{trigger_node}",
+        event_type="graph_transition",
+        phase="Thinking",
+        label="Packed model context",
+        status="completed",
+        visibility="debug",
+        display="secondary",
+        operation="context_pack",
+        aggregate=json_safe(summary),
+    )
+    return json_safe(packet)
+
+
+def _core_context_pack_state(state: AgentCoreState) -> dict[str, Any]:
+    action_results = [result.model_dump() for result in state.action_results]
+    actions_taken = [action.model_dump() for action in state.actions_taken]
+    proposal: dict[str, Any] | None = None
+    for result in reversed(state.action_results):
+        candidate = result.payload.get("change_set_proposal") if isinstance(result.payload, dict) else None
+        if isinstance(candidate, dict):
+            proposal = candidate
+            break
+    if proposal is None:
+        for result in reversed(state.action_results):
+            proposals = result.payload.get("edit_proposals") if isinstance(result.payload, dict) else None
+            if isinstance(proposals, list) and proposals:
+                proposal = {"proposal_id": result.action_id, "status": result.status, "changes": proposals}
+                break
+    return {
+        "actions_taken": actions_taken,
+        "action_results": action_results,
+        "files_read": list(state.files_read),
+        "files_changed": list(state.files_changed),
+        "commands_run": list(state.commands_run),
+        "pending_approval": state.pending_approval,
+        "change_set_proposal": proposal,
+        "observations": list(state.observations),
+    }
+
+
+def _execute_action_with_context_pack(
+    orchestrator: ToolOrchestrator,
+    state: AgentCoreState,
+    request: AgentRunRequest,
+    action: AgentAction,
+) -> ActionResult:
+    if action.type in {"generate_change_set", "generate_edit"}:
+        refresh_context_pack_for_core(state, request, "edit", "generate_change_set")
+    if action.type == "summarize_web_evidence":
+        refresh_context_pack_for_core(state, request, "web_research", "web_research_summary")
+    return orchestrator.execute_action(action)
+
+
+def _context_kind_for_core_frame(frame: TaskFrame, state: AgentCoreState, request: AgentRunRequest) -> str:
+    if any(result.errors for result in state.action_results):
+        return "repair"
+    if edit_requested(frame):
+        return "edit"
+    if _is_broad_analysis_request(frame):
+        return "broad_analysis"
+    lowered = request.task.lower()
+    if any(term in lowered for term in ("search web", "look up", "latest", "current", "web research")):
+        return "web_research"
+    if pending_commit_context(frame):
+        return "git_workflow"
+    return "summary"
+
+
+def _context_kind_for_core_answer(state: AgentCoreState, request: AgentRunRequest) -> str:
+    frame = build_task_frame(request, state)
+    if any(result.errors for result in state.action_results):
+        return "repair"
+    if any((result.payload or {}).get("web_evidence") or (result.payload or {}).get("web_evidence_summary") for result in state.action_results):
+        return "web_research"
+    if edit_requested(frame) or _latest_edit_proposal(state):
+        return "edit"
+    if _is_broad_analysis_request(frame):
+        return "broad_analysis"
+    if pending_commit_context(frame):
+        return "git_workflow"
+    return "summary"
 
 
 def determine_loop_budget(frame: TaskFrame, request: AgentRunRequest, context_packet: dict[str, Any] | None = None) -> LoopBudget:
@@ -388,6 +495,7 @@ def controller_choose_next_action(state: AgentCoreState, request: AgentRunReques
             payload={"question": question, "missing_evidence": missing, "checked_evidence": checked},
         )
 
+    refresh_context_pack_for_core(state, request, _context_kind_for_core_frame(frame, state, request), "planner")
     planned = planner_propose_next_action_with_model(request, state, frame, model_client_factory=OpenAICompatibleModelClient)
     if planned and not _repeats_ineffective_action(state, planned):
         return planned

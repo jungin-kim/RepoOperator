@@ -37,6 +37,8 @@ const EXCLUDE_DIRS = new Set([
   ".pytest_cache",
   "dist",
   "build",
+  "test-results",
+  "playwright-report",
 ]);
 
 const EXCLUDE_PATTERNS = [
@@ -74,18 +76,15 @@ async function copyFiltered(src, dest) {
 async function main() {
   console.log("prepare-runtime: bundling apps into packages/cli/runtime/");
 
+  await fsp.rm(RUNTIME_DEST, { recursive: true, force: true });
+  await fsp.mkdir(RUNTIME_DEST, { recursive: true });
+
   for (const { src, dest, name } of SOURCES) {
     if (!fs.existsSync(src)) {
       console.error(`ERROR: source not found: ${src}`);
       console.error(`  Make sure you run 'npm pack' from the monorepo root (not a standalone checkout).`);
       process.exit(1);
     }
-
-    // Clean previous bundle
-    if (fs.existsSync(dest)) {
-      await fsp.rm(dest, { recursive: true, force: true });
-    }
-
     await copyFiltered(src, dest);
     console.log(`  bundled ${name} -> ${path.relative(PACKAGE_ROOT, dest)}`);
   }

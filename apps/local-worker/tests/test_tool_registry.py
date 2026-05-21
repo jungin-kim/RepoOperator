@@ -34,6 +34,8 @@ class ToolRegistryTests(unittest.TestCase):
                 "search_web",
                 "fetch_url",
                 "summarize_web_evidence",
+                "refresh_context_pack",
+                "compact_thread_context",
                 "generate_change_set",
                 "validate_change_set",
                 "apply_change_set",

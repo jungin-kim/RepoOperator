@@ -65,6 +65,7 @@ class RepoOperatorGraphState(TypedDict, total=False):
     capability_snapshot: dict[str, Any] | None
     model_profile_snapshot: dict[str, Any] | None
     context_pack_summary: dict[str, Any] | None
+    context_pack_report: dict[str, Any] | None
     short_term_memory: dict[str, Any] | None
     request_understanding_snapshot: dict[str, Any] | None
     classifier_snapshot: dict[str, Any]
@@ -158,6 +159,7 @@ def initial_graph_state(
         "capability_snapshot": None,
         "model_profile_snapshot": None,
         "context_pack_summary": None,
+        "context_pack_report": None,
         "short_term_memory": None,
         "request_understanding_snapshot": None,
         "classifier_snapshot": classifier_to_snapshot(ClassifierResult()),

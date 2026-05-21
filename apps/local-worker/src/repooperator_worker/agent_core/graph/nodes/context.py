@@ -15,7 +15,6 @@ from repooperator_worker.agent_core.graph.adapters import (
     _with_checkpoint_bump,
 )
 from repooperator_worker.agent_core.graph.nodes.supervisor import _frame_is_edit_like, _should_use_supervisor
-from repooperator_worker.agent_core.graph.nodes.web import _web_research_needed
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.services.json_safe import json_safe
@@ -52,42 +51,64 @@ def capability_discovery_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     )
 
 def context_pack_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    return _with_checkpoint_bump(refresh_context_pack_update(state, trigger_node="context_pack"))
+
+def refresh_context_pack_update(
+    state: RepoOperatorGraphState,
+    *,
+    kind: str | None = None,
+    trigger_node: str = "manual",
+) -> dict[str, Any]:
     request = _request(state)
     base_context = state.get("context_packet") if isinstance(state.get("context_packet"), dict) else {}
-    kind = _context_kind_for_state(state)
-    packet = pack_context(kind, request, state=dict(state), base_context=base_context)
+    pack_kind = kind or _context_kind_for_state(state)
+    packet = pack_context(pack_kind, request, state=dict(state), base_context=base_context)
     merged_packet = {**dict(base_context or {}), **packet}
+    report = packet.get("context_pack_report") if isinstance(packet.get("context_pack_report"), dict) else {}
     summary = {
-        "kind": kind,
+        "kind": packet.get("kind") or pack_kind,
+        "trigger_node": trigger_node,
         "compression": packet.get("compression"),
+        "compression_ratio": report.get("compression_ratio"),
+        "estimated_input_tokens": report.get("estimated_input_tokens"),
+        "estimated_output_reserve": report.get("estimated_output_reserve"),
+        "included_sections": report.get("included_sections") or [],
+        "excluded_sections": report.get("excluded_sections") or [],
+        "warnings": report.get("warnings") or [],
         "file_count": len(((packet.get("file_evidence") or {}).get("included_files") or {})),
+        "retained_files": report.get("retained_files") or [],
+        "omitted_files": report.get("omitted_files") or [],
+        "retained_web_sources": report.get("retained_web_sources") or [],
     }
-    return _with_checkpoint_bump(
-        {
-            "context_packet": json_safe(merged_packet),
-            "model_profile_snapshot": packet.get("model_profile"),
-            "context_pack_summary": json_safe(summary),
-            "short_term_memory": packet.get("short_term_memory"),
-            "events_to_emit": [
-                _graph_transition_event(
-                    state,
-                    "context_pack",
-                    operation="context_pack",
-                    aggregate=summary,
-                )
-            ],
-        }
-    )
+    return {
+        "context_packet": json_safe(merged_packet),
+        "model_profile_snapshot": packet.get("model_profile"),
+        "context_pack_summary": json_safe(summary),
+        "context_pack_report": json_safe(report),
+        "short_term_memory": packet.get("short_term_memory"),
+        "events_to_emit": [
+            _graph_transition_event(
+                state,
+                "context_pack",
+                operation="context_pack",
+                aggregate=summary,
+            )
+        ],
+    }
 
 def _context_kind_for_state(state: RepoOperatorGraphState) -> str:
+    from repooperator_worker.agent_core.graph.nodes.web import _web_research_needed
+
     if state.get("repair_attempts") or state.get("proposal_errors"):
-        return "repair_context"
+        return "repair"
     if state.get("validation_results"):
-        return "validation_context"
+        return "validation"
     if state.get("change_set_proposal") or _frame_is_edit_like(state):
-        return "edit_context"
+        return "edit"
     if _web_research_needed(state):
-        return "web_research_context"
+        return "web_research"
     if _should_use_supervisor(state):
-        return "broad_analysis_context"
-    return "summary_context"
+        return "broad_analysis"
+    if state.get("git_workflow"):
+        return "git_workflow"
+    return "summary"

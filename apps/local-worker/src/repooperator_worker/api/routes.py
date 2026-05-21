@@ -86,6 +86,7 @@ from repooperator_worker.services.routine_service import get_default_routine_sto
 from repooperator_worker.services.thread_service import list_threads, upsert_thread
 from repooperator_worker.services.tool_service import get_tools_status, preview_tool_run, run_tool
 from repooperator_worker.services.debug_service import (
+    get_debug_context_status,
     get_debug_runtime_status,
     integration_status,
 )
@@ -175,6 +176,11 @@ def debug_runtime() -> dict:
 @router.get("/debug/memory")
 def debug_memory() -> dict:
     return list_memory_items()
+
+
+@router.get("/debug/context")
+def debug_context() -> dict:
+    return get_debug_context_status()
 
 
 @router.get("/debug/skills")

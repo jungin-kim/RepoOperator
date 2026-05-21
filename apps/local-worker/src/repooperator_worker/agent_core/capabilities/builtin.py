@@ -35,7 +35,7 @@ GIT_PROVIDER_TOOLS = [
     "gitlab_create_mr",
 ]
 ROUTINE_TOOLS = ["routine_list", "routine_create", "routine_enable", "routine_run_now", "routine_runs"]
-CONTEXT_MEMORY_TOOLS = ["ask_clarification", "final_answer"]
+CONTEXT_MEMORY_TOOLS = ["ask_clarification", "final_answer", "refresh_context_pack", "compact_thread_context"]
 VALIDATION_TOOLS = ["validate_change_set", "run_validation_command"]
 MULTI_AGENT_TOOLS: list[str] = []
 

@@ -11,11 +11,13 @@ from repooperator_worker.agent_core.graph.adapters import (
     _core_state_from_graph,
     _graph_transition_event,
     _invoke_subgraph_delta,
+    _merge_updates,
     _pending_action,
     _request,
     _task_frame,
     _with_checkpoint_bump,
 )
+from repooperator_worker.agent_core.graph.nodes.context import refresh_context_pack_update
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import response_to_snapshot
 from repooperator_worker.agent_core.graph.nodes.web import _web_source_notes_for_final
@@ -51,11 +53,13 @@ def ask_clarification_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def final_synthesis_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     from repooperator_worker.agent_core.graph.builder import build_finalization_graph
 
-    update = _invoke_subgraph_delta(build_finalization_graph, state)
+    context_update = refresh_context_pack_update(state, trigger_node="final_synthesis")
+    working_state = {**dict(state), **{key: value for key, value in context_update.items() if key != "events_to_emit"}}
+    update = _invoke_subgraph_delta(build_finalization_graph, working_state)
     update.setdefault("events_to_emit", []).append(
         _graph_transition_event(state, "final_synthesis", subgraph="finalization_graph", operation="final_synthesis")
     )
-    return _with_checkpoint_bump(update)
+    return _with_checkpoint_bump(_merge_updates(context_update, update))
 
 def final_quality_guard_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     return {

@@ -703,6 +703,75 @@ class SummarizeWebEvidenceTool(BaseTool):
         )
 
 
+class RefreshContextPackTool(BaseTool):
+    spec = ToolSpec(
+        name="refresh_context_pack",
+        description="Refresh the task-specific model context pack and return debug-safe report data only.",
+        operation="custom",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["summary", "edit", "repair", "validation", "broad_analysis", "web_research", "git_workflow"],
+                },
+                "state": {"type": "object"},
+            },
+            "additionalProperties": True,
+        },
+        read_only=True,
+        concurrency_safe=True,
+        side_effect_level="none",
+        produces_evidence=True,
+        evidence_kind="context_pack",
+        max_result_chars=120_000,
+    )
+
+    def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        from repooperator_worker.agent_core.context_packer import pack_context
+
+        kind = str(payload.get("kind") or "summary")
+        state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+        base_context = payload.get("base_context") if isinstance(payload.get("base_context"), dict) else {}
+        packet = pack_context(kind, context.request, state=state, base_context=base_context)
+        report = packet.get("context_pack_report") if isinstance(packet.get("context_pack_report"), dict) else {}
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success",
+            observation=f"Refreshed {packet.get('kind') or kind} context pack; raw context is available only inside the runtime state.",
+            payload={
+                "context_pack_report": report,
+                "context_pack_summary": packet.get("context_pack_summary"),
+                "short_term_memory": packet.get("short_term_memory"),
+            },
+        )
+
+
+class CompactThreadContextTool(RefreshContextPackTool):
+    spec = ToolSpec(
+        name="compact_thread_context",
+        description="Compact current thread evidence into short-term memory and a JSON-safe context pack report.",
+        operation="custom",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["summary", "edit", "repair", "validation", "broad_analysis", "web_research", "git_workflow"],
+                },
+                "state": {"type": "object"},
+            },
+            "additionalProperties": True,
+        },
+        read_only=True,
+        concurrency_safe=True,
+        side_effect_level="none",
+        produces_evidence=True,
+        evidence_kind="context_pack",
+        max_result_chars=120_000,
+    )
+
+
 class _GitTool(BaseTool):
     permission_level = "git_read"
 

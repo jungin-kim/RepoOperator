@@ -2,7 +2,7 @@ from repooperator_worker.config import get_settings
 from repooperator_worker.agent_core.model_profile import detect_model_profile
 from repooperator_worker.services.active_repository import get_active_repository
 from repooperator_worker.services.composio_service import get_composio_status
-from repooperator_worker.services.event_service import get_active_runs, list_recent_runs
+from repooperator_worker.services.event_service import get_active_runs, list_recent_runs, list_run_events
 from repooperator_worker.services.memory_service import list_memory_items
 from repooperator_worker.services.permissions_service import permission_profile
 from repooperator_worker.services.skills_service import discover_skills
@@ -51,6 +51,18 @@ def get_debug_runtime_status() -> dict:
     }
 
 
+def get_debug_context_status() -> dict:
+    settings = get_settings()
+    model_profile = detect_model_profile(settings=settings).model_dump()
+    packs = _recent_context_pack_events()
+    latest = packs[0] if packs else None
+    return {
+        "model_profile": model_profile,
+        "latest_pack": latest,
+        "recent_packs": packs,
+    }
+
+
 def integration_status() -> dict:
     try:
         status = get_composio_status()
@@ -65,3 +77,56 @@ def integration_status() -> dict:
             "tools_count": 0,
         }
     return {"integrations": [status]}
+
+
+def _recent_context_pack_events(limit: int = 20) -> list[dict]:
+    run_ids: list[str] = []
+    for run in [*get_active_runs(), *list_recent_runs(limit=30)]:
+        run_id = str(run.get("id") or "")
+        if run_id and run_id not in run_ids:
+            run_ids.append(run_id)
+    packs: list[dict] = []
+    for run_id in run_ids[:30]:
+        for event in reversed(list_run_events(run_id)):
+            summary = _context_pack_summary_from_event(event)
+            if not summary:
+                continue
+            packs.append(
+                {
+                    "run_id": run_id,
+                    "timestamp": event.get("timestamp"),
+                    "thread_id": event.get("thread_id"),
+                    "repo": event.get("repo"),
+                    "branch": event.get("branch"),
+                    "pack_kind": summary.get("kind") or summary.get("pack_kind"),
+                    "trigger_node": summary.get("trigger_node"),
+                    "compression_ratio": summary.get("compression_ratio"),
+                    "estimated_input_tokens": summary.get("estimated_input_tokens"),
+                    "estimated_output_reserve": summary.get("estimated_output_reserve"),
+                    "included_sections": summary.get("included_sections") or [],
+                    "excluded_sections": summary.get("excluded_sections") or [],
+                    "retained_files": summary.get("retained_files") or [],
+                    "omitted_files": summary.get("omitted_files") or [],
+                    "retained_web_sources": summary.get("retained_web_sources") or [],
+                    "warnings": summary.get("warnings") or [],
+                }
+            )
+            if len(packs) >= limit:
+                return packs
+    return packs
+
+
+def _context_pack_summary_from_event(event: dict) -> dict | None:
+    if event.get("operation") != "context_pack" and event.get("event_type") != "context_pack":
+        aggregate = event.get("aggregate") if isinstance(event.get("aggregate"), dict) else {}
+        graph_summary = event.get("change_set_summary") if isinstance(event.get("change_set_summary"), dict) else {}
+        if not aggregate.get("change_set_summary") and not graph_summary:
+            return None
+    aggregate = event.get("aggregate") if isinstance(event.get("aggregate"), dict) else {}
+    if isinstance(aggregate.get("change_set_summary"), dict):
+        return aggregate["change_set_summary"]
+    if isinstance(event.get("change_set_summary"), dict):
+        return event["change_set_summary"]
+    if event.get("operation") == "context_pack":
+        return aggregate
+    return None

@@ -3,9 +3,18 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+type ModelProfileDebug = {
+  provider?: string;
+  model_name?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  compression_strategy?: string;
+  tokenizer_hint?: string;
+};
+
 type RuntimeDebug = {
   worker?: { status?: string; service?: string };
-  model?: { provider?: string | null; connection_mode?: string | null; name?: string | null; base_url?: string | null };
+  model?: { provider?: string | null; connection_mode?: string | null; name?: string | null; base_url?: string | null; profile?: ModelProfileDebug };
   permissions?: {
     write_mode?: string;
     mode?: string;
@@ -56,7 +65,29 @@ type ToolsDebug = {
   permissions: Record<string, string>;
 };
 
-const tabs = ["Dashboard", "Agents", "Memory", "Skills", "Integrations", "Tools", "Events / Runs", "Settings"] as const;
+type ContextPackDebug = {
+  run_id?: string;
+  timestamp?: string;
+  pack_kind?: string;
+  trigger_node?: string;
+  compression_ratio?: number;
+  estimated_input_tokens?: number;
+  estimated_output_reserve?: number;
+  included_sections?: string[];
+  excluded_sections?: string[];
+  retained_files?: string[];
+  omitted_files?: Array<{ path?: string; reason?: string; chars?: number; included_chars?: number }>;
+  retained_web_sources?: Array<{ title?: string | null; url?: string | null; source?: string | null; fetched_at?: string | null }>;
+  warnings?: string[];
+};
+
+type ContextDebug = {
+  model_profile?: ModelProfileDebug;
+  latest_pack?: ContextPackDebug | null;
+  recent_packs?: ContextPackDebug[];
+};
+
+const tabs = ["Dashboard", "Agents", "Context", "Memory", "Skills", "Integrations", "Tools", "Events / Runs", "Settings"] as const;
 type DebugTab = typeof tabs[number];
 
 async function loadJson<T>(url: string): Promise<T> {
@@ -68,6 +99,7 @@ async function loadJson<T>(url: string): Promise<T> {
 export default function DebugPage() {
   const [activeTab, setActiveTab] = useState<DebugTab>("Dashboard");
   const [runtime, setRuntime] = useState<RuntimeDebug | null>(null);
+  const [context, setContext] = useState<ContextDebug | null>(null);
   const [memory, setMemory] = useState<MemoryDebug | null>(null);
   const [skills, setSkills] = useState<SkillsDebug | null>(null);
   const [integrations, setIntegrations] = useState<IntegrationsDebug | null>(null);
@@ -77,14 +109,16 @@ export default function DebugPage() {
   async function load() {
       try {
         setError(null);
-        const [runtimePayload, memoryPayload, skillsPayload, integrationsPayload, toolsPayload] = await Promise.all([
+        const [runtimePayload, contextPayload, memoryPayload, skillsPayload, integrationsPayload, toolsPayload] = await Promise.all([
           loadJson<RuntimeDebug>("/api/worker/debug/runtime"),
+          loadJson<ContextDebug>("/api/worker/debug/context"),
           loadJson<MemoryDebug>("/api/worker/debug/memory"),
           loadJson<SkillsDebug>("/api/worker/debug/skills"),
           loadJson<IntegrationsDebug>("/api/worker/debug/integrations"),
           loadJson<ToolsDebug>("/api/worker/tools"),
         ]);
         setRuntime(runtimePayload);
+        setContext(contextPayload);
         setMemory(memoryPayload);
         setSkills(skillsPayload);
         setIntegrations(integrationsPayload);
@@ -127,6 +161,7 @@ export default function DebugPage() {
         {error && <div className="debug-error">{error}</div>}
         {activeTab === "Dashboard" && <Dashboard runtime={runtime} />}
         {activeTab === "Agents" && <Agents runtime={runtime} />}
+        {activeTab === "Context" && <ContextPanel context={context} />}
         {activeTab === "Memory" && <MemoryPanel memory={memory} />}
         {activeTab === "Skills" && <SkillsPanel skills={skills} />}
         {activeTab === "Integrations" && <IntegrationsPanel integrations={integrations} />}
@@ -196,6 +231,40 @@ function Agents({ runtime }: { runtime: RuntimeDebug | null }) {
       <Row label="Mode" value={runtime?.agent?.orchestration_mode ?? "LangGraph"} />
       <Row label="Write router" value="LangGraph intent and proposal flow" />
     </Card>
+  );
+}
+
+function ContextPanel({ context }: { context: ContextDebug | null }) {
+  const latest = context?.latest_pack;
+  return (
+    <>
+      <Card title="Model Profile">
+        <Row label="Model" value={context?.model_profile?.model_name ?? "-"} />
+        <Row label="Provider" value={context?.model_profile?.provider ?? "-"} />
+        <Row label="Context window" value={String(context?.model_profile?.context_window ?? "-")} />
+        <Row label="Output reserve" value={String(context?.model_profile?.max_output_tokens ?? "-")} />
+        <Row label="Compression" value={context?.model_profile?.compression_strategy ?? "-"} />
+      </Card>
+      <Card title="Latest Context Pack">
+        {latest ? (
+          <>
+            <Row label="Kind" value={latest.pack_kind ?? "-"} />
+            <Row label="Trigger" value={latest.trigger_node ?? "-"} />
+            <Row label="Compression ratio" value={latest.compression_ratio != null ? latest.compression_ratio.toFixed(4) : "-"} />
+            <Row label="Input tokens" value={String(latest.estimated_input_tokens ?? "-")} />
+            <Row label="Output reserve" value={String(latest.estimated_output_reserve ?? "-")} />
+            <Row label="Included" value={latest.included_sections?.join(", ") || "-"} />
+            <Row label="Excluded" value={latest.excluded_sections?.join(", ") || "-"} />
+            <Row label="Warnings" value={latest.warnings?.join(" · ") || "-"} />
+          </>
+        ) : <div className="debug-placeholder">No context pack reports recorded yet.</div>}
+      </Card>
+      <Card title="Included Evidence">
+        <Row label="Retained files" value={latest?.retained_files?.join(", ") || "-"} />
+        <Row label="Omitted files" value={latest?.omitted_files?.map((file) => `${file.path ?? "unknown"} (${file.reason ?? "omitted"})`).join(", ") || "-"} />
+        <Row label="Web sources" value={latest?.retained_web_sources?.map((source) => source.url || source.title || source.source || "source").join(", ") || "-"} />
+      </Card>
+    </>
   );
 }
 

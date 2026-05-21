@@ -18,10 +18,12 @@ from repooperator_worker.agent_core.graph.adapters import (
     _graph_transition_event,
     _invoke_subgraph_delta,
     _latest_result,
+    _merge_updates,
     _pending_action,
     _request,
     _with_checkpoint_bump,
 )
+from repooperator_worker.agent_core.graph.nodes.context import refresh_context_pack_update
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.services.json_safe import json_safe
 
@@ -55,12 +57,14 @@ def plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def generate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     from repooperator_worker.agent_core.graph.builder import build_edit_graph
 
-    update = _invoke_subgraph_delta(build_edit_graph, state)
+    context_update = refresh_context_pack_update(state, kind="edit", trigger_node="generate_change_set")
+    working_state = _state_with_context_update(state, context_update)
+    update = _invoke_subgraph_delta(build_edit_graph, working_state)
     update["routing_stage"] = "after_change_plan"
     update.setdefault("events_to_emit", []).append(
         _graph_transition_event(state, "generate_change_set", subgraph="edit_graph", operation="generate_change_set")
     )
-    return _with_checkpoint_bump(update)
+    return _with_checkpoint_bump(_merge_updates(context_update, update))
 
 def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     latest = _latest_result(state)
@@ -120,17 +124,17 @@ def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     )
 
 def repair_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    context_update = refresh_context_pack_update(state, kind="repair", trigger_node="repair_change_set")
     attempts = int(state.get("repair_attempts") or 0) + 1
-    return _with_checkpoint_bump(
-        {
-            "repair_attempts": attempts,
-            "risk_notes": ["Change-set repair requested after validation failed."],
-            "routing_stage": "after_change_plan",
-            "events_to_emit": [
-                _graph_transition_event(state, "repair_change_set", subgraph="edit_graph", operation="repair_change_set", status="completed")
-            ],
-        }
-    )
+    update = {
+        "repair_attempts": attempts,
+        "risk_notes": ["Change-set repair requested after validation failed."],
+        "routing_stage": "after_change_plan",
+        "events_to_emit": [
+            _graph_transition_event(state, "repair_change_set", subgraph="edit_graph", operation="repair_change_set", status="completed")
+        ],
+    }
+    return _with_checkpoint_bump(_merge_updates(context_update, update))
 
 def edit_locate_targets_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     action = _pending_action(state)
@@ -188,7 +192,11 @@ def edit_plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     }
 
 def edit_generate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
-    return _execute_if_action_type(state, {"generate_change_set", "generate_edit"}, "edit_graph", "generate_change_set")
+    context_update = refresh_context_pack_update(state, kind="edit", trigger_node="generate_change_set")
+    return _merge_updates(
+        context_update,
+        _execute_if_action_type(_state_with_context_update(state, context_update), {"generate_change_set", "generate_edit"}, "edit_graph", "generate_change_set"),
+    )
 
 def edit_validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     latest = _latest_result(state)
@@ -209,12 +217,14 @@ def edit_validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, An
     }
 
 def edit_repair_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    context_update = refresh_context_pack_update(state, kind="repair", trigger_node="repair_change_set")
     attempts = int(state.get("repair_attempts") or 0) + 1
-    return {
+    update = {
         "repair_attempts": attempts,
         "attempts": [{"kind": "repair", "attempt": attempts, "status": "blocked" if attempts > 1 else "queued"}],
         "events_to_emit": [_graph_transition_event(state, "repair_change_set", subgraph="edit_graph", operation="repair_change_set")]
     }
+    return _merge_updates(context_update, update)
 
 def route_edit_after_validation(state: RepoOperatorGraphState) -> str:
     proposal = state.get("change_set_proposal") or {}
@@ -265,3 +275,6 @@ def _final_text_for_change_set(state: RepoOperatorGraphState, proposal: dict[str
             "Review the diff and approve Apply changes to write it to disk.",
         ]
     )
+
+def _state_with_context_update(state: RepoOperatorGraphState, update: dict[str, Any]) -> RepoOperatorGraphState:
+    return {**dict(state), **{key: value for key, value in update.items() if key != "events_to_emit"}}  # type: ignore[return-value]

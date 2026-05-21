@@ -290,6 +290,17 @@ export async function mockDebugRoutes(page: Page, runs: () => ReturnType<typeof 
   await page.route("/api/worker/debug/memory", async (route: Route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], graph: { nodes: [], edges: [] } }) });
   });
+  await page.route("/api/worker/debug/context", async (route: Route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        model_profile: { provider: "mock", model_name: "mock-model", context_window: 128000, max_output_tokens: 4096, compression_strategy: "balanced" },
+        latest_pack: null,
+        recent_packs: [],
+      }),
+    });
+  });
   await page.route("/api/worker/debug/skills", async (route: Route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ skills: [] }) });
   });

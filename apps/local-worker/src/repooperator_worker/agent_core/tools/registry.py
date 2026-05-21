@@ -12,6 +12,7 @@ from repooperator_worker.agent_core.tools.builtin import (
     AnalyzeRepositoryTool,
     ApplyChangeSetTool,
     AskClarificationTool,
+    CompactThreadContextTool,
     CreateFileTool,
     DeleteFileTool,
     FinalAnswerTool,
@@ -32,6 +33,7 @@ from repooperator_worker.agent_core.tools.builtin import (
     ReadFileTool,
     ReadManyFilesTool,
     RenameFileTool,
+    RefreshContextPackTool,
     FetchUrlTool,
     RunValidationCommandTool,
     RunApprovedCommandTool,
@@ -53,6 +55,8 @@ ALWAYS_LOAD_TOOL_NAMES = {
     "generate_change_set",
     "validate_change_set",
     "final_answer",
+    "refresh_context_pack",
+    "compact_thread_context",
 }
 
 DEFERRED_TOOL_NAMES = {
@@ -486,6 +490,8 @@ def get_default_tool_registry() -> ToolRegistry:
             SearchWebTool(),
             FetchUrlTool(),
             SummarizeWebEvidenceTool(),
+            RefreshContextPackTool(),
+            CompactThreadContextTool(),
             GenerateChangeSetTool(),
             ValidateChangeSetTool(),
             ApplyChangeSetTool(),

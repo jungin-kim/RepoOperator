@@ -237,6 +237,8 @@ def _looks_like_malformed_mixed_language(answer: str) -> bool:
 def _looks_like_raw_metadata_dump(answer: str) -> bool:
     text = answer or ""
     lowered = text.lower()
+    if any(marker in lowered for marker in ("context_pack_report", "file_evidence", "short_term_memory", "included_files", "omitted_files")):
+        return True
     if lowered.count('"scripts"') + lowered.count('"dependencies"') + lowered.count('"devdependencies"') >= 2:
         return True
     if len(re.findall(r"https?://img\.shields\.io|badge\.svg|!\[[^\]]*\]\(", text, flags=re.IGNORECASE)) >= 2:

@@ -12,9 +12,11 @@ from repooperator_worker.agent_core.graph.adapters import (
     _graph_transition_event,
     _invoke_subgraph_delta,
     _latest_result,
+    _merge_updates,
     _request,
     _with_checkpoint_bump,
 )
+from repooperator_worker.agent_core.graph.nodes.context import refresh_context_pack_update
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import result_from_snapshot
 
@@ -78,6 +80,8 @@ def web_fetch_sources_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     return updates
 
 def web_summarize_node(state: RepoOperatorGraphState) -> dict[str, Any]:
+    context_update = refresh_context_pack_update(state, kind="web_research", trigger_node="web_research_summary")
+    working_state = {**dict(state), **{key: value for key, value in context_update.items() if key != "events_to_emit"}}
     evidence = dict(state.get("evidence_store") or {})
     records = list(evidence.get("web_evidence") or [])
     action = AgentAction(
@@ -85,7 +89,10 @@ def web_summarize_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         reason_summary="Summarize web evidence with source metadata.",
         payload={"web_evidence": records},
     )
-    return _execute_ad_hoc_action(state, action, subgraph="web_research_graph", node_name="summarize_web_evidence")
+    return _merge_updates(
+        context_update,
+        _execute_ad_hoc_action(working_state, action, subgraph="web_research_graph", node_name="summarize_web_evidence"),
+    )
 
 def web_merge_evidence_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     evidence = dict(state.get("evidence_store") or {})
