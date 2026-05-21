@@ -6,9 +6,17 @@ from typing import Any
 
 from repooperator_worker.config import (
     AVAILABLE_PERMISSION_MODES,
+    PERMISSION_MODE_ACCEPT_EDITS,
     PERMISSION_MODE_AUTO_REVIEW,
+    PERMISSION_MODE_AUTO_READONLY,
     PERMISSION_MODE_BASIC,
+    PERMISSION_MODE_DEFAULT,
     PERMISSION_MODE_FULL_ACCESS,
+    PERMISSION_MODE_HEADLESS_SAFE,
+    PERMISSION_MODE_PLAN_ONLY,
+    PERMISSION_MODE_PROPOSAL_ONLY,
+    PERMISSION_MODE_ROUTINE_SAFE,
+    WRITE_MODE_READ_ONLY,
     WRITE_MODE_AUTO_APPLY,
     get_settings,
 )
@@ -20,6 +28,7 @@ def permission_profile(mode: str | None = None) -> dict[str, Any]:
     if selected == PERMISSION_MODE_FULL_ACCESS:
         return {
             "mode": PERMISSION_MODE_FULL_ACCESS,
+            "coreMode": PERMISSION_MODE_FULL_ACCESS,
             "write_mode": WRITE_MODE_AUTO_APPLY,
             "sandbox": {
                 "scope": "computer",
@@ -42,9 +51,10 @@ def permission_profile(mode: str | None = None) -> dict[str, Any]:
                 "shell": "approved-local-commands",
             },
         }
-    if selected == PERMISSION_MODE_AUTO_REVIEW:
+    if selected in {PERMISSION_MODE_AUTO_REVIEW, PERMISSION_MODE_ACCEPT_EDITS, PERMISSION_MODE_ROUTINE_SAFE}:
         return {
-            "mode": PERMISSION_MODE_AUTO_REVIEW,
+            "mode": selected,
+            "coreMode": PERMISSION_MODE_ACCEPT_EDITS if selected != PERMISSION_MODE_ROUTINE_SAFE else PERMISSION_MODE_ROUTINE_SAFE,
             "write_mode": WRITE_MODE_AUTO_APPLY,
             "sandbox": {
                 "scope": "repository",
@@ -67,8 +77,36 @@ def permission_profile(mode: str | None = None) -> dict[str, Any]:
                 "shell": "sandboxed-with-review",
             },
         }
+    if selected in {PERMISSION_MODE_PLAN_ONLY, PERMISSION_MODE_PROPOSAL_ONLY, PERMISSION_MODE_AUTO_READONLY, PERMISSION_MODE_HEADLESS_SAFE}:
+        return {
+            "mode": selected,
+            "coreMode": selected,
+            "write_mode": WRITE_MODE_READ_ONLY,
+            "sandbox": {
+                "scope": "repository",
+                "allowFileRead": True,
+                "allowFileWrite": False,
+                "allowCommandRun": selected != PERMISSION_MODE_PLAN_ONLY,
+                "allowNetwork": False,
+                "allowOutsideRepo": False,
+            },
+            "approval": {
+                "requireForElevatedActions": True,
+                "requireForNetwork": True,
+                "requireForOutsideRepo": True,
+                "requireForGitCommitPush": True,
+                "requireForDestructiveCommands": True,
+                "interactivePrompts": False if selected == PERMISSION_MODE_HEADLESS_SAFE else True,
+            },
+            "tools": {
+                "git": "read-only" if selected == PERMISSION_MODE_AUTO_READONLY else "approval-gated",
+                "glab": "approval-gated",
+                "shell": "disabled" if selected in {PERMISSION_MODE_PLAN_ONLY, PERMISSION_MODE_HEADLESS_SAFE} else "approval-gated",
+            },
+        }
     return {
-        "mode": PERMISSION_MODE_BASIC,
+        "mode": selected if selected == PERMISSION_MODE_DEFAULT else PERMISSION_MODE_BASIC,
+        "coreMode": PERMISSION_MODE_DEFAULT,
         "write_mode": WRITE_MODE_AUTO_APPLY,
         "sandbox": {
             "scope": "repository",
@@ -133,15 +171,26 @@ def update_permission_mode(mode: str) -> PermissionModeResponse:
 
 def _normalize_mode(value: str | None) -> str:
     if not value:
-        return PERMISSION_MODE_BASIC
+        return PERMISSION_MODE_DEFAULT
     normalized = value.strip().lower().replace("-", "_")
     aliases = {
         "basic": PERMISSION_MODE_BASIC,
+        "default": PERMISSION_MODE_DEFAULT,
         "read_only": PERMISSION_MODE_BASIC,
+        "auto_readonly": PERMISSION_MODE_AUTO_READONLY,
+        "auto_read_only": PERMISSION_MODE_AUTO_READONLY,
+        "readonly": PERMISSION_MODE_AUTO_READONLY,
+        "plan": PERMISSION_MODE_PLAN_ONLY,
+        "plan_only": PERMISSION_MODE_PLAN_ONLY,
+        "proposal": PERMISSION_MODE_PROPOSAL_ONLY,
+        "proposal_only": PERMISSION_MODE_PROPOSAL_ONLY,
         "auto_review": PERMISSION_MODE_AUTO_REVIEW,
+        "accept_edits": PERMISSION_MODE_ACCEPT_EDITS,
         "write_with_approval": PERMISSION_MODE_AUTO_REVIEW,
         "full_access": PERMISSION_MODE_FULL_ACCESS,
         "auto_apply": PERMISSION_MODE_FULL_ACCESS,
+        "routine_safe": PERMISSION_MODE_ROUTINE_SAFE,
+        "headless_safe": PERMISSION_MODE_HEADLESS_SAFE,
     }
     if normalized not in aliases:
         raise ValueError("Unsupported permission mode.")

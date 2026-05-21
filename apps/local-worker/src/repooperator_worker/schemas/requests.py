@@ -450,6 +450,21 @@ class PermissionModeRequest(BaseModel):
             return None
         normalized = value.strip().lower()
         allowed = {
+            "default",
+            "plan",
+            "plan_only",
+            "plan-only",
+            "proposal",
+            "proposal_only",
+            "proposal-only",
+            "accept_edits",
+            "accept-edits",
+            "auto_readonly",
+            "auto-readonly",
+            "routine_safe",
+            "routine-safe",
+            "headless_safe",
+            "headless-safe",
             "basic",
             "auto_review",
             "auto-review",

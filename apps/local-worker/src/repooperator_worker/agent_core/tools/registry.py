@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 from repooperator_worker.agent_core.capabilities.builtin import get_default_capability_registry
 from repooperator_worker.agent_core.capabilities.registry import CapabilityRegistry
+from repooperator_worker.agent_core.permissions import permission_matcher_kind_for_tool
 from repooperator_worker.agent_core.tools.base import Tool, ToolSpec
 from repooperator_worker.agent_core.tools.builtin import (
     AnalyzeRepositoryTool,
@@ -347,17 +348,8 @@ def _required_permissions(name: str, side_effect_level: str, network_access: boo
 
 
 def _permission_matcher_kind(name: str, side_effect_level: str, network_access: bool) -> str:
-    if network_access or name in {"search_web", "fetch_url"}:
-        return "network"
-    if name.startswith("git_") or name.startswith("github_") or name.startswith("gitlab_"):
-        return "git_provider"
-    if side_effect_level == "command":
-        return "command_policy"
-    if name in {"generate_change_set", "validate_change_set", "apply_change_set"}:
-        return "change_set"
-    if side_effect_level in {"read", "write"}:
-        return "workspace"
-    return "none"
+    del side_effect_level, network_access
+    return permission_matcher_kind_for_tool(name).value
 
 
 def _denial_recovery_hint(spec: ToolSpec, side_effect_level: str, network_access: bool, is_destructive: bool) -> str:

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult
-from repooperator_worker.agent_core.permissions import PermissionDecision, PermissionMode, ToolPermissionContext
+from repooperator_worker.agent_core.permissions import PermissionDecision, PermissionMode, ToolPermissionContext, apply_mode_rules_to_decision
 from repooperator_worker.schemas import AgentRunRequest
 from repooperator_worker.services.json_safe import json_safe
 
@@ -236,12 +236,16 @@ class BaseTool:
 
     def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
         if self.spec.read_only:
-            return PermissionDecision.allow("Read-only tool.")
+            decision = PermissionDecision.allow("Read-only tool.")
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
         if self.spec.name in {"generate_edit", "generate_change_set", "validate_change_set"}:
-            return PermissionDecision.allow("Change-set proposal tools are non-mutating and write no files.")
+            decision = PermissionDecision.allow("Change-set proposal tools are non-mutating and write no files.")
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
         if self.spec.requires_approval_by_default or self.spec.permission_required:
-            return PermissionDecision.ask("Tool requires approval by default.")
-        return PermissionDecision.allow("Tool allowed by default policy.")
+            decision = PermissionDecision.ask("Tool requires approval by default.")
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
+        decision = PermissionDecision.allow("Tool allowed by default policy.")
+        return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
 
     def summarize_result(self, result: ToolResult) -> str:
         return result.observation

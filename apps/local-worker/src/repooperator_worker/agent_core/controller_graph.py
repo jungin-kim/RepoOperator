@@ -579,7 +579,17 @@ def observe_result(state: AgentCoreState, action: AgentAction, result: ActionRes
         if result.status == "success" and result.command_result.get("exit_code") is not None:
             state.commands_run.append(command)
     if result.status == "waiting_approval":
-        state.pending_approval = result.command_result
+        if result.command_result:
+            state.pending_approval = result.command_result
+        else:
+            decision = result.payload.get("permission_decision") if isinstance(result.payload, dict) else {}
+            metadata = decision.get("metadata") if isinstance(decision, dict) and isinstance(decision.get("metadata"), dict) else {}
+            state.pending_approval = {
+                "kind": action.type,
+                "reason": result.observation,
+                "approval_payload": decision.get("approval_payload") or metadata.get("approval_payload") or action.payload,
+                "tool_name": action.type,
+            }
     observation = _safe_observation(action, result)
     if observation:
         state.observations.append(observation)

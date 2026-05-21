@@ -24,11 +24,25 @@ AVAILABLE_WRITE_MODES = [
 ]
 PERMISSION_MODE_BASIC = "basic"
 PERMISSION_MODE_AUTO_REVIEW = "auto_review"
+PERMISSION_MODE_DEFAULT = "default"
+PERMISSION_MODE_PLAN_ONLY = "plan_only"
+PERMISSION_MODE_PROPOSAL_ONLY = "proposal_only"
+PERMISSION_MODE_ACCEPT_EDITS = "accept_edits"
+PERMISSION_MODE_AUTO_READONLY = "auto_readonly"
 PERMISSION_MODE_FULL_ACCESS = "full_access"
+PERMISSION_MODE_ROUTINE_SAFE = "routine_safe"
+PERMISSION_MODE_HEADLESS_SAFE = "headless_safe"
 AVAILABLE_PERMISSION_MODES = [
+    PERMISSION_MODE_DEFAULT,
+    PERMISSION_MODE_PLAN_ONLY,
+    PERMISSION_MODE_PROPOSAL_ONLY,
+    PERMISSION_MODE_ACCEPT_EDITS,
+    PERMISSION_MODE_AUTO_READONLY,
     PERMISSION_MODE_BASIC,
     PERMISSION_MODE_AUTO_REVIEW,
     PERMISSION_MODE_FULL_ACCESS,
+    PERMISSION_MODE_ROUTINE_SAFE,
+    PERMISSION_MODE_HEADLESS_SAFE,
 ]
 
 
@@ -343,7 +357,17 @@ def _resolve_write_mode(runtime_config: dict) -> str:
     permission_mode = _resolve_permission_mode(runtime_config)
     if permission_mode == PERMISSION_MODE_FULL_ACCESS:
         return WRITE_MODE_AUTO_APPLY
-    if permission_mode in {PERMISSION_MODE_BASIC, PERMISSION_MODE_AUTO_REVIEW}:
+    if permission_mode in {
+        PERMISSION_MODE_BASIC,
+        PERMISSION_MODE_DEFAULT,
+        PERMISSION_MODE_AUTO_REVIEW,
+        PERMISSION_MODE_ACCEPT_EDITS,
+        PERMISSION_MODE_PLAN_ONLY,
+        PERMISSION_MODE_PROPOSAL_ONLY,
+        PERMISSION_MODE_AUTO_READONLY,
+        PERMISSION_MODE_ROUTINE_SAFE,
+        PERMISSION_MODE_HEADLESS_SAFE,
+    }:
         return WRITE_MODE_AUTO_APPLY
 
     permissions = runtime_config.get("permissions")
@@ -385,6 +409,17 @@ def _normalize_permission_mode(value: str | None) -> str | None:
     lowered = normalized.strip().lower().replace("-", "_")
     aliases = {
         "basic": PERMISSION_MODE_BASIC,
+        "default": PERMISSION_MODE_DEFAULT,
+        "plan": PERMISSION_MODE_PLAN_ONLY,
+        "plan_only": PERMISSION_MODE_PLAN_ONLY,
+        "proposal": PERMISSION_MODE_PROPOSAL_ONLY,
+        "proposal_only": PERMISSION_MODE_PROPOSAL_ONLY,
+        "accept_edits": PERMISSION_MODE_ACCEPT_EDITS,
+        "auto_readonly": PERMISSION_MODE_AUTO_READONLY,
+        "auto_read_only": PERMISSION_MODE_AUTO_READONLY,
+        "readonly": PERMISSION_MODE_AUTO_READONLY,
+        "routine_safe": PERMISSION_MODE_ROUTINE_SAFE,
+        "headless_safe": PERMISSION_MODE_HEADLESS_SAFE,
         "auto_review": PERMISSION_MODE_AUTO_REVIEW,
         "autoreview": PERMISSION_MODE_AUTO_REVIEW,
         "full_access": PERMISSION_MODE_FULL_ACCESS,

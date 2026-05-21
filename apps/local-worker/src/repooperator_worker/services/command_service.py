@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from repooperator_worker.config import PERMISSION_MODE_FULL_ACCESS, get_settings
+from repooperator_worker.config import PERMISSION_MODE_FULL_ACCESS
 from repooperator_worker.services.active_repository import get_active_repository
 from repooperator_worker.services.common import resolve_project_path
 from repooperator_worker.services.event_service import record_event
@@ -185,6 +185,9 @@ def _classify_command(
     if repo_path is None:
         return _preview(approval_id, argv, display, repo_path, "high", False, False, False, True, True, "Open a repository before running local commands.", pattern)
     outside_repo = _touches_outside_repo(argv, str(repo_path))
+    sandbox = profile.get("sandbox") if isinstance(profile.get("sandbox"), dict) else {}
+    if not sandbox.get("allowCommandRun", True):
+        return _preview(approval_id, argv, display, repo_path, "high", False, False, outside_repo, True, True, "Command execution is disabled by the current permission profile.", pattern)
     if outside_repo and profile["mode"] != PERMISSION_MODE_FULL_ACCESS:
         return _preview(approval_id, argv, display, repo_path, "high", False, False, True, True, True, "Commands that access paths outside the active repository are blocked in Basic permissions and Auto review.", pattern)
     if _has_secret_dump(argv):
@@ -195,11 +198,9 @@ def _classify_command(
 
     needs_network = policy_argv[0] in {"curl", "wget", "brew"} or tuple(policy_argv[:2]) in {("npm", "install"), ("pip", "install")}
     read_only = _is_read_only_command(policy_argv)
-    needs_approval = _matches(policy_argv, APPROVAL_PREFIXES) or needs_network
+    needs_approval = not read_only or _matches(policy_argv, APPROVAL_PREFIXES) or needs_network
     if read_only:
         needs_approval = False
-    if profile["mode"] == PERMISSION_MODE_FULL_ACCESS and not needs_network:
-        needs_approval = needs_approval and argv[0] in {"git", "glab"}
 
     risk = "low" if read_only else "medium"
     if needs_network or tuple(argv[:2]) in {("git", "push"), ("glab", "mr")}:

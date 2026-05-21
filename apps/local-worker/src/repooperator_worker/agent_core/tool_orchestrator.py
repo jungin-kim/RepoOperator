@@ -20,6 +20,7 @@ from repooperator_worker.agent_core.events import append_work_trace
 from repooperator_worker.agent_core.tools.registry import ToolRegistry, get_default_tool_registry
 from repooperator_worker.schemas import AgentRunRequest
 from repooperator_worker.services.active_repository import get_active_repository
+from repooperator_worker.config import get_settings
 from repooperator_worker.services.event_service import get_run
 from repooperator_worker.services.json_safe import json_safe, safe_repr
 
@@ -40,7 +41,7 @@ class ToolOrchestrator:
         self.request = request
         self.registry = registry or get_default_tool_registry()
         self.hook_manager = hook_manager or HookManager()
-        self.permission_mode = permission_mode_from_value(permission_mode)
+        self.permission_mode = permission_mode_from_value(permission_mode if permission_mode is not None else _configured_permission_mode())
         self.permission_policy = permission_policy or PermissionPolicy()
         self.artifact_store = artifact_store
         self.prior_denials: list[dict[str, Any]] = []
@@ -138,21 +139,26 @@ class ToolOrchestrator:
         if decision.decision == "ask":
             self.hook_manager.run_permission_request(tool_name=tool_name, payload=validated, run_id=self.run_id, request=self.request)
             metadata = json_safe(decision.metadata)
+            audit_payload = audit.model_dump()
+            self._remember_denial(tool_name=tool_name, decision=decision, audit=audit_payload)
+            next_action = "queue_approval" if self.permission_mode == PermissionMode.ROUTINE_SAFE else "request_approval"
             return ToolResult(
                 tool_name=tool_name,
                 status="waiting_approval",
                 observation=decision.reason or "Tool requires approval.",
                 command_result=metadata.get("command_preview") if isinstance(metadata, dict) else None,
-                payload={"permission_decision": json_safe(decision), "permission_audit": audit.model_dump(), **hook_metadata},
-                next_recommended_action="request_approval",
+                payload={"permission_decision": json_safe(decision), "permission_audit": audit_payload, **hook_metadata},
+                next_recommended_action=next_action,
             )
         if decision.decision == "deny":
-            self.prior_denials.append({"tool": tool_name, "reason": decision.reason, "metadata": json_safe(decision.metadata)})
+            audit_payload = audit.model_dump()
+            self._remember_denial(tool_name=tool_name, decision=decision, audit=audit_payload)
             return ToolResult(
                 tool_name=tool_name,
                 status="failed",
                 observation=decision.reason or "Tool denied by permission policy.",
-                payload={"permission_decision": json_safe(decision), "permission_audit": audit.model_dump(), **hook_metadata},
+                payload={"permission_decision": json_safe(decision), "permission_audit": audit_payload, **hook_metadata},
+                next_recommended_action="blocked_final" if self.permission_mode == PermissionMode.HEADLESS_SAFE else None,
             )
 
         context = ToolExecutionContext(
@@ -187,6 +193,24 @@ class ToolOrchestrator:
                 payload={"hook_decision": post_hook.decision, "hook_reason": post_hook.reason, "original_result": result.model_dump()},
             )
         return result
+
+    def _remember_denial(self, *, tool_name: str, decision: Any, audit: dict[str, Any]) -> None:
+        signature = str(audit.get("action_signature") or "")
+        if not signature:
+            return
+        if any(item.get("signature") == signature and item.get("decision") == decision.decision for item in self.prior_denials):
+            return
+        self.prior_denials.append(
+            {
+                "tool": tool_name,
+                "signature": signature,
+                "decision": decision.decision,
+                "reason": decision.reason,
+                "denial_code": decision.denial_code,
+                "metadata": json_safe(decision.metadata),
+                "audit": audit,
+            }
+        )
 
     def _is_cancelled(self) -> bool:
         try:
@@ -319,6 +343,13 @@ def _truncate_payload(value: Any, *, max_chars: int) -> Any:
             remaining -= len(str(key)) + len(safe_repr(truncated, limit=max_chars))
         return result
     return json_safe(value)
+
+
+def _configured_permission_mode() -> str:
+    try:
+        return str(get_settings().permission_mode)
+    except Exception:
+        return PermissionMode.DEFAULT.value
 
 
 def _child_limit(remaining: int, max_chars: int) -> int:

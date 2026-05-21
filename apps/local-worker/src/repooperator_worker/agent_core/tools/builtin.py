@@ -15,7 +15,13 @@ from repooperator_worker.agent_core.policies import command_policy_preview, vali
 from repooperator_worker.agent_core.repository_review import run_repository_review
 from repooperator_worker.agent_core.secret_scanner import redact_secrets
 from repooperator_worker.agent_core.tools.base import BaseTool, ToolExecutionContext, ToolResult, ToolSpec
-from repooperator_worker.agent_core.permissions import PermissionDecision, ToolPermissionContext
+from repooperator_worker.agent_core.permissions import (
+    PermissionDecision,
+    PermissionRuleSource,
+    ToolPermissionContext,
+    apply_mode_rules_to_decision,
+    is_private_url,
+)
 from repooperator_worker.services.command_service import run_command_with_policy
 from repooperator_worker.services.common import ensure_git_repository, resolve_project_path
 from repooperator_worker.services.permissions_service import permission_profile
@@ -427,21 +433,49 @@ class RunApprovedCommandTool(BaseTool):
         raw_command = _command_from_payload(payload)
         shape = validate_argv_shape(raw_command)
         if not shape.allowed:
-            return PermissionDecision.deny(shape.reason, command_security=shape.model_dump())
+            decision = PermissionDecision.deny(
+                shape.reason,
+                source=PermissionRuleSource.BASE_SAFETY,
+                denial_code="command_shape_denied",
+                recovery_hint="Use a simple argv command without shell wrappers or unsafe argument shapes.",
+                command_security=shape.model_dump(),
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
         command = list(raw_command)
         preview = command_policy_preview(command, project_path=context.request.project_path, reason=context.reason)
         if preview.get("blocked"):
-            return PermissionDecision.deny(str(preview.get("reason") or "Command is blocked by policy."), command_preview=preview)
+            decision = PermissionDecision.deny(
+                str(preview.get("reason") or "Command is blocked by policy."),
+                source=PermissionRuleSource.COMMAND_POLICY,
+                denial_code="command_policy_blocked",
+                recovery_hint="Choose a read-only repository command or request a narrower approved action.",
+                command_preview=preview,
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
         if preview.get("read_only") and not preview.get("needs_approval"):
-            return PermissionDecision.allow("Read-only command allowed by command policy.", command_preview=preview)
+            decision = PermissionDecision.allow(
+                "Read-only command allowed by command policy.",
+                source=PermissionRuleSource.COMMAND_POLICY,
+                command_preview=preview,
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
         approval_id = str(payload.get("approval_id") or "")
         if approval_id and approval_id == preview.get("approval_id"):
-            return PermissionDecision.allow("Command approval id supplied; command service remains authoritative.", command_preview=preview)
-        return PermissionDecision.ask(
+            decision = PermissionDecision.allow(
+                "Command approval id supplied; command service remains authoritative.",
+                source=PermissionRuleSource.COMMAND_POLICY,
+                command_preview=preview,
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
+        decision = PermissionDecision.ask(
             str(preview.get("reason") or "Command requires approval before execution."),
             approval_id=str(preview.get("approval_id") or ""),
+            source=PermissionRuleSource.COMMAND_POLICY,
+            recovery_hint="Request command approval before execution.",
+            approval_payload={"kind": "command_approval", "command": command, "approval_id": str(preview.get("approval_id") or "")},
             command_preview=preview,
         )
+        return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
 
     def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         raw_command = _command_from_payload(payload)
@@ -496,10 +530,24 @@ class RunValidationCommandTool(RunApprovedCommandTool):
 
 class _NetworkEvidenceTool(BaseTool):
     def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
-        del context
+        url = str(payload.get("url") or "").strip()
+        if url and is_private_url(url):
+            decision = PermissionDecision.deny(
+                "Private, local, or non-public URLs are blocked for web evidence tools.",
+                source=PermissionRuleSource.PROVIDER_NETWORK,
+                denial_code="private_network_url",
+                recovery_hint="Use a public HTTP(S) URL or provide the needed source content directly.",
+                approval_payload={"kind": self.spec.name, "url": url},
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
         decision = payload.get("approval_decision") if isinstance(payload.get("approval_decision"), dict) else {}
         if str(decision.get("decision") or "").lower() == "allow":
-            return PermissionDecision.allow("User approved network access for this web evidence tool.")
+            allowed = PermissionDecision.allow(
+                "User approved network access for this web evidence tool.",
+                source=PermissionRuleSource.PROVIDER_NETWORK,
+                approval_payload={"kind": self.spec.name, "url": url, "query": payload.get("query")},
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, allowed)
         try:
             profile = permission_profile()
         except Exception:
@@ -507,8 +555,19 @@ class _NetworkEvidenceTool(BaseTool):
         approval = profile.get("approval") if isinstance(profile.get("approval"), dict) else {}
         sandbox = profile.get("sandbox") if isinstance(profile.get("sandbox"), dict) else {}
         if sandbox.get("allowNetwork") and not approval.get("requireForNetwork", True):
-            return PermissionDecision.allow("Network access is allowed by the active permission profile.")
-        return PermissionDecision.ask("Web research uses network access and requires approval by the active permission profile.")
+            allowed = PermissionDecision.allow(
+                "Network access is allowed by the active permission profile.",
+                source=PermissionRuleSource.PROVIDER_NETWORK,
+                approval_payload={"kind": self.spec.name, "url": url, "query": payload.get("query")},
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, allowed)
+        ask = PermissionDecision.ask(
+            "Web research uses network access and requires approval by the active permission profile.",
+            source=PermissionRuleSource.PROVIDER_NETWORK,
+            recovery_hint="Request network approval before running web research.",
+            approval_payload={"kind": self.spec.name, "url": url, "query": payload.get("query")},
+        )
+        return apply_mode_rules_to_decision(self.spec.name, payload, context, ask)
 
 
 class SearchWebTool(_NetworkEvidenceTool):
@@ -736,8 +795,21 @@ class _GitWriteTool(_GitTool):
     def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
         decision = payload.get("approval_decision") if isinstance(payload.get("approval_decision"), dict) else {}
         if str(decision.get("decision") or "").lower() == "allow":
-            return PermissionDecision.allow("User approved this git write action.", git_permission_level=self.permission_level)
-        return PermissionDecision.ask(self._approval_reason(payload), git_permission_level=self.permission_level, approval_payload=self._approval_payload(payload, context))
+            allowed = PermissionDecision.allow(
+                "User approved this git write action.",
+                source=PermissionRuleSource.PROJECT,
+                approval_payload=self._approval_payload(payload, context),
+                git_permission_level=self.permission_level,
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, allowed)
+        ask = PermissionDecision.ask(
+            self._approval_reason(payload),
+            source=PermissionRuleSource.PROJECT,
+            recovery_hint="Request explicit approval before running this git write action.",
+            approval_payload=self._approval_payload(payload, context),
+            git_permission_level=self.permission_level,
+        )
+        return apply_mode_rules_to_decision(self.spec.name, payload, context, ask)
 
     def _approval_reason(self, payload: dict[str, Any]) -> str:
         del payload
@@ -940,7 +1012,8 @@ class GenerateChangeSetTool(BaseTool):
     )
 
     def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
-        return PermissionDecision.allow("Change-set generation is proposal-only and writes no files.")
+        decision = PermissionDecision.allow("Change-set generation is proposal-only and writes no files.")
+        return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
 
     def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         from repooperator_worker.agent_core.change_set import (
@@ -1082,8 +1155,19 @@ class ApplyChangeSetTool(BaseTool):
     def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
         decision = payload.get("approval_decision") if isinstance(payload.get("approval_decision"), dict) else {}
         if str(decision.get("decision") or "").lower() == "allow":
-            return PermissionDecision.allow("User approved applying this change set.")
-        return PermissionDecision.ask("Applying a change set writes files and requires approval.")
+            allowed = PermissionDecision.allow(
+                "User approved applying this change set.",
+                source=PermissionRuleSource.PROJECT,
+                approval_payload={"kind": "change_set_apply", "proposal_id": payload.get("proposal_id"), "change_set_proposal": payload.get("change_set_snapshot")},
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, allowed)
+        ask = PermissionDecision.ask(
+            "Applying a change set writes files and requires approval.",
+            source=PermissionRuleSource.PROJECT,
+            recovery_hint="Review and approve the validated change set before applying it.",
+            approval_payload={"kind": "change_set_apply", "proposal_id": payload.get("proposal_id"), "change_set_proposal": payload.get("change_set_snapshot")},
+        )
+        return apply_mode_rules_to_decision(self.spec.name, payload, context, ask)
 
     def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         from repooperator_worker.agent_core.apply_change_set import apply_change_set_for_run
@@ -1110,7 +1194,21 @@ class _DirectFileWriteTool(BaseTool):
     operation_name = "write"
 
     def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
-        return PermissionDecision.ask("Direct file writes require explicit approval and should normally use apply_change_set.")
+        decision = payload.get("approval_decision") if isinstance(payload.get("approval_decision"), dict) else {}
+        if str(decision.get("decision") or "").lower() == "allow":
+            allowed = PermissionDecision.allow(
+                "User approved this direct file write action.",
+                source=PermissionRuleSource.PROJECT,
+                approval_payload={"kind": self.spec.name, "path": payload.get("path") or payload.get("from")},
+            )
+            return apply_mode_rules_to_decision(self.spec.name, payload, context, allowed)
+        ask = PermissionDecision.ask(
+            "Direct file writes require explicit approval and should normally use apply_change_set.",
+            source=PermissionRuleSource.PROJECT,
+            recovery_hint="Generate a change-set proposal and approve apply_change_set instead of direct mutation.",
+            approval_payload={"kind": self.spec.name, "path": payload.get("path") or payload.get("from")},
+        )
+        return apply_mode_rules_to_decision(self.spec.name, payload, context, ask)
 
     def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         return ToolResult(
@@ -1202,7 +1300,8 @@ class GenerateEditTool(BaseTool):
     )
 
     def check_permission(self, payload: dict[str, Any], context: ToolPermissionContext) -> PermissionDecision:
-        return PermissionDecision.allow("Edit generation is proposal-only and writes no files.")
+        decision = PermissionDecision.allow("Edit generation is proposal-only and writes no files.")
+        return apply_mode_rules_to_decision(self.spec.name, payload, context, decision)
 
     def call(self, payload: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         target_files = [str(item) for item in payload.get("target_files") or []]
