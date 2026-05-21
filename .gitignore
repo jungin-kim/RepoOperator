@@ -42,3 +42,5 @@ packages/cli/runtime/
 packages/cli/*.tgz
 docs/implementation-status-report.md
 packages/cli/package-lock 10.json
+apps/local-worker/tests/*.py
+apps/local-worker/tests/golden_traces/*.json
