@@ -89,7 +89,7 @@ class GeneralAgentPolicyTests(unittest.TestCase):
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=understanding), patch(
             "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()
         ), patch("repooperator_worker.agent_core.tools.builtin.model_generate_edit_proposal", side_effect=proposal), patch(
-            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
+            "repooperator_worker.agent_core.graph.repository_support.get_active_repository", return_value=None
         ):
             result = run_langgraph_controller(request, run_id="generic-feature-evidence")
 
@@ -115,7 +115,7 @@ class GeneralAgentPolicyTests(unittest.TestCase):
         )
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=understanding), patch(
             "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()
-        ), patch("repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None):
+        ), patch("repooperator_worker.agent_core.graph.repository_support.get_active_repository", return_value=None):
             result = run_langgraph_controller(request, run_id="generic-followup-evidence")
 
         self.assertIn("src/domain.ts", result.files_read)
@@ -137,7 +137,7 @@ class GeneralAgentPolicyTests(unittest.TestCase):
         )
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=understanding), patch(
             "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()
-        ), patch("repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None):
+        ), patch("repooperator_worker.agent_core.graph.repository_support.get_active_repository", return_value=None):
             result = run_langgraph_controller(request, run_id="generic-broad-batch")
 
         actions = [event["action"]["type"] for event in list_run_events("generic-broad-batch") if event.get("type") == "action_result"]
@@ -153,7 +153,7 @@ class GeneralAgentPolicyTests(unittest.TestCase):
         request = self._request("Explain MissingWidget.ts")
         understanding = RequestUnderstanding(user_goal=request.task, mentioned_files=["MissingWidget.ts"], likely_needed_tools=["read_file"])
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=understanding), patch(
-            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
+            "repooperator_worker.agent_core.graph.repository_support.get_active_repository", return_value=None
         ):
             result = run_langgraph_controller(request, run_id="generic-missing-file")
         actions = [event["action"]["type"] for event in list_run_events("generic-missing-file") if event.get("type") == "action_result"]

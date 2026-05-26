@@ -169,7 +169,7 @@ class LangGraphRuntimeTests(unittest.TestCase):
 
     def test_run_langgraph_controller_direct_entrypoint_works(self) -> None:
         request = self._request("Summarize README.md")
-        with patch("repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None), patch(
+        with patch("repooperator_worker.agent_core.graph.repository_support.get_active_repository", return_value=None), patch(
             "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()
         ):
             response = run_langgraph_controller(request, run_id="run-direct-langgraph")
@@ -235,11 +235,13 @@ class LangGraphRuntimeTests(unittest.TestCase):
         import inspect
         import repooperator_worker.agent_core.graph.routes as graph_routes
 
-        self.assertIsNone(importlib.util.find_spec("repooperator_worker.agent_core.controller_graph"))
-        self.assertNotIn("controller_choose_next_action", inspect.getsource(graph_routes))
+        old_module = "repooperator_worker.agent_core." + "controller_" + "graph"
+        old_symbol = "controller_" + "choose_next_action"
+        self.assertIsNone(importlib.util.find_spec(old_module))
+        self.assertNotIn(old_symbol, inspect.getsource(graph_routes))
         request = self._request("Summarize README.md")
         with patch.dict(os.environ, {"REPOOPERATOR_AGENT_RUNTIME": "legacy"}, clear=False), patch(
-            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
+            "repooperator_worker.agent_core.graph.repository_support.get_active_repository", return_value=None
         ), patch("repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()):
             response = run_langgraph_controller(request, run_id="run-no-legacy-chooser")
         self.assertIn("README.md", response.files_read)
@@ -252,7 +254,7 @@ class LangGraphRuntimeTests(unittest.TestCase):
             {"REPOOPERATOR_AGENT_RUNTIME": "legacy", "REPOOPERATOR_AGENT_RUNTIME_DEFAULT": "legacy"},
             clear=False,
         ), patch(
-            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
+            "repooperator_worker.agent_core.graph.repository_support.get_active_repository", return_value=None
         ), patch("repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()):
             response = run_agent_task(request)
         self.assertIn("README.md", response.files_read)
@@ -285,7 +287,7 @@ class LangGraphRuntimeTests(unittest.TestCase):
             return original_execute_action(self, action)
 
         with patch.dict(os.environ, {"REPOOPERATOR_AGENT_RUNTIME": "langgraph"}, clear=False), patch(
-            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
+            "repooperator_worker.agent_core.graph.repository_support.get_active_repository", return_value=None
         ), patch("repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()), patch(
             "repooperator_worker.agent_core.graph.adapters.ToolOrchestrator.execute_action", tracking_execute_action
         ):

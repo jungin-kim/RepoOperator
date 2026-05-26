@@ -44,8 +44,9 @@ from repooperator_worker.agent_core.understanding_context import (  # noqa: E402
     redact_context_for_user,
 )
 from repooperator_worker.agent_core.request_parsing import extract_file_tokens  # noqa: E402
-from repooperator_worker.agent_core.planner import TaskFrame, edit_requested, edit_requested_text  # noqa: E402
+from repooperator_worker.agent_core.planner import TaskFrame, build_task_frame, edit_requested, edit_requested_text  # noqa: E402
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
+from repooperator_worker.agent_core.state import AgentCoreState  # noqa: E402
 from repooperator_worker.services.debug_service import get_debug_context_status  # noqa: E402
 
 
@@ -266,6 +267,32 @@ class TestAdapterToClassifierResult(unittest.TestCase):
         long_goal = "x" * 200
         result = self._adapter(user_goal=long_goal)
         self.assertLessEqual(len(result.requested_action), 120)
+
+
+class TestRuntimeBoundary(unittest.TestCase):
+    def test_langgraph_runtime_exports_no_old_understanding_entrypoints(self):
+        import repooperator_worker.agent_core.langgraph_runtime as runtime
+
+        public = set(getattr(runtime, "__all__", []))
+        self.assertFalse(any(name.endswith("_intent") for name in public))
+        self.assertFalse(any(name.startswith("validate_") and name.endswith("_payload") for name in public))
+
+    def test_unhelpful_understanding_does_not_block_planning(self):
+        request = _req(task="what does main.py do?")
+        state = AgentCoreState(
+            run_id="test-run",
+            thread_id="t1",
+            repo="/tmp/mock",
+            branch=None,
+            user_task=request.task,
+        )
+        state.request_understanding = RequestUnderstanding(user_goal="irrelevant", likely_needed_tools=[])
+        state.classifier_result = request_understanding_to_classifier_result(RequestUnderstanding(user_goal="wrong bucket"), request)
+
+        frame = build_task_frame(request, state)
+
+        self.assertEqual(frame.user_goal, request.task)
+        self.assertIn("main.py", frame.mentioned_files)
 
 
 class TestNewTaskDoesNotRequireNewIntentCategory(unittest.TestCase):

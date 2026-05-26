@@ -48,7 +48,7 @@ class FinalStreamingGuardTests(unittest.TestCase):
                 "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
                 return_value=_BadStreamingFinalClient(),
             ), patch(
-                "repooperator_worker.agent_core.graph.support.get_active_repository",
+                "repooperator_worker.agent_core.graph.repository_support.get_active_repository",
                 return_value=None,
             ):
                 events = list(stream_langgraph_controller(request, run_id="run-final-guard"))

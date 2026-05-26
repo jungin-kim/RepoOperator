@@ -38,7 +38,7 @@ class CapabilityRegistryTests(unittest.TestCase):
 
     def test_registry_does_not_drive_hard_workflow_routing(self) -> None:
         registry = get_default_capability_registry()
-        self.assertFalse(hasattr(registry, "classify_intent"))
+        self.assertFalse(any(name.endswith("_intent") for name in dir(registry)))
         self.assertFalse(hasattr(registry, "requested_workflow"))
 
 

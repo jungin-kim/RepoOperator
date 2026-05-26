@@ -26,7 +26,7 @@ from repooperator_worker.agent_core.state import AgentCoreState
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.agent_core.graph.state import APPEND_REDUCER_FIELDS, UNIQUE_APPEND_REDUCER_FIELDS, RepoOperatorGraphState
-from repooperator_worker.agent_core.graph.support import observe_result, update_plan
+from repooperator_worker.agent_core.graph.observation_support import observe_result, update_plan
 from repooperator_worker.agent_core.understanding_context import (
     append_visible_rationale,
     evidence_basis_update,

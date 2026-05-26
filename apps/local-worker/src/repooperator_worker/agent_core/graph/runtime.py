@@ -11,7 +11,8 @@ from repooperator_worker.agent_core.graph.builder import build_repooperator_stat
 from repooperator_worker.agent_core.graph.checkpoints import get_default_langgraph_checkpointer
 from repooperator_worker.agent_core.graph.nodes.finalization import _response_with_change_set_payload
 from repooperator_worker.agent_core.graph.state import graph_config_for_request, initial_graph_state
-from repooperator_worker.agent_core.graph.support import build_final_response, validate_active_repository
+from repooperator_worker.agent_core.graph.final_answer_support import build_final_response
+from repooperator_worker.agent_core.graph.repository_support import validate_active_repository
 from repooperator_worker.agent_core.graph_state import request_to_snapshot, response_from_snapshot
 from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
 from repooperator_worker.services.event_service import append_run_event, list_run_events

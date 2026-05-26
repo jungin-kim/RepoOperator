@@ -14,44 +14,37 @@ safe primitive actions against the checked-out repository.
 
 Active agent runs enter through:
 
-- `run_controller_graph`
-- `stream_controller_graph`
+- `run_langgraph_controller`
+- `stream_langgraph_controller`
+- `resume_langgraph_controller`
 
-Despite the historical name, active execution is no longer routed by a classifier
-graph. The current backend loop is:
+Normal runtime execution is LangGraph-only. The current backend path is:
 
 1. `context_service.py` collects repository, branch, thread, skill, and prior-run context.
 2. `request_understanding.py` extracts factual request hints: files, symbols, constraints, requested outputs, likely tool hints, and ambiguity.
-3. `planner.py` chooses the next safe primitive action from structured evidence and tool specs.
-4. `agent_loop.py` runs the plan/act/observe loop and checks cancellation, steering, approval, and budget limits.
+3. `agent_core/graph/` owns the LangGraph state graph, route functions, subgraphs, nodes, checkpoint restore, and finalization.
+4. `planner.py` chooses safe primitive actions from structured evidence and tool specs.
 5. `tool_orchestrator.py` invokes tools from `tools/registry.py` and `tools/builtin.py`.
 6. `events.py` persists user-visible work trace events and technical events for rehydration and debugging.
 7. `final_synthesis.py` builds and validates the final answer from gathered evidence.
 
-`agent_core/classifier.py` and `ClassifierResult` remain compatibility-only. They
-must not grow workflow-routing fields or drive planner behavior.
+Request understanding is not an authoritative workflow router. It may provide
+weak tool hints, but graph routing and planner decisions must stay grounded in
+safe primitive actions, gathered evidence, and validator results.
 
-## LangGraph Runtime Migration
+## Graph Support Layout
 
-RepoOperator now has a real LangGraph `StateGraph` runtime under
-`agent_core/langgraph_runtime.py`. The graph owns tested routing decisions,
-stores JSON-safe checkpoint state, uses a LangGraph checkpointer mirrored into
-run event storage, and resumes command-approval interrupts from the saved graph
-checkpoint. `ToolOrchestrator` remains the only execution boundary for reads,
-commands, and proposal generation.
+Graph helper behavior is split by responsibility:
 
-Runtime selection is controlled by:
-
-- `REPOOPERATOR_AGENT_RUNTIME=legacy|langgraph`
-- `REPOOPERATOR_AGENT_RUNTIME_DEFAULT=legacy|langgraph`
-
-Production default intentionally remains `legacy` until the parity matrix covers
-the full backend route set under normal packaging: streamed final responses,
-completed-while-away rehydrate, broad supervisor decomposition, and complex
-multi-file create/modify/delete proposals. LangGraph-specific tests exercise
-project summary, explicit routing without the legacy chooser, approval
-interrupt/resume, event-service checkpoint restore, supervisor dispatch/reduce,
-and first-class `ChangeSetProposal` payloads.
+- `repository_support.py`: active repository validation.
+- `context_support.py`: context loading and context-pack refresh.
+- `understanding_support.py`: request-understanding setup and initial budget wiring.
+- `budget_support.py`: loop budgets and continuation checks.
+- `cancellation_support.py`: cancellation checkpoints.
+- `observation_support.py`: observation recording and plan updates.
+- `trace_support.py`: user-visible action trace events.
+- `final_answer_support.py`: final answer text and response assembly.
+- `support.py`: small re-export surface for graph-internal imports and tests.
 
 ## Frontend Run State
 
@@ -78,11 +71,6 @@ persisted even when the primary transcript hides them.
 
 ## Compatibility Paths
 
-These are intentionally small and should not receive new behavior:
-
-- `services/agent_orchestration_graph.py`: old run/stream import path that delegates to `controller_graph.py`.
-- `agent_core/action_executor.py`: old executor class that delegates to `ToolOrchestrator`.
-- `agent_core/classifier.py`: old classifier import path backed by `RequestUnderstanding`.
-- `services/agent_graph.py`: deprecated read-only graph retained for old direct imports, not used by active run endpoints.
-
-Prefer adding tests against the current modules instead of expanding these adapters.
+The normal agent runtime has no older-runtime fallback. Remaining compatibility
+objects should be local, small, and unable to drive routing. Tests should target
+the LangGraph entry points and focused support modules directly.

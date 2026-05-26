@@ -16,7 +16,9 @@ from repooperator_worker.agent_core.graph.adapters import (
     _updates_from_core,
     _with_checkpoint_bump,
 )
-from repooperator_worker.agent_core.graph.support import check_cancel, emit_action_decision, should_continue
+from repooperator_worker.agent_core.graph.budget_support import should_continue
+from repooperator_worker.agent_core.graph.cancellation_support import check_cancel
+from repooperator_worker.agent_core.graph.trace_support import emit_action_decision
 from repooperator_worker.agent_core.graph.nodes.git import _git_workflow_requested
 from repooperator_worker.agent_core.graph.nodes.supervisor import _should_use_supervisor
 from repooperator_worker.agent_core.graph.nodes.web import _has_web_evidence, _web_research_available, _web_research_needed

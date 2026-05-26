@@ -77,11 +77,8 @@ class AgentCoreRefactorTests(unittest.TestCase):
             "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_Client(),
         ), patch(
-            "repooperator_worker.agent_core.graph.support.get_active_repository",
+            "repooperator_worker.agent_core.graph.repository_support.get_active_repository",
             return_value=None,
-        ), patch(
-            "repooperator_worker.services.agent_graph.run_agent_graph",
-            side_effect=AssertionError("legacy read-only graph should not run"),
         ):
             response = run_langgraph_controller(self._request(), run_id="run_core_test")
         self.assertEqual(response.agent_flow, "langgraph")

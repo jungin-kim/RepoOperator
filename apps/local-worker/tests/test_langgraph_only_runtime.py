@@ -48,7 +48,7 @@ class LangGraphOnlyRuntimeTests(unittest.TestCase):
         return AgentRunRequest(project_path=str(self.repo), git_provider="local", branch="main", task="Summarize README.md")
 
     def test_run_agent_task_uses_langgraph_by_default(self) -> None:
-        with patch("repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None), patch(
+        with patch("repooperator_worker.agent_core.graph.repository_support.get_active_repository", return_value=None), patch(
             "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()
         ):
             response = run_agent_task(self._request())

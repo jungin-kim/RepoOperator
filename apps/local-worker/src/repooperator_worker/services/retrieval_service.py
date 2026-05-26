@@ -1,8 +1,7 @@
-"""Query-aware file retrieval for the legacy read-only context path.
+"""Query-aware file retrieval for explicit file and repository-context needs.
 
-The active agent loop uses agent_core.context_service and primitive tools. This
-module is kept for older read-only context callers and only routes by explicit
-file hints or a structured repository-wide flag.
+The active agent path uses agent_core.context_service and primitive tools. This
+module only routes by explicit file hints or a structured repository-wide flag.
 """
 from __future__ import annotations
 

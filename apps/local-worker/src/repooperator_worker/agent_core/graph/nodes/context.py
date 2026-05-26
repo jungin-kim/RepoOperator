@@ -15,7 +15,7 @@ from repooperator_worker.agent_core.graph.adapters import (
 )
 from repooperator_worker.agent_core.graph.nodes.supervisor import _frame_is_edit_like, _should_use_supervisor
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
-from repooperator_worker.agent_core.graph.support import load_context
+from repooperator_worker.agent_core.graph.context_support import load_context
 from repooperator_worker.agent_core.mcp import get_default_mcp_registry
 from repooperator_worker.agent_core.plugins import get_default_plugin_registry
 from repooperator_worker.agent_core.skills import get_default_skill_registry

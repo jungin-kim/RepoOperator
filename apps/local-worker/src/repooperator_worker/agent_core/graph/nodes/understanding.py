@@ -16,7 +16,8 @@ from repooperator_worker.agent_core.graph.adapters import (
 from repooperator_worker.agent_core.graph.nodes.context import refresh_context_pack_update
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import task_frame_to_snapshot
-from repooperator_worker.agent_core.graph.support import classify, create_initial_plan, emit_plan_update
+from repooperator_worker.agent_core.graph.observation_support import create_initial_plan, emit_plan_update
+from repooperator_worker.agent_core.graph.understanding_support import classify
 from repooperator_worker.agent_core.planner import build_task_frame, edit_requested
 from repooperator_worker.agent_core.understanding_context import (
     append_visible_rationale,

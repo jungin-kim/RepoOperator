@@ -20,7 +20,7 @@ class FinalSynthesisService:
     """Compatibility seam for final synthesis and deterministic answer repair."""
 
     def build_answer(self, state: AgentCoreState, request: AgentRunRequest, *, skills_context: str = "", on_delta: Any | None = None) -> str:
-        from repooperator_worker.agent_core.graph.support import build_final_answer_text
+        from repooperator_worker.agent_core.graph.final_answer_support import build_final_answer_text
 
         return build_final_answer_text(state, request, skills_context=skills_context, on_delta=on_delta)
 
