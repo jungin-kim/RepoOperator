@@ -331,6 +331,15 @@ export type ChangeSetProposalPayload = {
   applied_change_set_id?: string | null;
   post_apply_validation_status?: string | null;
   applied_at?: string | null;
+  sandbox_validation?: {
+    status?: string;
+    worktree_path?: string | null;
+    base_ref?: string | null;
+    diff?: string;
+    commands?: Array<Record<string, unknown>>;
+    errors?: string[];
+    warnings?: string[];
+  } | null;
 };
 
 export type AgentActivityEvent = {

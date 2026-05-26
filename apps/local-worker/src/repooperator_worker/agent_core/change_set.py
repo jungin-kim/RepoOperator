@@ -80,6 +80,7 @@ class ChangeSetProposal:
     apply_status: str | None = None
     post_apply_validation_status: str | None = None
     applied_at: str | None = None
+    sandbox_validation: dict[str, Any] | None = None
 
     def model_dump(self) -> dict[str, Any]:
         proposal_id = self.proposal_id or stable_proposal_id(self.plan.summary, self.plan.target_files)
@@ -97,6 +98,7 @@ class ChangeSetProposal:
                 "apply_status": self.apply_status,
                 "post_apply_validation_status": self.post_apply_validation_status,
                 "applied_at": self.applied_at,
+                "sandbox_validation": self.sandbox_validation,
             }
         )
 
@@ -170,6 +172,7 @@ def change_set_from_payload(payload: dict[str, Any]) -> ChangeSetProposal:
         apply_status=payload.get("apply_status"),
         post_apply_validation_status=payload.get("post_apply_validation_status"),
         applied_at=payload.get("applied_at"),
+        sandbox_validation=payload.get("sandbox_validation") if isinstance(payload.get("sandbox_validation"), dict) else None,
     )
 
 

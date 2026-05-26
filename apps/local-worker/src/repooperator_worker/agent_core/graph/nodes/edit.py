@@ -26,7 +26,9 @@ from repooperator_worker.agent_core.graph.adapters import (
 from repooperator_worker.agent_core.graph.nodes.context import refresh_context_pack_update
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.understanding_context import append_visible_rationale, evidence_basis_update
+from repooperator_worker.services.common import is_git_repository, resolve_project_path
 from repooperator_worker.services.json_safe import json_safe
+from repooperator_worker.services.worktree_sandbox_service import WorktreeSandboxService
 
 def plan_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     action = _pending_action(state)
@@ -104,6 +106,8 @@ def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         typed.status = validation_model.status
         typed.validation_status = validation_model.status
         typed.proposal_error = "; ".join(validation_model.errors) if validation_model.errors else None
+        if validation_model.status == "valid":
+            _attach_sandbox_validation(state, typed)
         proposal = typed.model_dump()
     validation = {
         "kind": "change_set",
@@ -317,23 +321,73 @@ def _change_set_from_latest_result(state: RepoOperatorGraphState, result: Action
     return None
 
 def _final_text_for_change_set(state: RepoOperatorGraphState, proposal: dict[str, Any]) -> str:
-    del state
     changes = [item for item in proposal.get("changes") or [] if isinstance(item, dict)]
     files = [f"- {str(item.get('operation') or 'modify')}: `{str(item.get('path') or '')}`" for item in changes]
     validation = proposal.get("validation") if isinstance(proposal.get("validation"), dict) else {}
     validation_status = str(validation.get("status") or proposal.get("status") or "pending")
+    ide_context_line = _active_editor_context_line(state, proposal)
+    sandbox = proposal.get("sandbox_validation") if isinstance(proposal.get("sandbox_validation"), dict) else None
+    sandbox_line = _sandbox_validation_line(sandbox)
     return "\n".join(
         [
             "I prepared a ChangeSetProposal. No files were modified.",
             f"Proposal id: {proposal.get('proposal_id') or 'unknown'}.",
+            *([ide_context_line] if ide_context_line else []),
             "",
             "Proposed files:",
             *(files or ["- No files"]),
             "",
             f"Validation result: {validation_status}.",
+            sandbox_line,
             "Review the diff and approve Apply changes to write it to disk.",
         ]
     )
+
+
+def _attach_sandbox_validation(state: RepoOperatorGraphState, proposal) -> None:
+    try:
+        repo = resolve_project_path(str(state.get("repo") or _request(state).project_path)).resolve()
+    except ValueError:
+        return
+    if not is_git_repository(repo):
+        return
+    try:
+        updated = WorktreeSandboxService().validate_proposal_in_sandbox(project_path=str(repo), proposal=proposal, commands=[])
+    except Exception as exc:  # noqa: BLE001
+        proposal.sandbox_validation = {
+            "status": "failed",
+            "worktree_path": None,
+            "base_ref": None,
+            "diff": "",
+            "commands": [],
+            "errors": [str(exc)],
+            "warnings": ["Sandbox validation failed; the proposal remains viewable but should be reviewed before applying."],
+        }
+        return
+    sandbox_validation = updated.get("sandbox_validation") if isinstance(updated, dict) else None
+    if isinstance(sandbox_validation, dict):
+        proposal.sandbox_validation = sandbox_validation
+
+
+def _active_editor_context_line(state: RepoOperatorGraphState, proposal: dict[str, Any]) -> str | None:
+    packet = state.get("context_packet") if isinstance(state.get("context_packet"), dict) else {}
+    ide_context = state.get("ide_context") if isinstance(state.get("ide_context"), dict) else packet.get("ide_context")
+    if not isinstance(ide_context, dict) or not ide_context.get("active_file"):
+        return None
+    active_file = str(ide_context.get("active_file") or "")
+    proposal_files = [str(item.get("path") or "") for item in proposal.get("changes") or [] if isinstance(item, dict)]
+    if active_file not in proposal_files:
+        return None
+    return f"Used active editor context for `{active_file}`."
+
+
+def _sandbox_validation_line(sandbox: dict[str, Any] | None) -> str:
+    if not sandbox:
+        return "Sandbox validation: not run."
+    status = str(sandbox.get("status") or "unknown")
+    if status == "valid":
+        return "Sandbox validation: valid."
+    return f"Sandbox validation: {status}; proposal remains viewable but is marked for extra review."
 
 def _state_with_context_update(state: RepoOperatorGraphState, update: dict[str, Any]) -> RepoOperatorGraphState:
     return {**dict(state), **{key: value for key, value in update.items() if key != "events_to_emit"}}  # type: ignore[return-value]

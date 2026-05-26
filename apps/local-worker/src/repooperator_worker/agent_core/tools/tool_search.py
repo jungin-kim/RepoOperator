@@ -25,7 +25,7 @@ class ToolSearch:
         keywords: Iterable[str] | None = None,
         limit: int = 12,
         model_specs: bool = True,
-        include_external: bool = True,
+        include_external: bool = False,
     ) -> list[dict]:
         requested_capabilities = _normalized_terms([capability, *(capabilities or [])])
         requested_names = _normalized_terms(names or [])

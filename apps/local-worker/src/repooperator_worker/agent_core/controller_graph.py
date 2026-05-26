@@ -41,6 +41,8 @@ from repooperator_worker.agent_core.planner import (
     current_search_candidate_files,
     edit_requested,
     emit_target_resolution,
+    ide_context_for_request,
+    ide_edit_target_files,
     known_context_files,
     likely_feature_context_files,
     likely_edit_file_queries,
@@ -471,6 +473,18 @@ def controller_choose_next_action(state: AgentCoreState, request: AgentRunReques
             payload={"missing_files": unresolved},
         )
 
+    if edit_requested(frame):
+        ide_targets = ide_edit_target_files(request, state, frame)
+        ide_unread = [path for path in ide_targets if path not in state.files_read]
+        if ide_unread:
+            return AgentAction(
+                type="read_file",
+                reason_summary="Read the active editor file before preparing an edit proposal.",
+                target_files=ide_unread[:1],
+                expected_output="Active editor file contents for edit targeting.",
+                payload={"source": "ide_context", "active_editor_target": ide_unread[0]},
+            )
+
     if frame.mentioned_symbols and not state.files_read and not _has_search_for(state, frame.mentioned_symbols):
         return AgentAction(
             type="search_files",
@@ -765,7 +779,7 @@ def build_final_answer_text(
         return repository_review.response
     edit_proposal = _latest_edit_proposal(state)
     if edit_proposal:
-        return _format_edit_proposal(edit_proposal)
+        return _format_edit_proposal(edit_proposal, ide_context=ide_context_for_request(request, state))
     proposal_error = _latest_proposal_error(state)
     if proposal_error:
         return (

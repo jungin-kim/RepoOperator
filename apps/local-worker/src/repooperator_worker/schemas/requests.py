@@ -430,6 +430,30 @@ class AgentRunRequest(BaseModel):
         return stripped or None
 
 
+class IDEContextUpdateRequest(BaseModel):
+    active_file: str | None = None
+    selected_text: str | None = None
+    open_files: list[str] = Field(default_factory=list)
+    diagnostics: list[dict] = Field(default_factory=list)
+    cursor_position: dict | None = None
+    workspace_root: str
+    branch: str | None = None
+    editor: str | None = None
+    timestamp: float | str | None = None
+
+    @field_validator("active_file", "selected_text", "workspace_root", "branch", "editor")
+    @classmethod
+    def normalize_optional_strings(cls, value: str | None, info) -> str | None:
+        if value is None:
+            if info.field_name == "workspace_root":
+                raise ValueError("workspace_root must not be empty")
+            return None
+        stripped = value.strip()
+        if not stripped and info.field_name == "workspace_root":
+            raise ValueError("workspace_root must not be empty")
+        return stripped or None
+
+
 class GitBranchListRequest(BaseModel):
     project_path: str
 

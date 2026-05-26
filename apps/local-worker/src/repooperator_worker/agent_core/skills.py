@@ -101,22 +101,28 @@ class SkillRegistry:
         spec = skill if isinstance(skill, SkillSpec) else skill_spec_from_dict(skill)
         if not spec.id:
             raise ValueError("Skill id is required.")
-        existing = self._skills.get(spec.id)
-        if existing is None or _source_priority(spec.source_type) >= _source_priority(existing.source_type):
-            self._skills[spec.id] = spec
+        self._skills[spec.identity] = spec
 
     def get(self, skill_id: str) -> SkillSpec:
         key = _slug(skill_id)
-        try:
-            return self._skills[key]
-        except KeyError as exc:
-            raise KeyError(f"Unknown skill: {skill_id}") from exc
+        candidates = [spec for spec in self._skills.values() if spec.id == key]
+        if not candidates:
+            raise KeyError(f"Unknown skill: {skill_id}")
+        return max(candidates, key=lambda spec: _source_priority(spec.source_type))
 
     def specs(self) -> list[SkillSpec]:
         return list(self._skills.values())
 
     def enabled_specs(self) -> list[SkillSpec]:
         return [spec for spec in self.specs() if spec.enabled]
+
+    def effective_specs(self) -> list[SkillSpec]:
+        by_id: OrderedDict[str, SkillSpec] = OrderedDict()
+        for spec in self.enabled_specs():
+            existing = by_id.get(spec.id)
+            if existing is None or _source_priority(spec.source_type) >= _source_priority(existing.source_type):
+                by_id[spec.id] = spec
+        return list(by_id.values())
 
     def specs_for_model(self, *, enabled_only: bool = True, task: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
         specs = self.select_relevant(task, limit=limit) if task else (self.enabled_specs() if enabled_only else self.specs())
@@ -139,7 +145,7 @@ class SkillRegistry:
         """Select advisory skills by task shape without choosing graph workflow."""
         terms = _terms(" ".join([str(task or ""), str(kind or ""), " ".join(capabilities or []), " ".join(tool_names or [])]))
         scored: list[tuple[int, int, SkillSpec]] = []
-        for index, spec in enumerate(self.enabled_specs()):
+        for index, spec in enumerate(self.effective_specs()):
             score = _skill_score(spec, terms, kind=kind, capabilities=capabilities or [], tool_names=tool_names or [])
             if score > 0:
                 scored.append((score, -index, spec))
@@ -293,6 +299,40 @@ def built_in_skills() -> list[SkillSpec]:
             output_contract={"type": "git_workflow_report", "include": ["status", "commit_message", "validation", "remote_action"]},
             examples=[{"task": "Commit these changes", "skill": "commit_prep"}],
             safety_notes=["Remote writes require explicit approval.", "Never force-push protected branches without explicit confirmation."],
+        ),
+                SkillSpec(
+            id="git_workflow",
+            name="Git Workflow",
+            description="Inspect git status and diff, then guide commit, push, and PR/MR workflow through explicit approvals.",
+            when_to_use="Use when the user asks about git status, diffs, commits, pushes, branches, PRs, MRs, or release preparation.",
+            required_capabilities=["repository_read", "git_provider", "validation"],
+            required_tools=[
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_commit",
+                "git_push",
+                "github_create_pr",
+                "gitlab_create_mr",
+            ],
+            procedure=[
+                "Inspect git status before proposing any git write.",
+                "Inspect git diff before drafting a commit summary.",
+                "Keep unrelated user changes out of commit recommendations.",
+                "Require explicit approval before commit, push, PR, or MR creation.",
+                "Report validation status alongside the proposed git action.",
+            ],
+            validation_policy="Do not commit, push, or create PR/MR without explicit approval. Prefer validation before git writes when practical.",
+            output_contract={
+                "type": "git_workflow_report",
+                "include": ["status", "diff_summary", "validation", "commit_summary", "approval_state"],
+            },
+            examples=[{"task": "Commit these changes and prepare a PR", "skill": "git_workflow"}],
+            safety_notes=[
+                "Remote writes require explicit approval.",
+                "Do not force-push protected branches.",
+                "Do not include unrelated files in a commit proposal.",
+            ],
         ),
         SkillSpec(
             id="dependency_research",

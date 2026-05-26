@@ -102,6 +102,7 @@ def refresh_context_pack_update(
     }
     update = {
         "context_packet": json_safe(merged_packet),
+        "ide_context": packet.get("ide_context"),
         "model_profile_snapshot": packet.get("model_profile"),
         "context_pack_summary": json_safe(summary),
         "context_pack_report": json_safe(report),

@@ -190,7 +190,7 @@ class ToolRegistry:
         keywords: Iterable[str] | None = None,
         limit: int = 12,
         model_specs: bool = True,
-        include_external: bool = True,
+        include_external: bool = False,
     ) -> list[dict]:
         from repooperator_worker.agent_core.tools.tool_search import ToolSearch
 

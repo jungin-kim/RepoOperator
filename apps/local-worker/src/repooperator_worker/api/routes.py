@@ -23,6 +23,7 @@ from repooperator_worker.schemas import (
     GitCommitResponse,
     GitDiffRequest,
     GitDiffResponse,
+    IDEContextUpdateRequest,
     GitMergeRequestCreateRequest,
     GitMergeRequestCreateResponse,
     PermissionModeRequest,
@@ -80,6 +81,11 @@ from repooperator_worker.services.git_service import (
     get_diff,
     list_local_branches,
     push_branch,
+)
+from repooperator_worker.services.ide_bridge_service import (
+    clear_ide_context,
+    get_ide_context,
+    update_ide_context,
 )
 from repooperator_worker.services.repo_service import open_repository, plan_repository_open
 from repooperator_worker.services.routine_service import get_default_routine_store
@@ -186,6 +192,24 @@ def debug_context() -> dict:
 @router.get("/debug/skills")
 def debug_skills() -> dict:
     return discover_skills()
+
+
+@router.post("/ide/context")
+def ide_context_update(request: IDEContextUpdateRequest) -> dict:
+    try:
+        return {"ide_context": update_ide_context(request.model_dump(exclude_none=True))}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/ide/context")
+def ide_context_get(project_path: str, branch: str | None = None) -> dict:
+    return {"ide_context": get_ide_context(project_path=project_path, branch=branch)}
+
+
+@router.delete("/ide/context")
+def ide_context_clear(project_path: str | None = None, branch: str | None = None) -> dict:
+    return clear_ide_context(project_path=project_path, branch=branch)
 
 
 @router.get("/debug/integrations")

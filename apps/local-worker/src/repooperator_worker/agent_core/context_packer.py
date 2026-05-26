@@ -6,6 +6,7 @@ from typing import Any, Literal
 from repooperator_worker.agent_core.context_budget import ContextBudget, compact_file_contents, estimate_chars, summarize_large_text_deterministic
 from repooperator_worker.agent_core.model_profile import ModelProfile, detect_model_profile
 from repooperator_worker.schemas import AgentRunRequest
+from repooperator_worker.services.ide_bridge_service import get_ide_context
 from repooperator_worker.services.json_safe import json_safe
 
 
@@ -95,12 +96,14 @@ class ContextPacker:
         applied_changes = _applied_change_summaries(state)
         worker_reports = _worker_report_summaries(state)
         skills_context, skills_used = _skill_context_for_packet(request, state, kind)
+        ide_context = _ide_context_for_request(request, state)
         packet = {
             "kind": kind,
             "current_user_request": request.task,
             "thread_id": request.thread_id,
             "repo": request.project_path,
             "branch": request.branch,
+            "ide_context": ide_context,
             "model_profile": self.profile.model_dump(),
             "base_context": _summarize_base_context(base_context),
             "active_approval": active_approval,
@@ -355,6 +358,12 @@ def _explicit_files(request: AgentRunRequest, state: dict[str, Any], kind: str) 
     kind = _canonical_kind(kind)
     files = [str(item) for item in state.get("files_changed") or [] if str(item)]
     files.extend(str(item) for item in state.get("files_read") or [] if str(item))
+    ide_context = _ide_context_for_request(request, state)
+    if ide_context:
+        if ide_context.get("active_file"):
+            files.insert(0, str(ide_context["active_file"]))
+        if kind in {"edit", "repair", "validation"}:
+            files.extend(str(item) for item in ide_context.get("open_files") or [] if str(item))
     change_set = state.get("change_set_proposal") if isinstance(state.get("change_set_proposal"), dict) else {}
     files.extend(str(item.get("path")) for item in change_set.get("changes") or [] if isinstance(item, dict) and item.get("path"))
     for token in request.task.split():
@@ -515,6 +524,17 @@ def _skill_context_for_packet(request: AgentRunRequest, state: dict[str, Any], k
     return enabled_skill_context(task=request.task, kind=kind, capabilities=capabilities, tool_names=tool_names)
 
 
+def _ide_context_for_request(request: AgentRunRequest, state: dict[str, Any]) -> dict[str, Any] | None:
+    existing = state.get("ide_context") if isinstance(state.get("ide_context"), dict) else None
+    if existing:
+        return json_safe(existing)
+    packet = state.get("context_packet") if isinstance(state.get("context_packet"), dict) else {}
+    packet_context = packet.get("ide_context") if isinstance(packet.get("ide_context"), dict) else None
+    if packet_context:
+        return json_safe(packet_context)
+    return get_ide_context(project_path=request.project_path, branch=request.branch)
+
+
 def _safe_web_record(record: dict[str, Any]) -> dict[str, Any]:
     summary = record.get("summary") or record.get("snippet") or ""
     if not summary and record.get("text"):
@@ -582,6 +602,8 @@ def _symbol_summaries(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _included_sections(kind: str, packet: dict[str, Any]) -> list[str]:
     sections = ["current_user_request", "model_profile", "base_context", "file_evidence", "short_term_memory", "safety"]
+    if packet.get("ide_context"):
+        sections.append("ide_context")
     if packet.get("active_approval"):
         sections.append("active_approval")
     if packet.get("active_change_set"):
@@ -617,6 +639,8 @@ def _excluded_sections(kind: str, packet: dict[str, Any], compacted: dict[str, A
         excluded.append("git_workflow")
     if kind != "web_research" and not packet.get("web_evidence"):
         excluded.append("web_research_evidence")
+    if not packet.get("ide_context"):
+        excluded.append("ide_context")
     if not packet.get("active_approval"):
         excluded.append("active_approval_absent")
     if not packet.get("active_change_set"):

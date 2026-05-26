@@ -17,6 +17,7 @@ from repooperator_worker.agent_core.tools.builtin import is_supported_text_file
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
 from repooperator_worker.services.common import ensure_relative_to_repo, resolve_project_path
+from repooperator_worker.services.ide_bridge_service import get_ide_context
 from repooperator_worker.services.json_safe import json_safe
 from repooperator_worker.services.model_client import ModelGenerationRequest, OpenAICompatibleModelClient
 
@@ -300,6 +301,9 @@ def build_task_frame(request: AgentRunRequest, state: AgentCoreState) -> TaskFra
         capabilities.append("open_planning")
 
     constraints = list(getattr(ru, "constraints", None) or []) if ru else []
+    ide_context = ide_context_for_request(request, state)
+    if ide_context and ide_context.get("diagnostics"):
+        constraints.append("Use active editor diagnostics as bugfix evidence when they match the request.")
     requested_outputs = list(getattr(ru, "requested_outputs", None) or []) if ru else []
     likely_needed_tools = list(getattr(ru, "likely_needed_tools", None) or []) if ru else []
     if mentioned_files and not constraints:
@@ -429,7 +433,8 @@ def known_context_files(request: AgentRunRequest, state: AgentCoreState) -> list
     prior: list[str] = []
     if isinstance(state.context_packet, dict):
         prior = [str(item) for item in state.context_packet.get("prior_files_read") or []]
-    return _dedupe([*state.files_read, *prior, *files_from_recent_context(request)])
+    ide_files = ide_context_files(request, state)
+    return _dedupe([*ide_files, *state.files_read, *prior, *files_from_recent_context(request)])
 
 
 def emit_target_resolution(state: AgentCoreState, request: AgentRunRequest, requested: list[str], resolved: list[str]) -> None:
@@ -647,21 +652,71 @@ def current_edit_target_files(
     *,
     model_targets: list[str] | None = None,
 ) -> list[str]:
-    explicit = set(resolve_target_files(request, frame.mentioned_files, preferred=known_context_files(request, state)))
-    model_set = set(model_targets or [])
-    high_confidence = set(current_search_candidate_files(state, min_score=24.0)[:2])
-    candidates = [*explicit, *model_set, *high_confidence]
+    explicit = resolve_target_files(request, frame.mentioned_files, preferred=known_context_files(request, state))
+    model_set = list(model_targets or [])
+    ide_targets = ide_edit_target_files(request, state, frame)
+    high_confidence = current_search_candidate_files(state, min_score=24.0)[:2]
+    candidates = _dedupe([*explicit, *ide_targets, *model_set, *high_confidence])
     valid: list[str] = []
     for path in candidates:
         if path not in state.files_read:
             continue
         if path in valid:
             continue
-        if path in explicit or path in high_confidence:
+        if path in explicit or path in ide_targets or path in high_confidence:
             valid.append(path)
-        elif path in model_set and (path in explicit or path in high_confidence):
+        elif path in model_set and (path in explicit or path in ide_targets or path in high_confidence):
             valid.append(path)
     return valid[:3]
+
+
+def ide_context_for_request(request: AgentRunRequest, state: AgentCoreState) -> dict[str, Any] | None:
+    packet = state.context_packet if isinstance(state.context_packet, dict) else {}
+    packet_context = packet.get("ide_context") if isinstance(packet.get("ide_context"), dict) else None
+    if packet_context:
+        return json_safe(packet_context)
+    return get_ide_context(project_path=request.project_path, branch=request.branch)
+
+
+def ide_context_files(request: AgentRunRequest, state: AgentCoreState) -> list[str]:
+    context = ide_context_for_request(request, state)
+    if not context:
+        return []
+    return _dedupe(
+        [
+            *([str(context.get("active_file"))] if context.get("active_file") else []),
+            *[str(item) for item in context.get("open_files") or [] if str(item)],
+        ]
+    )
+
+
+def ide_edit_target_files(request: AgentRunRequest, state: AgentCoreState, frame: TaskFrame) -> list[str]:
+    context = ide_context_for_request(request, state)
+    if not context or not context.get("active_file"):
+        return []
+    active_file = str(context.get("active_file") or "")
+    if not active_file:
+        return []
+    explicit = resolve_target_files(request, frame.mentioned_files, preferred=[active_file, *ide_context_files(request, state)])
+    if explicit and active_file not in explicit:
+        return []
+    if not _ide_context_relevant_for_edit(context, frame, explicit):
+        return []
+    return [active_file]
+
+
+def _ide_context_relevant_for_edit(context: dict[str, Any], frame: TaskFrame, explicit: list[str]) -> bool:
+    if explicit:
+        return True
+    text = frame.user_goal.lower()
+    if any(term in text for term in ("current file", "active file", "this file", "selection", "selected text", "cursor")):
+        return True
+    if str(context.get("selected_text") or "").strip():
+        return True
+    diagnostics = context.get("diagnostics") if isinstance(context.get("diagnostics"), list) else []
+    if diagnostics and any(term in text for term in ("fix", "bug", "error", "diagnostic", "failing", "broken", "고쳐", "수정")):
+        return True
+    return edit_requested(frame) and not frame.mentioned_files
 
 
 def project_summary_files(request: AgentRunRequest) -> list[str]:
@@ -809,11 +864,14 @@ def _latest_edit_proposal(state: AgentCoreState) -> dict[str, Any] | None:
     return None
 
 
-def _format_edit_proposal(payload: dict[str, Any]) -> str:
+def _format_edit_proposal(payload: dict[str, Any], *, ide_context: dict[str, Any] | None = None) -> str:
     proposals = [item for item in payload.get("proposals") or [] if isinstance(item, dict)]
     if not proposals:
         return "I prepared no file changes because there was not enough safe evidence to build a minimal patch."
     sections = ["I prepared a proposed patch only. No files were modified in this run."]
+    active_file = str((ide_context or {}).get("active_file") or "")
+    if active_file and any(str(item.get("file") or "") == active_file for item in proposals):
+        sections.append(f"Used active editor context for `{active_file}`.")
     for item in proposals[:3]:
         file_path = str(item.get("file") or "unknown file")
         before = str(item.get("before_summary") or "before state recorded")

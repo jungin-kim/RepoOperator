@@ -65,6 +65,7 @@ class RepoOperatorGraphState(TypedDict, total=False):
     repo: str
     branch: str | None
     context_packet: dict[str, Any] | None
+    ide_context: dict[str, Any] | None
     capability_snapshot: dict[str, Any] | None
     model_profile_snapshot: dict[str, Any] | None
     context_pack_summary: dict[str, Any] | None
@@ -165,6 +166,7 @@ def initial_graph_state(
         "repo": request.project_path,
         "branch": request.branch,
         "context_packet": None,
+        "ide_context": None,
         "capability_snapshot": None,
         "model_profile_snapshot": None,
         "context_pack_summary": None,
