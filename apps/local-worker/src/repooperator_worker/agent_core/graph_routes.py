@@ -240,6 +240,18 @@ def _clarification_action(state: AgentCoreState, request: AgentRunRequest, frame
     question = _clarification_question(missing, checked, frame)
     block_current_subtask(state, question)
     payload: dict[str, Any] = {"question": question, "missing_evidence": missing, "checked_evidence": checked}
+    if state.edit_target_candidates:
+        payload["candidate_files_considered"] = [
+            {
+                "path": item.get("path"),
+                "score": item.get("score"),
+                "role": item.get("role"),
+                "already_read": item.get("already_read"),
+                "blocked_reason": item.get("blocked_reason"),
+            }
+            for item in state.edit_target_candidates[:8]
+            if isinstance(item, dict)
+        ]
     if missing_files:
         payload["missing_files"] = missing_files
     return AgentAction(

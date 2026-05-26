@@ -1500,6 +1500,10 @@ def find_file_candidates(repo: Path, queries: list[str], *, text_queries: list[s
                 score += 4.0
                 reasons.append(f"extension: {lowered}")
                 matched.append(query)
+            elif _looks_like_glob(query) and Path(rel_text).match(query):
+                score += 42.0
+                reasons.append(f"glob: {query}")
+                matched.append(query)
             elif path_lower == lowered:
                 score += 120.0
                 reasons.append(f"exact path: {query}")
@@ -1622,9 +1626,13 @@ def search_text_matches(
 
 def candidate_priority(relative_path: Path) -> tuple[int, int, str]:
     parts = [part.lower() for part in relative_path.parts]
-    source = 0 if relative_path.suffix.lower() in {".cs", ".py", ".js", ".ts", ".tsx"} else 1
+    source = 0 if relative_path.suffix.lower() in {".cs", ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".swift", ".rb", ".php", ".c", ".cpp", ".h", ".hpp"} else 1
     source_dir = 0 if any(part in {"assets", "scripts", "src", "app", "apps"} for part in parts) else 1
     return (source + source_dir, len(relative_path.parts), str(relative_path).lower())
+
+
+def _looks_like_glob(value: str) -> bool:
+    return "*" in value or "?" in value or "[" in value
 
 
 EDIT_PROPOSAL_PROMPT = """\

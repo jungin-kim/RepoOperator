@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -11,20 +12,34 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from repooperator_worker.agent_core.context_service import ContextService  # noqa: E402
-from repooperator_worker.schemas import AgentRunRequest, ConversationMessage  # noqa: E402
+from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse, ConversationMessage  # noqa: E402
+from repooperator_worker.services.thread_context_service import update_thread_context  # noqa: E402
 
 
 class ContextServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
+        self.home = tempfile.TemporaryDirectory()
         self.repo = Path(self.tmp.name) / "repo"
         self.repo.mkdir()
         (self.repo / "README.md").write_text("# Demo\n\nFixture project.\n", encoding="utf-8")
         (self.repo / "AGENTS.md").write_text("Use focused tests.\n", encoding="utf-8")
         (self.repo / "package.json").write_text('{"scripts":{"test":"true"}}\n', encoding="utf-8")
+        self.config = Path(self.tmp.name) / "config.json"
+        self.config.write_text(
+            json.dumps({"repooperatorHomeDir": self.home.name, "openai": {"model": "test-model"}}),
+            encoding="utf-8",
+        )
+        self.previous_config_env = os.environ.get("REPOOPERATOR_CONFIG_PATH")
+        os.environ["REPOOPERATOR_CONFIG_PATH"] = str(self.config)
         self.service = ContextService()
 
     def tearDown(self) -> None:
+        if self.previous_config_env is None:
+            os.environ.pop("REPOOPERATOR_CONFIG_PATH", None)
+        else:
+            os.environ["REPOOPERATOR_CONFIG_PATH"] = self.previous_config_env
+        self.home.cleanup()
         self.tmp.cleanup()
 
     def _request(self) -> AgentRunRequest:
@@ -73,6 +88,44 @@ class ContextServiceTests(unittest.TestCase):
         self.assertFalse(first.cache_hit)
         self.assertTrue(second.cache_hit)
         self.assertEqual(first.cache_key, second.cache_key)
+
+    def test_cache_hit_refreshes_durable_thread_context(self) -> None:
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "domain.py").write_text("def create_message(body):\n    return {'body': body}\n", encoding="utf-8")
+        request = self._request()
+        first = self.service.collect(request)
+        response = AgentRunResponse(
+            project_path=request.project_path,
+            git_provider="local",
+            active_repository_source="local",
+            active_repository_path=request.project_path,
+            active_branch="main",
+            task=request.task,
+            model="test-model",
+            branch="main",
+            repo_root_name="repo",
+            context_summary="",
+            top_level_entries=[],
+            readme_included=False,
+            diff_included=False,
+            is_git_repository=False,
+            files_read=["src/domain.py"],
+            response="Prepared a proposal outline for src/domain.py.",
+            recommendation_context={
+                "implementation_plan": {"summary": "Update message creation.", "target_files": ["src/domain.py"]},
+                "target_selection": {
+                    "selected_target_files": ["src/domain.py"],
+                    "candidates": [{"path": "src/domain.py", "score": 94, "role": "app/service modules"}],
+                },
+            },
+        )
+        update_thread_context(request, response)
+
+        second = self.service.collect(request)
+        self.assertFalse(first.cache_hit)
+        self.assertTrue(second.cache_hit)
+        self.assertEqual(second.prior_target_candidates[0]["path"], "src/domain.py")
+        self.assertEqual(second.thread_context["last_implementation_plan"]["target_files"], ["src/domain.py"])
 
     def test_force_refresh_returns_new_packet_after_readme_changes(self) -> None:
         request = self._request()

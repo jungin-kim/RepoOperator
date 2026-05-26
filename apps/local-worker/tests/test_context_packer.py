@@ -158,6 +158,41 @@ class ContextPackerTests(unittest.TestCase):
         self.assertIn("noise.log", packet["file_evidence"]["summaries"])
         self.assertTrue(packet["file_evidence"]["omitted_files"])
 
+    def test_context_pack_report_includes_budget_and_target_carryover(self) -> None:
+        state = {
+            "files_read": ["main.py"],
+            "evidence_store": {"contents": {"main.py": "def create_message(body):\n    return {'body': body}\n"}},
+            "edit_target_candidates": [
+                {
+                    "path": "main.py",
+                    "score": 91,
+                    "role": "entrypoints",
+                    "sources": ["read_file", "prior_target_candidate"],
+                    "prior_reused": True,
+                }
+            ],
+            "target_selection_diagnostics": {
+                "selected_target_files": ["main.py"],
+                "prior_evidence_reused": True,
+                "candidates": [
+                    {
+                        "path": "main.py",
+                        "score": 91,
+                        "role": "entrypoints",
+                        "sources": ["read_file", "prior_target_candidate"],
+                        "prior_reused": True,
+                    }
+                ],
+            },
+        }
+        packet = pack_context("edit", self._request("Prepare the proposal"), state=state, profile=SMALL)
+        report = packet["context_pack_report"]
+        self.assertIn("budget_usage", report)
+        self.assertEqual(report["target_candidate_files"][0]["path"], "main.py")
+        self.assertTrue(report["prior_evidence_reused"])
+        self.assertEqual(packet["short_term_memory"]["target_candidate_summaries"][0]["path"], "main.py")
+        self.assertTrue(packet["short_term_memory"]["carryover_summaries"])
+
 
 if __name__ == "__main__":
     unittest.main()

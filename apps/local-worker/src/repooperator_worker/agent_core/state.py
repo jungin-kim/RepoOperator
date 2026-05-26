@@ -79,3 +79,5 @@ class AgentCoreState:
     zero_result_queries: list[str] = field(default_factory=list)
     failed_action_signatures: list[str] = field(default_factory=list)
     strategy_shifts: list[str] = field(default_factory=list)
+    edit_target_candidates: list[dict[str, Any]] = field(default_factory=list)
+    target_selection_diagnostics: dict[str, Any] = field(default_factory=dict)

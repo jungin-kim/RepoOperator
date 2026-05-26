@@ -68,6 +68,11 @@ def get_debug_context_status() -> dict:
         "user_understanding_context": state_payload.get("user_understanding_context") or {},
         "evidence_basis": state_payload.get("evidence_basis") or {},
         "visible_rationale_log": state_payload.get("visible_rationale_log") or [],
+        "context_pack_report": state_payload.get("context_pack_report") or {},
+        "context_pack_summary": state_payload.get("context_pack_summary") or {},
+        "short_term_memory": state_payload.get("short_term_memory") or {},
+        "target_selection": state_payload.get("target_selection") or {},
+        "edit_target_candidates": state_payload.get("edit_target_candidates") or [],
     }
 
 
@@ -116,6 +121,10 @@ def _recent_context_pack_events(limit: int = 20) -> list[dict]:
                     "retained_files": summary.get("retained_files") or [],
                     "omitted_files": summary.get("omitted_files") or [],
                     "retained_web_sources": summary.get("retained_web_sources") or [],
+                    "budget_usage": summary.get("budget_usage") or {},
+                    "target_candidate_files": summary.get("target_candidate_files") or [],
+                    "prior_target_candidates": summary.get("prior_target_candidates") or [],
+                    "prior_evidence_reused": bool(summary.get("prior_evidence_reused")),
                     "warnings": summary.get("warnings") or [],
                 }
             )

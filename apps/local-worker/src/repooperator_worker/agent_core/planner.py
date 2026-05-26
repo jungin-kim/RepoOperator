@@ -10,6 +10,10 @@ from typing import Any, Callable
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult
 from repooperator_worker.agent_core.context_budget import ContextBudget, estimate_chars
 from repooperator_worker.agent_core.events import append_activity_event
+from repooperator_worker.agent_core.edit_target_selection import (
+    language_aware_edit_discovery,
+    select_edit_target_candidates,
+)
 from repooperator_worker.agent_core.final_synthesis import collect_file_contents
 from repooperator_worker.agent_core.request_parsing import extract_file_tokens
 from repooperator_worker.agent_core.state import AgentCoreState
@@ -578,9 +582,20 @@ def _contains_nonpublic_reasoning_marker(text: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
-def likely_edit_file_queries(frame: TaskFrame) -> list[str]:
+GENERIC_EDIT_FILE_QUERIES = ["*.py", "*.js", "*.ts", "*.tsx", "*.jsx", "*.cs", "*.go", "*.rs", "*.java", "*.kt", "*.swift", "*.rb", "*.php"]
+
+
+def likely_edit_file_queries(frame: TaskFrame, request: AgentRunRequest | None = None) -> list[str]:
     queries = list(frame.mentioned_files)
-    return _dedupe(queries) or ["*.py", "*.js", "*.ts", "*.tsx", "*.jsx", "*.cs", "*.go", "*.rs", "*.java", "*.kt", "*.swift", "*.rb", "*.php"]
+    if queries:
+        return _dedupe(queries)
+    if request is None:
+        return list(GENERIC_EDIT_FILE_QUERIES)
+    try:
+        discovery = language_aware_edit_discovery(request, frame)
+        return _dedupe([*discovery.get("queries", []), *discovery.get("file_globs", [])])
+    except Exception:
+        return list(GENERIC_EDIT_FILE_QUERIES)
 
 
 def likely_feature_context_files(request: AgentRunRequest) -> list[str]:
@@ -652,22 +667,8 @@ def current_edit_target_files(
     *,
     model_targets: list[str] | None = None,
 ) -> list[str]:
-    explicit = resolve_target_files(request, frame.mentioned_files, preferred=known_context_files(request, state))
-    model_set = list(model_targets or [])
-    ide_targets = ide_edit_target_files(request, state, frame)
-    high_confidence = current_search_candidate_files(state, min_score=24.0)[:2]
-    candidates = _dedupe([*explicit, *ide_targets, *model_set, *high_confidence])
-    valid: list[str] = []
-    for path in candidates:
-        if path not in state.files_read:
-            continue
-        if path in valid:
-            continue
-        if path in explicit or path in ide_targets or path in high_confidence:
-            valid.append(path)
-        elif path in model_set and (path in explicit or path in ide_targets or path in high_confidence):
-            valid.append(path)
-    return valid[:3]
+    selection = select_edit_target_candidates(state, frame, request, model_targets=model_targets or [], record=True)
+    return selection.selected_target_files[:3]
 
 
 def ide_context_for_request(request: AgentRunRequest, state: AgentCoreState) -> dict[str, Any] | None:
@@ -785,7 +786,11 @@ def _has_search_for(state: AgentCoreState, queries: list[str]) -> bool:
     for action in state.actions_taken:
         if action.type != "search_files":
             continue
-        previous = {normalize_search_query(item) for item in action.payload.get("queries") or [] if normalize_search_query(item)}
+        previous = {
+            normalize_search_query(item)
+            for item in [*(action.payload.get("queries") or []), *(action.payload.get("text_queries") or []), *(action.payload.get("file_globs") or [])]
+            if normalize_search_query(item)
+        }
         if wanted & previous or not wanted:
             return True
     return False

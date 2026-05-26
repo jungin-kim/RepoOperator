@@ -116,6 +116,8 @@ def build_evidence_basis(state: dict[str, Any], trigger_node: str) -> dict[str, 
         "validation": _validation(state),
         "active_proposal": _active_proposal(state),
         "worker_reports": _worker_reports(state),
+        "target_selection": _target_selection(state),
+        "memory_carryover": _memory_carryover(state),
         "missing_evidence": _missing_evidence(state),
         "uncertainty": _uncertainty(state),
         "last_updated_by": _safe_text(trigger_node, limit=120) or "unknown",
@@ -169,6 +171,11 @@ def debug_context_payload(state: dict[str, Any]) -> dict[str, Any]:
             "user_understanding_context": _cap_payload(redact_context_for_user(state.get("user_understanding_context") or {})),
             "evidence_basis": _cap_payload(redact_context_for_user(state.get("evidence_basis") or {})),
             "visible_rationale_log": _cap_list(redact_context_for_user(state.get("visible_rationale_log") or []), max_items=30),
+            "context_pack_report": _cap_payload(redact_context_for_user(state.get("context_pack_report") or {})),
+            "context_pack_summary": _cap_payload(redact_context_for_user(state.get("context_pack_summary") or {})),
+            "short_term_memory": _cap_payload(redact_context_for_user(state.get("short_term_memory") or {})),
+            "target_selection": _cap_payload(redact_context_for_user(state.get("target_selection_diagnostics") or {})),
+            "edit_target_candidates": _cap_list(redact_context_for_user(state.get("edit_target_candidates") or []), max_items=20),
         }
     )
 
@@ -474,6 +481,63 @@ def _worker_reports(state: dict[str, Any]) -> list[dict[str, Any]]:
         if len(out) >= MAX_DEBUG_ITEMS:
             break
     return out
+
+
+def _target_selection(state: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = _dict(state.get("target_selection_diagnostics"))
+    candidates = diagnostics.get("candidates") if isinstance(diagnostics.get("candidates"), list) else state.get("edit_target_candidates") or []
+    return json_safe(
+        {
+            "selected_target_files": _string_list(diagnostics.get("selected_target_files"), limit=500, max_items=12),
+            "prior_evidence_reused": bool(diagnostics.get("prior_evidence_reused")),
+            "fallback_attempts": diagnostics.get("fallback_attempts"),
+            "failed_search_patterns": _string_list(diagnostics.get("failed_search_patterns"), limit=260, max_items=20),
+            "discovery_queries": _string_list(diagnostics.get("discovery_queries"), limit=260, max_items=24),
+            "discovery_file_globs": _string_list(diagnostics.get("discovery_file_globs"), limit=260, max_items=24),
+            "blocked_reason": _safe_text(diagnostics.get("blocked_reason"), limit=500),
+            "project_profile": _dict(diagnostics.get("project_profile")),
+            "candidates": [
+                {
+                    "path": _safe_text(item.get("path"), limit=500),
+                    "score": item.get("score"),
+                    "confidence": item.get("confidence"),
+                    "role": _safe_text(item.get("role"), limit=120),
+                    "language": _safe_text(item.get("language"), limit=120),
+                    "already_read": bool(item.get("already_read")),
+                    "sources": _string_list(item.get("sources"), limit=160, max_items=12),
+                    "reasons": _string_list(item.get("reasons"), limit=260, max_items=12),
+                    "symbols": _string_list(item.get("symbols"), limit=160, max_items=20),
+                    "matched_terms": _string_list(item.get("matched_terms"), limit=160, max_items=20),
+                    "prior_reused": bool(item.get("prior_reused")),
+                }
+                for item in candidates
+                if isinstance(item, dict)
+            ][:MAX_DEBUG_ITEMS],
+        }
+    )
+
+
+def _memory_carryover(state: dict[str, Any]) -> dict[str, Any]:
+    packet = _dict(state.get("context_packet"))
+    memory = _dict(state.get("short_term_memory"))
+    base_context = _dict(packet.get("base_context"))
+    thread_context = _dict(base_context.get("thread_context"))
+    return json_safe(
+        {
+            "short_term_memory_entries": {
+                "files_read": len(memory.get("files_read_summaries") or []),
+                "target_candidates": len(memory.get("target_candidate_summaries") or []),
+                "carryover": len(memory.get("carryover_summaries") or []),
+                "symbols": len(memory.get("symbol_summaries") or []),
+            },
+            "target_candidate_summaries": list(memory.get("target_candidate_summaries") or [])[:20],
+            "carryover_summaries": list(memory.get("carryover_summaries") or [])[:20],
+            "thread_recent_files": list(thread_context.get("recent_files") or [])[:20],
+            "thread_target_candidates": list(thread_context.get("last_target_candidates") or [])[:20],
+            "last_implementation_plan": thread_context.get("last_implementation_plan"),
+            "context_source": thread_context.get("context_source"),
+        }
+    )
 
 
 def _missing_evidence(state: dict[str, Any]) -> list[str]:

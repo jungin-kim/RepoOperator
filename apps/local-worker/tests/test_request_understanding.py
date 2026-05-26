@@ -477,10 +477,18 @@ class TestPublicUnderstandingEvidenceContracts(unittest.TestCase):
                 "web_sources": [{"url": "https://example.com", "text": "raw"}],
             },
             "visible_rationale_log": [{"id": str(index), "summary": "safe"} for index in range(60)],
+            "context_pack_report": {"budget_usage": {"context_window": 8000, "estimated_total_tokens": 2000}},
+            "short_term_memory": {"target_candidate_summaries": [{"path": "main.py", "score": 90}]},
+            "target_selection_diagnostics": {"selected_target_files": ["main.py"], "prior_evidence_reused": True},
+            "edit_target_candidates": [{"path": "main.py", "score": 90}],
         }
         payload = debug_context_payload(state)
         self.assertEqual(len(payload["evidence_basis"]["files"]), 40)
         self.assertEqual(len(payload["visible_rationale_log"]), 30)
+        self.assertEqual(payload["context_pack_report"]["budget_usage"]["context_window"], 8000)
+        self.assertEqual(payload["short_term_memory"]["target_candidate_summaries"][0]["path"], "main.py")
+        self.assertTrue(payload["target_selection"]["prior_evidence_reused"])
+        self.assertEqual(payload["edit_target_candidates"][0]["path"], "main.py")
         self.assertNotIn("secret", json.dumps(payload))
 
     def test_evidence_basis_update_history_is_json_safe(self):
@@ -495,8 +503,18 @@ class TestPublicUnderstandingEvidenceContracts(unittest.TestCase):
             "checkpoint": {
                 "channel_values": {
                     "user_understanding_context": {"normalized_goal": "Explain README.md"},
-                    "evidence_basis": {"files": [{"path": "README.md", "retained": True, "contents": "raw"}]},
+                    "evidence_basis": {
+                        "files": [{"path": "README.md", "retained": True, "contents": "raw"}],
+                        "memory_carryover": {
+                            "thread_target_candidates": [{"path": "README.md", "score": 88}],
+                            "last_implementation_plan": {"summary": "Update README.", "target_files": ["README.md"]},
+                        },
+                    },
                     "visible_rationale_log": [{"id": "r1", "summary": "Read README.md first."}],
+                    "context_pack_report": {"budget_usage": {"context_window": 16000}},
+                    "short_term_memory": {"carryover_summaries": [{"kind": "prior_edit_target_evidence"}]},
+                    "target_selection_diagnostics": {"selected_target_files": ["README.md"]},
+                    "edit_target_candidates": [{"path": "README.md", "score": 88}],
                 }
             },
         }
@@ -510,7 +528,13 @@ class TestPublicUnderstandingEvidenceContracts(unittest.TestCase):
         self.assertIn("user_understanding_context", payload)
         self.assertIn("evidence_basis", payload)
         self.assertIn("visible_rationale_log", payload)
+        self.assertIn("context_pack_report", payload)
+        self.assertIn("short_term_memory", payload)
+        self.assertIn("target_selection", payload)
+        self.assertIn("edit_target_candidates", payload)
         self.assertEqual(payload["user_understanding_context"]["normalized_goal"], "Explain README.md")
+        self.assertEqual(payload["edit_target_candidates"][0]["path"], "README.md")
+        self.assertEqual(payload["evidence_basis"]["memory_carryover"]["thread_target_candidates"][0]["path"], "README.md")
         self.assertNotIn('"contents": "raw"', json.dumps(payload["evidence_basis"]))
 
 

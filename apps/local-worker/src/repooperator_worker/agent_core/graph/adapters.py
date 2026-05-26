@@ -158,6 +158,8 @@ def _updates_from_core(before: RepoOperatorGraphState, core: AgentCoreState) -> 
         "zero_result_queries": list(core.zero_result_queries),
         "failed_action_signatures": list(core.failed_action_signatures),
         "strategy_shifts": list(core.strategy_shifts),
+        "edit_target_candidates": json_safe(core.edit_target_candidates),
+        "target_selection_diagnostics": json_safe(core.target_selection_diagnostics),
     }
     for field_name in APPEND_REDUCER_FIELDS | UNIQUE_APPEND_REDUCER_FIELDS:
         if not hasattr(core, field_name):
@@ -238,6 +240,8 @@ def _core_state_from_graph(state: RepoOperatorGraphState) -> AgentCoreState:
     core.zero_result_queries = list(state.get("zero_result_queries") or [])
     core.failed_action_signatures = list(state.get("failed_action_signatures") or [])
     core.strategy_shifts = list(state.get("strategy_shifts") or [])
+    core.edit_target_candidates = json_safe(state.get("edit_target_candidates") or [])
+    core.target_selection_diagnostics = json_safe(state.get("target_selection_diagnostics") or {})
     return core
 
 def _request(state: RepoOperatorGraphState) -> AgentRunRequest:

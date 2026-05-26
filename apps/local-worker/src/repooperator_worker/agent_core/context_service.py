@@ -27,6 +27,8 @@ class ContextPacket:
     high_signal_files: dict[str, str] = field(default_factory=dict)
     prior_files_read: list[str] = field(default_factory=list)
     prior_commands_run: list[str] = field(default_factory=list)
+    thread_context: dict[str, Any] = field(default_factory=dict)
+    prior_target_candidates: list[dict[str, Any]] = field(default_factory=list)
     skills_context: str = ""
     created_at: str = ""
     cache_key: str = ""
@@ -62,9 +64,12 @@ class ContextService:
         now = time.time()
         cached = self._cache.get(key)
         if cached and now - cached[0] <= self.ttl_seconds and not (force_refresh or request_refresh or active_changed):
-            return replace(cached[1], cache_hit=True, invalidation_reason=None)
+            packet = self._with_fresh_thread_scope(cached[1], request)
+            self._cache[key] = (cached[0], replace(packet, cache_hit=False, invalidation_reason=cached[1].invalidation_reason))
+            return replace(packet, cache_hit=True, invalidation_reason=None)
 
         skills_context, _skills_used = enabled_skill_context(task=request.task)
+        thread_context = self._thread_context(request)
         packet = ContextPacket(
             repo_root_name=repo.name,
             repo_path=str(repo),
@@ -91,6 +96,8 @@ class ContextService:
             ),
             prior_files_read=self._prior_metadata(request, keys=("files_read", "resolved_files")),
             prior_commands_run=self._prior_metadata(request, keys=("commands_run", "commands_planned")),
+            thread_context=thread_context,
+            prior_target_candidates=list(thread_context.get("last_target_candidates") or thread_context.get("target_candidates") or []),
             skills_context=skills_context,
             created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             cache_key=cache_key,
@@ -100,6 +107,16 @@ class ContextService:
         )
         self._cache[key] = (now, packet)
         return packet
+
+    def _with_fresh_thread_scope(self, packet: ContextPacket, request: AgentRunRequest) -> ContextPacket:
+        thread_context = self._thread_context(request)
+        return replace(
+            packet,
+            prior_files_read=self._prior_metadata(request, keys=("files_read", "resolved_files")),
+            prior_commands_run=self._prior_metadata(request, keys=("commands_run", "commands_planned")),
+            thread_context=thread_context,
+            prior_target_candidates=list(thread_context.get("last_target_candidates") or thread_context.get("target_candidates") or []),
+        )
 
     def clear(self) -> None:
         self._cache.clear()
@@ -155,6 +172,33 @@ class ContextService:
                     if text and text not in values:
                         values.append(text)
         return values[:40]
+
+    def _thread_context(self, request: AgentRunRequest) -> dict[str, Any]:
+        try:
+            from repooperator_worker.services.thread_context_service import build_thread_context
+
+            context = build_thread_context(request)
+        except Exception:
+            return {}
+        return json_safe(
+            {
+                "active_repo": context.active_repo,
+                "branch": context.branch,
+                "recent_files": context.recent_files,
+                "symbols": context.symbols,
+                "last_analyzed_file": context.last_analyzed_file,
+                "last_proposed_target_file": context.last_proposed_target_file,
+                "last_candidate_files": context.last_candidate_files,
+                "last_proposal_id": context.last_proposal_id,
+                "last_answer_summary": context.last_answer_summary,
+                "last_implementation_plan": context.last_implementation_plan,
+                "last_target_candidates": context.last_target_candidates,
+                "target_candidates": context.last_target_candidates,
+                "last_evidence_basis": context.last_evidence_basis,
+                "last_user_understanding_context": context.last_user_understanding_context,
+                "context_source": context.context_source,
+            }
+        )
 
     def _git_branch(self, repo: Path, request: AgentRunRequest) -> str | None:
         summary = self._git_command(repo, request, ["git", "rev-parse", "--abbrev-ref", "HEAD"])

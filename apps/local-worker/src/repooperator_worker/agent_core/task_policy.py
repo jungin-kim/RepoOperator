@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult
+from repooperator_worker.agent_core.edit_target_selection import (
+    language_aware_edit_discovery,
+    select_edit_target_candidates,
+)
 from repooperator_worker.agent_core.state import AgentCoreState, AgentSubtask
 from repooperator_worker.agent_core.tools.builtin import is_supported_text_file
 from repooperator_worker.schemas import AgentRunRequest
@@ -92,6 +96,10 @@ def next_recovery_action(
     failed_action: AgentAction,
     result: ActionResult,
 ) -> AgentAction | None:
+    if request_shape(request, frame) == "edit":
+        selection = select_edit_target_candidates(state, frame, request, record=True)
+        if selection.strong_read_targets:
+            return None
     signature = action_signature(failed_action)
     if signature and state.failed_action_signatures.count(signature) > 1:
         state.strategy_shifts.append(f"Changed strategy after repeated ineffective action: {signature}")
@@ -470,8 +478,59 @@ def _next_edit_evidence_action(state: AgentCoreState, request: AgentRunRequest, 
             "The request asks for a code change, so I am first checking repository shape.",
             ["Repository structure"],
         )
+    selection = select_edit_target_candidates(state, frame, request, record=True)
     candidates = _candidate_files_from_search_results(state)
     unread_candidates = [path for path in candidates if path not in state.files_read]
+    if selection.strong_read_targets:
+        supporting_context = [
+            path
+            for path in likely_entrypoint_and_config_files(request)
+            if path not in state.files_read and file_group(path) in {"docs", "configs"} and len(state.files_read) < 3
+        ]
+        if supporting_context:
+            return _with_note(
+                AgentAction(
+                    type="read_file",
+                    reason_summary="Read high-signal project context before preparing the proposal.",
+                    target_files=supporting_context[:2],
+                    expected_output="Project context that may constrain the proposal.",
+                ),
+                "Read project context.",
+                "A plausible implementation target is available, and a small amount of docs/config context can make the proposal safer.",
+                ["README or dependency/config context"],
+            )
+        supporting_unread = [
+            path
+            for path in unread_candidates
+            if file_group(path) in {"app/service modules", "UI/components"} and len(state.files_read) < 3
+        ]
+        if supporting_unread and any(item.role == "entrypoints" for item in selection.strong_read_targets):
+            return _with_note(
+                AgentAction(
+                    type="read_file",
+                    reason_summary="Read implementation modules referenced by the current entrypoint candidate.",
+                    target_files=supporting_unread[:2],
+                    expected_output="Implementation module contents for target selection.",
+                ),
+                "Read implementation modules.",
+                "The current strong candidate is an entrypoint, and search also found source modules that may own the behavior.",
+                ["Implementation ownership evidence"],
+            )
+        return None
+    unread_promotable = [item.path for item in selection.unread_promotable_targets if item.path not in state.files_read]
+    if unread_promotable:
+        return _with_note(
+            AgentAction(
+                type="read_file",
+                reason_summary="Read promoted implementation target candidates from prior or repository evidence.",
+                target_files=unread_promotable[:3],
+                expected_output="Implementation contents for proposal-only edit generation.",
+                payload={"source": "edit_target_selection", "target_selection": selection.model_dump()},
+            ),
+            "Read promoted implementation targets.",
+            "Structured target evidence points to these files, so I am reading them before preparing any proposal.",
+            ["Current implementation details", "Prior target evidence when available"],
+        )
     if unread_candidates:
         return _with_note(
             AgentAction(
@@ -484,17 +543,29 @@ def _next_edit_evidence_action(state: AgentCoreState, request: AgentRunRequest, 
             "A search found candidate files, and reading them is needed before any proposal-only edit.",
             ["Current implementation details"],
         )
-    queries = _edit_discovery_queries(request, frame)
-    if queries and not _has_search_for(state, queries):
+    discovery = language_aware_edit_discovery(request, frame, state=state)
+    queries = list(discovery.get("queries") or [])
+    text_queries = list(discovery.get("text_queries") or [])
+    file_globs = list(discovery.get("file_globs") or [])
+    search_signature = _dedupe([*queries, *text_queries, *file_globs])
+    exhausted_queries = {normalize_search_query(item) for item in state.zero_result_queries}
+    has_new_query = any(normalize_search_query(item) not in exhausted_queries for item in search_signature)
+    if search_signature and has_new_query and selection.fallback_attempts < 2 and not _has_search_for(state, search_signature):
         return _with_note(
             AgentAction(
                 type="search_files",
                 reason_summary="Search for likely implementation areas before asking which file to edit.",
                 expected_output="Ranked candidate implementation files.",
-                payload={"queries": queries, "text_queries": queries[:6], "source": "edit_discovery"},
+                payload={
+                    "queries": queries,
+                    "text_queries": text_queries,
+                    "file_globs": file_globs,
+                    "source": "edit_discovery",
+                    "project_language": discovery.get("dominant_language"),
+                },
             ),
             "Search for implementation ownership.",
-            "No explicit target file was confirmed, so I am searching generic symbols and task terms before asking for clarification.",
+            "No strong target is confirmed yet, so I am using language-aware source and task-term discovery before asking for clarification.",
             ["Candidate source files"],
         )
     context_files = [path for path in likely_entrypoint_and_config_files(request) if path not in state.files_read]
@@ -610,7 +681,10 @@ def _has_search_for(state: AgentCoreState, queries: list[str]) -> bool:
     for action in state.actions_taken:
         if action.type != "search_files":
             continue
-        previous = {normalize_search_query(item) for item in [*(action.payload.get("queries") or []), *(action.payload.get("text_queries") or [])]}
+        previous = {
+            normalize_search_query(item)
+            for item in [*(action.payload.get("queries") or []), *(action.payload.get("text_queries") or []), *(action.payload.get("file_globs") or [])]
+        }
         if wanted and wanted & previous:
             return True
     return False
@@ -639,12 +713,8 @@ def _candidate_files_from_search_results(state: AgentCoreState) -> list[str]:
 
 
 def _edit_discovery_queries(request: AgentRunRequest, frame: Any) -> list[str]:
-    explicit = [str(item) for item in getattr(frame, "mentioned_files", []) or []]
-    symbols = [str(item) for item in getattr(frame, "mentioned_symbols", []) or []]
-    terms = query_terms_for_request(request.task)
-    if explicit or symbols or terms:
-        return _dedupe([*explicit, *symbols, *terms])
-    return [f"*{suffix}" for suffix in sorted(SOURCE_SUFFIXES)]
+    discovery = language_aware_edit_discovery(request, frame)
+    return _dedupe([*discovery.get("queries", []), *discovery.get("file_globs", [])])
 
 
 def _broad_requested(frame: Any) -> bool:
@@ -664,8 +734,14 @@ def _edit_requested(frame: Any) -> bool:
 
 
 def _followup_requested(frame: Any) -> bool:
-    goal = str(getattr(frame, "user_goal", "") or "").lower()
-    return any(term in goal for term in ("previous", "above", "earlier", "that part", "방금", "위에서", "그 파일", "그 부분"))
+    outputs = {str(item).lower() for item in getattr(frame, "requested_outputs", []) or []}
+    tools = {str(item).lower() for item in getattr(frame, "likely_needed_tools", []) or []}
+    capabilities = {str(item).lower() for item in getattr(frame, "likely_capabilities", []) or []}
+    return bool(
+        {"follow_up", "continuation", "context_reference"} & outputs
+        or {"context_reference"} & tools
+        or {"context_reference", "prior_context"} & capabilities
+    )
 
 
 def _evidence_attempts_exhausted(state: AgentCoreState, request: AgentRunRequest, frame: Any) -> bool:
@@ -695,7 +771,11 @@ def _subtask_has_completed_enough(subtask: AgentSubtask, action: AgentAction, re
     if result.status not in {"success", "skipped"}:
         return False
     if action.type in {"generate_change_set", "generate_edit"}:
-        return bool(result.payload.get("edit_proposals") or result.payload.get("proposal_error"))
+        return bool(
+            result.payload.get("change_set_proposal")
+            or result.payload.get("edit_proposals")
+            or result.payload.get("proposal_error")
+        )
     return operation in subtask.planned_operations
 
 

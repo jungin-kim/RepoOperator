@@ -45,6 +45,10 @@ class ContextPackReport:
     warnings: list[str]
     pack_kind: str
     estimated_input_chars: int = 0
+    budget_usage: dict[str, Any] = field(default_factory=dict)
+    target_candidate_files: list[dict[str, Any]] = field(default_factory=list)
+    prior_target_candidates: list[dict[str, Any]] = field(default_factory=list)
+    prior_evidence_reused: bool = False
 
     def model_dump(self) -> dict[str, Any]:
         return json_safe(self)
@@ -60,6 +64,8 @@ class ShortTermEvidenceMemory:
     files_read_summaries: list[dict[str, Any]] = field(default_factory=list)
     web_evidence_summaries: list[dict[str, Any]] = field(default_factory=list)
     validation_summaries: list[dict[str, Any]] = field(default_factory=list)
+    target_candidate_summaries: list[dict[str, Any]] = field(default_factory=list)
+    carryover_summaries: list[dict[str, Any]] = field(default_factory=list)
     subtask_summaries: list[dict[str, Any]] = field(default_factory=list)
     applied_change_summaries: list[dict[str, Any]] = field(default_factory=list)
     proposed_change_summaries: list[dict[str, Any]] = field(default_factory=list)
@@ -95,6 +101,7 @@ class ContextPacker:
         web_evidence = _web_evidence(state)
         applied_changes = _applied_change_summaries(state)
         worker_reports = _worker_report_summaries(state)
+        target_selection = _target_selection_state(state, base_context)
         skills_context, skills_used = _skill_context_for_packet(request, state, kind)
         ide_context = _ide_context_for_request(request, state)
         packet = {
@@ -120,6 +127,8 @@ class ContextPacker:
             "web_evidence_summaries": web_evidence,
             "applied_changes": applied_changes,
             "worker_reports": worker_reports,
+            "target_selection": target_selection,
+            "memory_carryover": _memory_carryover_state(base_context, target_selection),
             "skills_context": skills_context,
             "skill_instructions": {
                 "progressive_loading": True,
@@ -162,6 +171,8 @@ class ContextPacker:
             active_change_set=active_change_set,
             validation_errors=validation_errors,
             web_evidence=web_evidence,
+            target_selection=target_selection,
+            base_context=base_context,
         )
         packet["context_pack_report"] = report.model_dump()
         packet["context_pack_summary"] = {
@@ -213,6 +224,27 @@ class ContextPacker:
             memory.subtask_summaries.append(item)
         for item in _symbol_summaries(state):
             memory.symbol_summaries.append(item)
+        target_selection = _target_selection_state(state, {})
+        for item in target_selection.get("candidates") or []:
+            if isinstance(item, dict):
+                memory.target_candidate_summaries.append(
+                    {
+                        "path": item.get("path"),
+                        "score": item.get("score"),
+                        "role": item.get("role"),
+                        "sources": item.get("sources") or [],
+                        "reasons": item.get("reasons") or [],
+                        "prior_reused": bool(item.get("prior_reused")),
+                    }
+                )
+        if target_selection.get("prior_evidence_reused"):
+            memory.carryover_summaries.append(
+                {
+                    "kind": "prior_edit_target_evidence",
+                    "selected_target_files": target_selection.get("selected_target_files") or [],
+                    "candidate_count": len(target_selection.get("candidates") or []),
+                }
+            )
         proposal = state.get("change_set_proposal") if isinstance(state.get("change_set_proposal"), dict) else None
         if proposal:
             summary = _proposal_summary(proposal)
@@ -241,6 +273,8 @@ class ContextPacker:
         active_change_set: dict[str, Any] | None,
         validation_errors: list[str],
         web_evidence: list[dict[str, Any]],
+        target_selection: dict[str, Any] | None = None,
+        base_context: dict[str, Any] | None = None,
     ) -> ContextPackReport:
         packet_for_estimate = {key: value for key, value in packet.items() if key not in {"context_pack_report", "context_pack_summary"}}
         estimated_chars = estimate_chars(packet_for_estimate)
@@ -267,6 +301,17 @@ class ContextPacker:
                 *[str(path) for path in (compacted.get("summaries") or {}).keys()],
             ]
         )
+        budget_usage = {
+            "estimated_input_tokens": estimated_tokens,
+            "estimated_output_reserve": self.profile.max_output_tokens,
+            "context_window": self.profile.context_window,
+            "estimated_total_tokens": estimated_tokens + self.profile.max_output_tokens,
+            "usage_ratio": round((estimated_tokens + self.profile.max_output_tokens) / max(1, self.profile.context_window), 4),
+        }
+        target_selection = target_selection or {}
+        base_context = base_context or {}
+        thread_context = base_context.get("thread_context") if isinstance(base_context.get("thread_context"), dict) else {}
+        prior_targets = list(base_context.get("prior_target_candidates") or thread_context.get("last_target_candidates") or [])
         return ContextPackReport(
             model_profile=self.profile.model_dump(),
             context_window=self.profile.context_window,
@@ -284,6 +329,20 @@ class ContextPacker:
             warnings=warnings,
             pack_kind=kind,
             estimated_input_chars=estimated_chars,
+            budget_usage=budget_usage,
+            target_candidate_files=[
+                {
+                    "path": item.get("path"),
+                    "score": item.get("score"),
+                    "role": item.get("role"),
+                    "sources": item.get("sources") or [],
+                    "prior_reused": bool(item.get("prior_reused")),
+                }
+                for item in target_selection.get("candidates") or []
+                if isinstance(item, dict)
+            ][:20],
+            prior_target_candidates=[item for item in prior_targets if isinstance(item, dict)][:20],
+            prior_evidence_reused=bool(target_selection.get("prior_evidence_reused")),
         )
 
     def _budget_for(self, kind: ContextKind) -> ContextBudget:
@@ -493,7 +552,47 @@ def _web_evidence(state: dict[str, Any]) -> list[dict[str, Any]]:
     return json_safe(safe_records)
 
 
+def _target_selection_state(state: dict[str, Any], base_context: dict[str, Any]) -> dict[str, Any]:
+    target_selection = state.get("target_selection_diagnostics") if isinstance(state.get("target_selection_diagnostics"), dict) else {}
+    candidates = state.get("edit_target_candidates") if isinstance(state.get("edit_target_candidates"), list) else []
+    if not target_selection and candidates:
+        target_selection = {"candidates": candidates}
+    base_context = base_context if isinstance(base_context, dict) else {}
+    thread_context = base_context.get("thread_context") if isinstance(base_context.get("thread_context"), dict) else {}
+    prior_candidates = list(base_context.get("prior_target_candidates") or thread_context.get("last_target_candidates") or [])
+    payload = {
+        **target_selection,
+        "candidates": list(target_selection.get("candidates") or candidates or [])[:20],
+        "prior_target_candidates": [item for item in prior_candidates if isinstance(item, dict)][:20],
+        "thread_recent_files": list(thread_context.get("recent_files") or [])[:20],
+        "thread_symbols": list((thread_context.get("symbols") or {}).keys())[:30] if isinstance(thread_context.get("symbols"), dict) else [],
+        "last_implementation_plan": thread_context.get("last_implementation_plan"),
+        "last_proposed_target_file": thread_context.get("last_proposed_target_file"),
+        "context_source": thread_context.get("context_source"),
+    }
+    payload["prior_evidence_reused"] = bool(
+        payload.get("prior_evidence_reused")
+        or any(isinstance(item, dict) and item.get("prior_reused") for item in payload.get("candidates") or [])
+    )
+    return json_safe(payload)
+
+
+def _memory_carryover_state(base_context: dict[str, Any], target_selection: dict[str, Any]) -> dict[str, Any]:
+    thread_context = base_context.get("thread_context") if isinstance(base_context.get("thread_context"), dict) else {}
+    return json_safe(
+        {
+            "short_term_thread_source": thread_context.get("context_source"),
+            "recent_files": list(thread_context.get("recent_files") or [])[:20],
+            "target_candidates": target_selection.get("prior_target_candidates") or [],
+            "prior_evidence_reused": bool(target_selection.get("prior_evidence_reused")),
+            "selected_target_files": target_selection.get("selected_target_files") or [],
+            "last_implementation_plan": thread_context.get("last_implementation_plan"),
+        }
+    )
+
+
 def _summarize_base_context(base_context: dict[str, Any]) -> dict[str, Any]:
+    thread_context = base_context.get("thread_context") if isinstance(base_context.get("thread_context"), dict) else {}
     return {
         "repo_root_name": base_context.get("repo_root_name"),
         "branch": base_context.get("branch"),
@@ -504,6 +603,19 @@ def _summarize_base_context(base_context: dict[str, Any]) -> dict[str, Any]:
         "recent_commits_summary": _truncate_text(base_context.get("recent_commits_summary"), 1_000),
         "project_instruction_files": list(base_context.get("project_instructions") or [])[:8],
         "prior_skill_context_present": bool(base_context.get("skills_context")),
+        "thread_context": {
+            "recent_files": list(thread_context.get("recent_files") or [])[:12],
+            "symbols": list((thread_context.get("symbols") or {}).keys())[:20] if isinstance(thread_context.get("symbols"), dict) else [],
+            "last_proposed_target_file": thread_context.get("last_proposed_target_file"),
+            "last_candidate_files": list(thread_context.get("last_candidate_files") or [])[:12],
+            "last_proposal_id": thread_context.get("last_proposal_id"),
+            "last_implementation_plan": thread_context.get("last_implementation_plan"),
+            "last_target_candidates": list(thread_context.get("last_target_candidates") or [])[:12],
+            "last_user_understanding_context": thread_context.get("last_user_understanding_context"),
+            "last_evidence_basis": list(thread_context.get("last_evidence_basis") or [])[:12],
+            "context_source": thread_context.get("context_source"),
+        },
+        "prior_target_candidates": list(base_context.get("prior_target_candidates") or [])[:12],
     }
 
 
@@ -616,6 +728,10 @@ def _included_sections(kind: str, packet: dict[str, Any]) -> list[str]:
         sections.append("applied_changes")
     if packet.get("worker_reports"):
         sections.append("worker_reports")
+    if packet.get("target_selection"):
+        sections.append("target_selection")
+    if packet.get("memory_carryover"):
+        sections.append("memory_carryover")
     if packet.get("skills_context"):
         sections.append("skill_instructions")
     task_sections = {
@@ -645,6 +761,8 @@ def _excluded_sections(kind: str, packet: dict[str, Any], compacted: dict[str, A
         excluded.append("active_approval_absent")
     if not packet.get("active_change_set"):
         excluded.append("active_proposal_absent")
+    if not packet.get("target_selection"):
+        excluded.append("target_selection_absent")
     return _dedupe(excluded)
 
 

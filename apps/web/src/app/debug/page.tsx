@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { formatBudgetUsage, formatCarryoverSummary, formatTargetCandidates, type ContextBudgetUsage, type TargetCandidateDebug } from "./context-format";
 
 type ModelProfileDebug = {
   provider?: string;
@@ -78,7 +79,31 @@ type ContextPackDebug = {
   retained_files?: string[];
   omitted_files?: Array<{ path?: string; reason?: string; chars?: number; included_chars?: number }>;
   retained_web_sources?: Array<{ title?: string | null; url?: string | null; source?: string | null; fetched_at?: string | null }>;
+  budget_usage?: ContextBudgetUsage;
+  target_candidate_files?: TargetCandidateDebug[];
+  prior_target_candidates?: TargetCandidateDebug[];
+  prior_evidence_reused?: boolean;
   warnings?: string[];
+};
+
+type TargetSelectionDebug = {
+  selected_target_files?: string[];
+  prior_evidence_reused?: boolean;
+  fallback_attempts?: number;
+  failed_search_patterns?: string[];
+  discovery_queries?: string[];
+  discovery_file_globs?: string[];
+  blocked_reason?: string | null;
+  candidates?: TargetCandidateDebug[];
+};
+
+type MemoryCarryoverDebug = {
+  target_candidate_summaries?: TargetCandidateDebug[];
+  carryover_summaries?: Array<{ kind?: string; selected_target_files?: string[]; candidate_count?: number }>;
+  thread_recent_files?: string[];
+  thread_target_candidates?: TargetCandidateDebug[];
+  last_implementation_plan?: { summary?: string; target_files?: string[] } | null;
+  context_source?: string | null;
 };
 
 type ContextDebug = {
@@ -103,7 +128,19 @@ type ContextDebug = {
     worker_reports?: Array<{ worker_task_id?: string; role?: string; summary?: string; files_analyzed?: string[] }>;
     missing_evidence?: string[];
     uncertainty?: string[];
+    target_selection?: TargetSelectionDebug;
+    memory_carryover?: MemoryCarryoverDebug;
   };
+  context_pack_report?: ContextPackDebug & { budget_usage?: ContextBudgetUsage };
+  context_pack_summary?: Record<string, unknown>;
+  short_term_memory?: {
+    files_read_summaries?: Array<{ path?: string; summary?: string }>;
+    target_candidate_summaries?: TargetCandidateDebug[];
+    carryover_summaries?: Array<{ kind?: string; selected_target_files?: string[]; candidate_count?: number }>;
+    symbol_summaries?: Array<{ symbol?: string; summary?: string }>;
+  };
+  target_selection?: TargetSelectionDebug;
+  edit_target_candidates?: TargetCandidateDebug[];
   visible_rationale_log?: Array<{
     id?: string;
     timestamp?: string;
@@ -282,6 +319,7 @@ function ContextPanel({ context }: { context: ContextDebug | null }) {
             <Row label="Compression ratio" value={latest.compression_ratio != null ? latest.compression_ratio.toFixed(4) : "-"} />
             <Row label="Input tokens" value={String(latest.estimated_input_tokens ?? "-")} />
             <Row label="Output reserve" value={String(latest.estimated_output_reserve ?? "-")} />
+            <Row label="Budget" value={formatBudgetUsage(latest.budget_usage ?? context?.context_pack_report?.budget_usage)} />
             <Row label="Included" value={latest.included_sections?.join(", ") || "-"} />
             <Row label="Excluded" value={latest.excluded_sections?.join(", ") || "-"} />
             <Row label="Warnings" value={latest.warnings?.join(" · ") || "-"} />
@@ -292,6 +330,8 @@ function ContextPanel({ context }: { context: ContextDebug | null }) {
         <Row label="Retained files" value={latest?.retained_files?.join(", ") || "-"} />
         <Row label="Omitted files" value={latest?.omitted_files?.map((file) => `${file.path ?? "unknown"} (${file.reason ?? "omitted"})`).join(", ") || "-"} />
         <Row label="Web sources" value={latest?.retained_web_sources?.map((source) => source.url || source.title || source.source || "source").join(", ") || "-"} />
+        <Row label="Target candidates" value={formatTargetCandidates(latest?.target_candidate_files ?? context?.edit_target_candidates)} />
+        <Row label="Prior candidates" value={formatTargetCandidates(latest?.prior_target_candidates)} />
       </Card>
       <Card title="User Understanding">
         <Row label="Goal" value={context?.user_understanding_context?.normalized_goal ?? "-"} />
@@ -312,6 +352,22 @@ function ContextPanel({ context }: { context: ContextDebug | null }) {
         <Row label="Worker reports" value={context?.evidence_basis?.worker_reports?.map((report) => `${report.role ?? "worker"}: ${report.summary ?? ""}`).join(" · ") || "-"} />
         <Row label="Missing evidence" value={context?.evidence_basis?.missing_evidence?.join(" · ") || "-"} />
         <Row label="Uncertainty" value={context?.evidence_basis?.uncertainty?.join(" · ") || "-"} />
+      </Card>
+      <Card title="Target Selection">
+        <Row label="Selected" value={context?.target_selection?.selected_target_files?.join(", ") || context?.evidence_basis?.target_selection?.selected_target_files?.join(", ") || "-"} />
+        <Row label="Candidates" value={formatTargetCandidates(context?.target_selection?.candidates ?? context?.evidence_basis?.target_selection?.candidates ?? context?.edit_target_candidates)} />
+        <Row label="Prior reused" value={String(context?.target_selection?.prior_evidence_reused ?? context?.evidence_basis?.target_selection?.prior_evidence_reused ?? latest?.prior_evidence_reused ?? false)} />
+        <Row label="Fallback attempts" value={String(context?.target_selection?.fallback_attempts ?? context?.evidence_basis?.target_selection?.fallback_attempts ?? "-")} />
+        <Row label="Discovery" value={(context?.target_selection?.discovery_queries ?? context?.evidence_basis?.target_selection?.discovery_queries ?? []).join(", ") || "-"} />
+        <Row label="Failed searches" value={(context?.target_selection?.failed_search_patterns ?? context?.evidence_basis?.target_selection?.failed_search_patterns ?? []).join(", ") || "-"} />
+        <Row label="Blocked reason" value={context?.target_selection?.blocked_reason ?? context?.evidence_basis?.target_selection?.blocked_reason ?? "-"} />
+      </Card>
+      <Card title="Memory / Carryover">
+        <Row label="Carryover" value={formatCarryoverSummary(context?.short_term_memory ?? context?.evidence_basis?.memory_carryover)} />
+        <Row label="Thread files" value={context?.evidence_basis?.memory_carryover?.thread_recent_files?.join(", ") || "-"} />
+        <Row label="Thread candidates" value={formatTargetCandidates(context?.evidence_basis?.memory_carryover?.thread_target_candidates)} />
+        <Row label="Plan" value={context?.evidence_basis?.memory_carryover?.last_implementation_plan?.summary ?? "-"} />
+        <Row label="Source" value={context?.evidence_basis?.memory_carryover?.context_source ?? "-"} />
       </Card>
       <Card title="Visible Rationale">
         {context?.visible_rationale_log?.length ? (

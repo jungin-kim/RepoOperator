@@ -99,6 +99,10 @@ def refresh_context_pack_update(
         "retained_files": report.get("retained_files") or [],
         "omitted_files": report.get("omitted_files") or [],
         "retained_web_sources": report.get("retained_web_sources") or [],
+        "budget_usage": report.get("budget_usage") or {},
+        "target_candidate_files": report.get("target_candidate_files") or [],
+        "prior_target_candidates": report.get("prior_target_candidates") or [],
+        "prior_evidence_reused": bool(report.get("prior_evidence_reused")),
     }
     update = {
         "context_packet": json_safe(merged_packet),

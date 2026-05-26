@@ -57,6 +57,10 @@ def refresh_context_pack_for_core(state: AgentCoreState, request: AgentRunReques
         "retained_files": report.get("retained_files") or [],
         "omitted_files": report.get("omitted_files") or [],
         "retained_web_sources": report.get("retained_web_sources") or [],
+        "budget_usage": report.get("budget_usage") or {},
+        "target_candidate_files": report.get("target_candidate_files") or [],
+        "prior_target_candidates": report.get("prior_target_candidates") or [],
+        "prior_evidence_reused": bool(report.get("prior_evidence_reused")),
     }
     append_activity_event(
         run_id=state.run_id,
@@ -98,4 +102,6 @@ def _core_context_pack_state(state: AgentCoreState) -> dict[str, Any]:
         "pending_approval": state.pending_approval,
         "change_set_proposal": proposal,
         "observations": list(state.observations),
+        "edit_target_candidates": list(getattr(state, "edit_target_candidates", []) or []),
+        "target_selection_diagnostics": dict(getattr(state, "target_selection_diagnostics", {}) or {}),
     }

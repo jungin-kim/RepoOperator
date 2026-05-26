@@ -162,9 +162,13 @@ def final_emit_message_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 
 def _response_with_change_set_payload(response: AgentRunResponse, state: RepoOperatorGraphState) -> AgentRunResponse:
     workflow_updates = _workflow_response_updates(state)
+    recommendation_context = _runtime_recommendation_context(response, state)
     proposal = state.get("change_set_proposal")
     if not isinstance(proposal, dict) or not proposal.get("changes"):
-        return response.model_copy(update=json_safe(workflow_updates)) if workflow_updates else response
+        updates = dict(workflow_updates)
+        if recommendation_context:
+            updates["recommendation_context"] = recommendation_context
+        return response.model_copy(update=json_safe(updates)) if updates else response
     validation = proposal.get("validation") if isinstance(proposal.get("validation"), dict) else {}
     validation_status = str(validation.get("status") or proposal.get("status") or "planned")
     errors = [str(item) for item in validation.get("errors") or proposal.get("proposal_errors") or []]
@@ -192,6 +196,9 @@ def _response_with_change_set_payload(response: AgentRunResponse, state: RepoOpe
         "applied_change_set_id": state.get("applied_change_set_id") or proposal.get("applied_change_set_id"),
         "post_apply_validation_status": state.get("post_apply_validation_status") or proposal.get("post_apply_validation_status"),
     }
+    if recommendation_context:
+        plan = proposal.get("plan") if isinstance(proposal.get("plan"), dict) else None
+        updates["recommendation_context"] = json_safe({**recommendation_context, "implementation_plan": plan} if plan else recommendation_context)
     if errors:
         updates["proposal_error_details"] = "; ".join(errors)
     if isinstance(first, dict):
@@ -209,6 +216,23 @@ def _response_with_change_set_payload(response: AgentRunResponse, state: RepoOpe
         updates["response"] = workflow_updates.get("response")
         updates["command_approval"] = workflow_updates.get("command_approval")
     return response.model_copy(update=json_safe(updates))
+
+
+def _runtime_recommendation_context(response: AgentRunResponse, state: RepoOperatorGraphState) -> dict[str, Any]:
+    context = dict(response.recommendation_context or {})
+    understanding = state.get("user_understanding_context") if isinstance(state.get("user_understanding_context"), dict) else None
+    evidence_basis = state.get("evidence_basis") if isinstance(state.get("evidence_basis"), dict) else None
+    target_selection = state.get("target_selection_diagnostics") if isinstance(state.get("target_selection_diagnostics"), dict) else None
+    candidates = target_selection.get("candidates") if target_selection else state.get("edit_target_candidates")
+    if understanding:
+        context["user_understanding_context"] = understanding
+    if evidence_basis:
+        context["evidence_basis"] = evidence_basis
+    if target_selection:
+        context["target_selection"] = target_selection
+    if candidates:
+        context["edit_target_candidates"] = candidates
+    return json_safe(context)
 
 def _workflow_response_updates(state: RepoOperatorGraphState) -> dict[str, Any]:
     updates: dict[str, Any] = {}

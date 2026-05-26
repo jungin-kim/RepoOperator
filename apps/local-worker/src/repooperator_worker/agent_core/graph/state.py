@@ -71,6 +71,8 @@ class RepoOperatorGraphState(TypedDict, total=False):
     context_pack_summary: dict[str, Any] | None
     context_pack_report: dict[str, Any] | None
     short_term_memory: dict[str, Any] | None
+    edit_target_candidates: list[dict[str, Any]]
+    target_selection_diagnostics: dict[str, Any] | None
     request_understanding_snapshot: dict[str, Any] | None
     user_understanding_context: dict[str, Any] | None
     evidence_basis: dict[str, Any] | None
@@ -172,6 +174,8 @@ def initial_graph_state(
         "context_pack_summary": None,
         "context_pack_report": None,
         "short_term_memory": None,
+        "edit_target_candidates": [],
+        "target_selection_diagnostics": None,
         "request_understanding_snapshot": None,
         "user_understanding_context": None,
         "evidence_basis": None,
