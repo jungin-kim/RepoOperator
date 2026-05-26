@@ -46,9 +46,9 @@ def start_run(request: AgentRunRequest, *, stream: bool = False) -> AgentRunResp
     start = time.perf_counter()
     response: AgentRunResponse | None = None
     try:
-        from repooperator_worker.agent_core.controller_graph import run_controller_graph
+        from repooperator_worker.agent_core.langgraph_runtime import run_langgraph_controller
 
-        response = run_controller_graph(request, run_id=run_id).model_copy(update={"run_id": run_id})
+        response = run_langgraph_controller(request, run_id=run_id).model_copy(update={"run_id": run_id})
         final_payload = _safe_final_result(response, run_id=run_id)
         _record_response_events(run_id, request, response)
         if _is_waiting_for_approval(response):
@@ -127,9 +127,9 @@ def stream_run(request: AgentRunRequest) -> tuple[str, Iterator[str]]:
         final_result: dict | None = None
         started = time.perf_counter()
         try:
-            from repooperator_worker.agent_core.controller_graph import stream_controller_graph
+            from repooperator_worker.agent_core.langgraph_runtime import stream_langgraph_controller
 
-            for event in stream_controller_graph(request, run_id=run_id):
+            for event in stream_langgraph_controller(request, run_id=run_id):
                 if isinstance(event, str):
                     try:
                         event = json.loads(event)
@@ -489,7 +489,7 @@ def _approval_resume_payload(response: AgentRunResponse, request: AgentRunReques
         )
     payload.update(
         {
-            "runtime": "langgraph" if response.agent_flow == "langgraph" else "legacy",
+            "runtime": "langgraph",
             "run_id": response.run_id,
             "thread_id": request.thread_id,
             "repo": request.project_path,
@@ -548,25 +548,14 @@ def _record_response_events(run_id: str, request: AgentRunRequest, response: Age
             related_command=(response.command_approval or {}).get("command") if response.command_approval else None,
         )
         return
-    if response.agent_flow == "agent_core_controller":
-        append_activity(
-            run_id,
-            request=request,
-            phase="Finished",
-            label="Completed task",
-            detail=response.stop_reason or response.response_type,
-            status="completed" if response.stop_reason != "cancelled" else "failed",
-            event_type="run_completed" if response.stop_reason != "cancelled" else "run_cancelled",
-        )
-        return
     append_activity(
         run_id,
         request=request,
-        phase="Thinking",
-        label="Framed request",
-        detail=response.response_type or "assistant_answer",
-        status="completed",
-        event_type="request_framed",
+        phase="Finished",
+        label="Completed task",
+        detail=response.stop_reason or response.response_type,
+        status="completed" if response.stop_reason != "cancelled" else "failed",
+        event_type="run_completed" if response.stop_reason != "cancelled" else "run_cancelled",
     )
     for file_path in response.files_read:
         append_activity(

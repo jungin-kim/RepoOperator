@@ -2,9 +2,8 @@
 Compatibility shim — do not add logic here.
 
 All real implementation lives in request_understanding.py.
-This module re-exports the symbols that controller_graph.py imported
-from the previous classifier.py so existing call-sites keep working
-without changes.
+This module re-exports the old classifier symbols so existing direct imports
+keep working without old routing fields.
 """
 from __future__ import annotations
 

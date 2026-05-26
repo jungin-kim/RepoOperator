@@ -1126,7 +1126,7 @@ export function ChatApp() {
           if (!event.message) continue;
           setProgressSteps((prev) => {
             const next = mergeProgressStep(prev, {
-              id: `legacy-progress:${runThreadId}`,
+              id: `langgraph-progress:${runThreadId}`,
               phase: "Thinking",
               label: event.message,
               status: "running",

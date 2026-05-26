@@ -6,7 +6,7 @@ Graph shape:
 
 This module is retained for older direct imports and tests, but it is not part
 of the active /agent/run or /agent/run/stream execution path. Active runs are
-handled by repooperator_worker.agent_core.controller_graph.
+handled by the LangGraph runtime in repooperator_worker.agent_core.graph.
 """
 
 import logging

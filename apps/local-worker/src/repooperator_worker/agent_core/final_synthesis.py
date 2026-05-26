@@ -20,7 +20,7 @@ class FinalSynthesisService:
     """Compatibility seam for final synthesis and deterministic answer repair."""
 
     def build_answer(self, state: AgentCoreState, request: AgentRunRequest, *, skills_context: str = "", on_delta: Any | None = None) -> str:
-        from repooperator_worker.agent_core.controller_graph import build_final_answer_text
+        from repooperator_worker.agent_core.graph.support import build_final_answer_text
 
         return build_final_answer_text(state, request, skills_context=skills_context, on_delta=on_delta)
 
@@ -560,8 +560,8 @@ def _chunk_text(text: str, chunk_size: int = 96):
 
 def _compat_model_client():
     try:
-        from repooperator_worker.agent_core import controller_graph
+        from repooperator_worker.agent_core.graph import support
 
-        return getattr(controller_graph, "OpenAICompatibleModelClient", _OpenAICompatibleModelClient)
+        return getattr(support, "OpenAICompatibleModelClient", _OpenAICompatibleModelClient)
     except Exception:
         return _OpenAICompatibleModelClient

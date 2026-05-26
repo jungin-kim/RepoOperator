@@ -6,11 +6,12 @@ from typing import Any, Iterator
 
 from langgraph.types import Command
 
-from repooperator_worker.agent_core.graph.adapters import _controller, _core_state_from_graph, _is_langgraph_checkpointer
+from repooperator_worker.agent_core.graph.adapters import _core_state_from_graph, _is_langgraph_checkpointer
 from repooperator_worker.agent_core.graph.builder import build_repooperator_state_graph
 from repooperator_worker.agent_core.graph.checkpoints import get_default_langgraph_checkpointer
 from repooperator_worker.agent_core.graph.nodes.finalization import _response_with_change_set_payload
 from repooperator_worker.agent_core.graph.state import graph_config_for_request, initial_graph_state
+from repooperator_worker.agent_core.graph.support import build_final_response, validate_active_repository
 from repooperator_worker.agent_core.graph_state import request_to_snapshot, response_from_snapshot
 from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
 from repooperator_worker.services.event_service import append_run_event, list_run_events
@@ -29,7 +30,7 @@ def run_langgraph_controller(
     checkpoint_adapter: Any | None = None,
 ) -> AgentRunResponse:
     run_id = run_id or "run_controller"
-    _controller()._validate_active_repository(request)
+    validate_active_repository(request)
     skills_context, skills_used = enabled_skill_context(task=request.task)
     initial_state = initial_graph_state(
         request,
@@ -43,6 +44,7 @@ def run_langgraph_controller(
     final_state = compiled.invoke(initial_state, config=config)
     if final_state.get("__interrupt__"):
         snapshot_state = dict(compiled.get_state(config).values or {})
+        snapshot_state = _state_with_interrupt_payload(snapshot_state, final_state)
         snapshot_state.setdefault("request_snapshot", request_to_snapshot(request))
         snapshot_state.setdefault("run_id", run_id)
         snapshot_state.setdefault("thread_id", request.thread_id)
@@ -55,7 +57,7 @@ def run_langgraph_controller(
     core = _core_state_from_graph(final_state)
     if not core.final_response:
         core.final_response = final_state.get("final_response") or ""
-    return _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"})
+    return build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"})
 
 def resume_langgraph_controller(
     request: AgentRunRequest,
@@ -68,12 +70,15 @@ def resume_langgraph_controller(
     config = graph_config_for_request(request, run_id)
     final_state = compiled.invoke(Command(resume=json_safe(approval_decision)), config=config)
     if final_state.get("__interrupt__"):
-        return _response_from_interrupted_state(dict(compiled.get_state(config).values or {}), request)
+        return _response_from_interrupted_state(
+            _state_with_interrupt_payload(dict(compiled.get_state(config).values or {}), final_state),
+            request,
+        )
     response = response_from_snapshot(final_state.get("response_snapshot"))
     if isinstance(response, AgentRunResponse):
         return response
     core = _core_state_from_graph({**dict(final_state), "request_snapshot": request_to_snapshot(request), "run_id": run_id})
-    return _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"})
+    return build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"})
 
 def stream_langgraph_controller(request: AgentRunRequest, *, run_id: str | None = None) -> Iterator[dict[str, Any]]:
     resolved_run_id = run_id or "run_controller"
@@ -86,19 +91,48 @@ def stream_langgraph_controller(request: AgentRunRequest, *, run_id: str | None 
     if not any(event.get("type") == "assistant_delta" for event in list_run_events(resolved_run_id)):
         for chunk in _chunk_text(response.response):
             yield {"type": "assistant_delta", "delta": chunk, "streaming_mode": "post_hoc_chunking"}
-    final = _controller()._response_json_safe(response.model_copy(update={"activity_events": []}), request)
+    final = response.model_copy(update={"activity_events": [], "agent_flow": "langgraph"})
     yield {"type": "final_message", "result": safe_agent_response_payload(final)}
 
 def _response_from_interrupted_state(state: dict[str, Any], request: AgentRunRequest) -> AgentRunResponse:
     state = dict(state)
     state.setdefault("request_snapshot", request_to_snapshot(request))
+    state = _state_with_interrupt_payload(state, state)
     core = _core_state_from_graph(state)
     if not core.stop_reason:
         core.stop_reason = "waiting_approval"
     return _response_with_change_set_payload(
-        _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"}),
+        build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"}),
         state,
     )
+
+def _state_with_interrupt_payload(state: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    payload = _interrupt_payload(source)
+    if not payload:
+        return state
+    updated = dict(state)
+    if not updated.get("pending_approval"):
+        updated["pending_approval"] = payload
+    if not updated.get("stop_reason"):
+        updated["stop_reason"] = "waiting_approval"
+    if not updated.get("final_response"):
+        kind = str(payload.get("kind") or "")
+        if kind in {"git_commit", "git_push", "github_create_pr", "gitlab_create_mr"}:
+            title = "Commit approval required" if kind == "git_commit" else "Git approval required"
+            updated["final_response"] = f"{title}. {payload.get('risk') or payload.get('reason') or 'This action requires approval.'}"
+    return updated
+
+def _interrupt_payload(source: dict[str, Any]) -> dict[str, Any] | None:
+    interrupts = source.get("__interrupt__") if isinstance(source, dict) else None
+    if not interrupts:
+        return None
+    first = interrupts[0] if isinstance(interrupts, (list, tuple)) else interrupts
+    value = getattr(first, "value", None)
+    if isinstance(value, dict):
+        return json_safe(value)
+    if isinstance(first, dict) and isinstance(first.get("value"), dict):
+        return json_safe(first["value"])
+    return None
 
 def _stream_final_delta(run_id: str):
     def emit(delta: str) -> None:

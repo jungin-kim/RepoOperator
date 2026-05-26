@@ -1,81 +1,50 @@
+"""LangGraph-native support services for RepoOperator agent runs."""
+
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-from repooperator_worker.agent_core.agent_loop import AgentLoop, AgentLoopDeps
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult
 from repooperator_worker.agent_core.context_service import get_default_context_service
 from repooperator_worker.agent_core.context_packer import pack_context
 from repooperator_worker.agent_core.events import append_activity_event, append_work_trace
+from repooperator_worker.agent_core.final_response import build_agent_response
 from repooperator_worker.agent_core.final_synthesis import (
     _answer_with_model,
     validate_or_repair_final_answer,
 )
-from repooperator_worker.agent_core.final_response import build_agent_response
-from repooperator_worker.agent_core.hooks import HookManager
 from repooperator_worker.agent_core.planner import (
     TaskFrame,
     _format_command_result,
     _format_edit_proposal,
-    _has_action,
-    _has_command_preview,
-    _has_command_run,
-    _has_search_for,
-    _latest_command_preview,
     _latest_command_result,
     _latest_edit_proposal,
-    _latest_unrun_read_only_preview,
-    _preview_read_only,
     _repository_review_response,
     build_task_frame,
-    candidate_files_from_results,
-    command_needed_for_task,
     current_edit_target_files,
-    current_search_candidate_files,
     edit_requested,
-    emit_target_resolution,
-    ide_context_for_request,
-    ide_edit_target_files,
-    known_context_files,
     likely_feature_context_files,
-    likely_edit_file_queries,
-    normalize_search_query,
     pending_commit_context,
-    project_summary_files,
-    propose_next_action_with_model as planner_propose_next_action_with_model,
-    resolve_target_files,
 )
 from repooperator_worker.agent_core.state import AgentCoreState
-from repooperator_worker.agent_core.steering import consume_steering_for_state
 from repooperator_worker.agent_core.task_policy import (
     action_operation,
-    block_current_subtask,
     ensure_subtasks,
-    first_batch_files,
     group_inventory,
-    minimum_evidence_missing_for_task,
-    next_evidence_gathering_action,
-    next_recovery_action,
-    record_ineffective_action,
     repository_file_inventory,
-    should_ask_clarification_now,
     update_subtasks_after_action,
 )
-from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator
-from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
-from repooperator_worker.services.model_client import OpenAICompatibleModelClient
-from repooperator_worker.services.event_service import append_run_event, get_run, list_run_events
-from repooperator_worker.services.json_safe import json_safe, safe_agent_response_payload, safe_repr
-from repooperator_worker.services.skills_service import enabled_skill_context
 from repooperator_worker.services.active_repository import get_active_repository
+from repooperator_worker.services.event_service import append_run_event, get_run
+from repooperator_worker.services.json_safe import json_safe, safe_agent_response_payload, safe_repr
+from repooperator_worker.services.model_client import OpenAICompatibleModelClient
 
 
 @dataclass(frozen=True)
@@ -89,75 +58,23 @@ class LoopBudget:
 
 HARD_MAX_LOOP_ITERATIONS = 18
 
-def run_controller_graph(
-    request: AgentRunRequest,
-    *,
-    run_id: str | None = None,
-    stream_final_answer: bool = False,
-) -> AgentRunResponse:
-    if _use_langgraph_runtime():
-        from repooperator_worker.agent_core.langgraph_runtime import run_langgraph_controller
 
-        return run_langgraph_controller(request, run_id=run_id, stream_final_answer=stream_final_answer)
-    run_id = run_id or "run_controller"
-    _validate_active_repository(request)
-    state = _initial_state(request, run_id)
-    skills_context, skills_used = enabled_skill_context(task=request.task)
-    state.skills_used = skills_used
-    registry = get_default_tool_registry()
-    hook_manager = HookManager()
-    context_service = get_default_context_service()
-    orchestrator = ToolOrchestrator(run_id=run_id, request=request, registry=registry, hook_manager=hook_manager)
-
-    def append_action_event(action: AgentAction, result: ActionResult) -> None:
-        _append_run_event_safe(
-            run_id,
-            {
-                "type": "action_result",
-                "event_type": "action_result",
-                "status": result.status,
-                "action": action.model_dump(),
-                "result": result.model_dump(),
-            },
+def validate_active_repository(request: AgentRunRequest) -> None:
+    try:
+        active = get_active_repository()
+    except Exception:
+        active = None
+    if active is None:
+        return
+    requested = str(request.project_path)
+    active_path = str(active.project_path)
+    if requested != active_path:
+        raise ValueError(
+            "The active repository changed before this run started. "
+            "Open the repository again or start a new thread for the stale request."
         )
-
-    def synthesize(state_for_answer: AgentCoreState, request_for_answer: AgentRunRequest) -> str:
-        refresh_context_pack_for_core(state_for_answer, request_for_answer, _context_kind_for_core_answer(state_for_answer, request_for_answer), "final_synthesis")
-        on_delta = _stream_final_delta(run_id) if stream_final_answer else None
-        packet_context = ""
-        if isinstance(state_for_answer.context_packet, dict):
-            packet_context = str(state_for_answer.context_packet.get("skills_context") or "")
-        return build_final_answer_text(
-            state_for_answer,
-            request_for_answer,
-            skills_context=packet_context or skills_context,
-            on_delta=on_delta,
-        )
-
-    loop = AgentLoop(
-        AgentLoopDeps(
-            context_service=context_service,
-            tool_registry=registry,
-            tool_orchestrator=orchestrator,
-            hook_manager=hook_manager,
-            load_context=load_context,
-            classify=classify,
-            create_initial_plan=create_initial_plan,
-            emit_plan_update=emit_plan_update,
-            should_continue=should_continue,
-            check_cancel=check_cancel,
-            consume_steering=consume_steering_for_state,
-            choose_next_action=controller_choose_next_action,
-            execute_action=lambda action: _execute_action_with_context_pack(orchestrator, state, request, action),
-            append_action_event=append_action_event,
-            observe_result=observe_result,
-            update_plan=update_plan,
-            build_final_answer=synthesize,
-            validate_final_answer=validate_or_repair_final_answer,
-            build_final_response=build_final_response,
-        )
-    )
-    return loop.run(state, request)
+    if request.branch and active.branch and request.branch != active.branch:
+        raise ValueError("The active branch changed before this run started.")
 
 
 def load_context(state: AgentCoreState, request: AgentRunRequest) -> None:
@@ -169,7 +86,7 @@ def load_context(state: AgentCoreState, request: AgentRunRequest) -> None:
     append_activity_event(
         run_id=state.run_id,
         request=request,
-        activity_id="controller-load-context",
+        activity_id="langgraph-load-context",
         event_type="activity_completed",
         phase="Thinking",
         label="Loaded context",
@@ -190,9 +107,10 @@ def load_context(state: AgentCoreState, request: AgentRunRequest) -> None:
 
 def classify(state: AgentCoreState, request: AgentRunRequest) -> None:
     from repooperator_worker.agent_core.request_understanding import (
-        understand_request,
         request_understanding_to_classifier_result,
+        understand_request,
     )
+
     refresh_context_pack_for_core(state, request, "summary", "understand_request")
     ru = understand_request(request)
     state.request_understanding = ru
@@ -208,7 +126,7 @@ def classify(state: AgentCoreState, request: AgentRunRequest) -> None:
     append_activity_event(
         run_id=state.run_id,
         request=request,
-        activity_id="controller-frame-request",
+        activity_id="langgraph-frame-request",
         event_type="activity_completed",
         phase="Thinking",
         label="Framed request",
@@ -279,49 +197,6 @@ def _core_context_pack_state(state: AgentCoreState) -> dict[str, Any]:
     }
 
 
-def _execute_action_with_context_pack(
-    orchestrator: ToolOrchestrator,
-    state: AgentCoreState,
-    request: AgentRunRequest,
-    action: AgentAction,
-) -> ActionResult:
-    if action.type in {"generate_change_set", "generate_edit"}:
-        refresh_context_pack_for_core(state, request, "edit", "generate_change_set")
-    if action.type == "summarize_web_evidence":
-        refresh_context_pack_for_core(state, request, "web_research", "web_research_summary")
-    return orchestrator.execute_action(action)
-
-
-def _context_kind_for_core_frame(frame: TaskFrame, state: AgentCoreState, request: AgentRunRequest) -> str:
-    if any(result.errors for result in state.action_results):
-        return "repair"
-    if edit_requested(frame):
-        return "edit"
-    if _is_broad_analysis_request(frame):
-        return "broad_analysis"
-    lowered = request.task.lower()
-    if any(term in lowered for term in ("search web", "look up", "latest", "current", "web research")):
-        return "web_research"
-    if pending_commit_context(frame):
-        return "git_workflow"
-    return "summary"
-
-
-def _context_kind_for_core_answer(state: AgentCoreState, request: AgentRunRequest) -> str:
-    frame = build_task_frame(request, state)
-    if any(result.errors for result in state.action_results):
-        return "repair"
-    if any((result.payload or {}).get("web_evidence") or (result.payload or {}).get("web_evidence_summary") for result in state.action_results):
-        return "web_research"
-    if edit_requested(frame) or _latest_edit_proposal(state):
-        return "edit"
-    if _is_broad_analysis_request(frame):
-        return "broad_analysis"
-    if pending_commit_context(frame):
-        return "git_workflow"
-    return "summary"
-
-
 def determine_loop_budget(frame: TaskFrame, request: AgentRunRequest, context_packet: dict[str, Any] | None = None) -> LoopBudget:
     del request, context_packet
     explicit_file = bool(frame.mentioned_files)
@@ -362,7 +237,13 @@ def create_initial_plan(state: AgentCoreState) -> None:
     ]
 
 
-def should_continue(state: AgentCoreState, *, started: float, max_wall_clock_seconds: int, request: AgentRunRequest | None = None) -> bool:
+def should_continue(
+    state: AgentCoreState,
+    *,
+    started: float,
+    max_wall_clock_seconds: int,
+    request: AgentRunRequest | None = None,
+) -> bool:
     if state.stop_reason or state.cancellation_requested:
         return False
     if state.loop_iteration >= state.max_loop_iterations:
@@ -408,7 +289,7 @@ def check_cancel(state: AgentCoreState, request: AgentRunRequest) -> None:
     append_activity_event(
         run_id=state.run_id,
         request=request,
-        activity_id="controller-cancelled",
+        activity_id="langgraph-cancelled",
         event_type="activity_completed",
         phase="Finished",
         label="Run cancelled",
@@ -417,276 +298,9 @@ def check_cancel(state: AgentCoreState, request: AgentRunRequest) -> None:
     )
 
 
-def controller_choose_next_action(state: AgentCoreState, request: AgentRunRequest) -> AgentAction:
-    frame = build_task_frame(request, state)
-    ensure_subtasks(state, request, frame)
-    state.recommendation_context = json_safe({"task_frame": frame, "context_packet": state.context_packet})
-
-    if state.actions_taken and state.action_results:
-        previous_action = state.actions_taken[-1]
-        previous_result = state.action_results[-1]
-        if _is_ineffective_result(previous_action, previous_result):
-            recovery = next_recovery_action(state, request, frame, previous_action, previous_result)
-            if recovery and not _repeats_ineffective_action(state, recovery):
-                return recovery
-
-    resolved = resolve_target_files(request, frame.mentioned_files, preferred=known_context_files(request, state))
-    unread = [path for path in resolved if path not in state.files_read]
-    if unread:
-        emit_target_resolution(state, request, frame.mentioned_files, resolved)
-        return AgentAction(
-            type="read_file",
-            reason_summary="Read resolved target files before answering.",
-            target_files=unread,
-            expected_output="File contents for grounded answer.",
-        )
-
-    unresolved = [item for item in frame.mentioned_files if item and not any(Path(path).name.lower() == Path(item).name.lower() or path.lower() == item.lower() for path in resolved)]
-    if unresolved and not _has_search_for(state, unresolved):
-        return AgentAction(
-            type="search_files",
-            reason_summary="Resolve mentioned files before asking for clarification.",
-            expected_output="Repo-relative candidate paths.",
-            payload={"queries": unresolved},
-        )
-
-    explicit_candidates = current_search_candidate_files(state, min_score=35.0)
-    explicit_candidate_unread = [
-        path for path in explicit_candidates
-        if path not in state.files_read and any(Path(path).name.lower() == Path(item).name.lower() for item in unresolved)
-    ]
-    if explicit_candidate_unread:
-        return AgentAction(
-            type="read_file",
-            reason_summary="Read the resolved high-confidence target file.",
-            target_files=explicit_candidate_unread[:1],
-            expected_output="File contents for grounded answer.",
-        )
-
-    if frame.mentioned_files and resolved and all(path in state.files_read for path in resolved) and not edit_requested(frame):
-        return AgentAction(type="final_answer", reason_summary="Answer from the explicitly requested file evidence.")
-
-    if unresolved and _has_search_for(state, unresolved):
-        return AgentAction(
-            type="ask_clarification",
-            reason_summary="Ask a precise file clarification after repository search did not find targets.",
-            payload={"missing_files": unresolved},
-        )
-
-    if edit_requested(frame):
-        ide_targets = ide_edit_target_files(request, state, frame)
-        ide_unread = [path for path in ide_targets if path not in state.files_read]
-        if ide_unread:
-            return AgentAction(
-                type="read_file",
-                reason_summary="Read the active editor file before preparing an edit proposal.",
-                target_files=ide_unread[:1],
-                expected_output="Active editor file contents for edit targeting.",
-                payload={"source": "ide_context", "active_editor_target": ide_unread[0]},
-            )
-
-    if frame.mentioned_symbols and not state.files_read and not _has_search_for(state, frame.mentioned_symbols):
-        return AgentAction(
-            type="search_files",
-            reason_summary="Resolve mentioned symbols before answering.",
-            target_symbols=frame.mentioned_symbols,
-            expected_output="Repo-relative candidate paths.",
-            payload={"queries": frame.mentioned_symbols},
-        )
-
-    evidence_action = next_evidence_gathering_action(state, request, frame)
-    if evidence_action and not _repeats_ineffective_action(state, evidence_action):
-        return evidence_action
-
-    if should_ask_clarification_now(state, request, frame):
-        missing = minimum_evidence_missing_for_task(state, request, frame)
-        checked = _checked_evidence_summary(state)
-        question = _clarification_question(missing, checked, frame)
-        block_current_subtask(state, question)
-        return AgentAction(
-            type="ask_clarification",
-            reason_summary="Ask a precise clarification after safe evidence gathering did not resolve the target.",
-            payload={"question": question, "missing_evidence": missing, "checked_evidence": checked},
-        )
-
-    refresh_context_pack_for_core(state, request, _context_kind_for_core_frame(frame, state, request), "planner")
-    planned = planner_propose_next_action_with_model(request, state, frame, model_client_factory=OpenAICompatibleModelClient)
-    if planned and not _repeats_ineffective_action(state, planned):
-        return planned
-
-    unrun_preview = _latest_unrun_read_only_preview(state)
-    if unrun_preview:
-        return AgentAction(
-            type="run_approved_command",
-            reason_summary="Run read-only command after policy preview.",
-            command=list(unrun_preview.command_result.get("command") or []),
-            expected_output="Command output for the user request.",
-        )
-
-    command = command_needed_for_task(frame, state)
-    if command:
-        if not _has_command_preview(state, command):
-            return AgentAction(
-                type="inspect_git_state" if command[:1] == ["git"] else "preview_command",
-                reason_summary="Preview the safe command needed for missing evidence.",
-                command=command,
-                expected_output="Command safety classification.",
-            )
-        preview = _latest_command_preview(state, command)
-        if preview and preview.status == "success" and _preview_read_only(preview.command_result) and not _has_command_run(state, command):
-            return AgentAction(
-                type="run_approved_command",
-                reason_summary="Run read-only command after policy preview.",
-                command=command,
-                expected_output="Command output for the user request.",
-            )
-        if pending_commit_context(frame) and _has_command_run(state, ["git", "log", "--oneline", "-n", "5"]) and not _has_command_preview(state, ["git", "status", "--short"]):
-            return AgentAction(
-                type="inspect_git_state",
-                reason_summary="Inspect git status before discussing a possible commit.",
-                command=["git", "status", "--short"],
-                expected_output="Working tree status.",
-            )
-        return AgentAction(type="final_answer", reason_summary="Answer from command evidence.")
-
-    searched_candidates = candidate_files_from_results(state, edit_related=edit_requested(frame))
-    candidate_unread = [path for path in searched_candidates if path not in state.files_read]
-    if candidate_unread:
-        read_limit = 1 if edit_requested(frame) else 4
-        return AgentAction(
-            type="read_file",
-            reason_summary="Read best candidate files found by repository search.",
-            target_files=candidate_unread[:read_limit],
-            expected_output="Candidate file contents.",
-        )
-
-    if edit_requested(frame):
-        edit_targets = current_edit_target_files(state, frame, request)
-        if edit_targets:
-            if not _has_action(state, "generate_edit"):
-                return AgentAction(
-                    type="generate_edit",
-                    reason_summary="Prepare a proposed patch for validated current edit targets.",
-                    target_files=edit_targets,
-                    expected_output="Proposed diff and before/after summary.",
-                    payload={"task_frame": json_safe(frame), "current_edit_targets": edit_targets},
-                )
-            return AgentAction(type="final_answer", reason_summary="Report the proposed edit without claiming it was applied.")
-        missing = minimum_evidence_missing_for_task(state, request, frame)
-        checked = _checked_evidence_summary(state)
-        question = _clarification_question(missing, checked, frame)
-        block_current_subtask(state, question)
-        return AgentAction(
-            type="ask_clarification",
-            reason_summary="Ask which implementation area to change after evidence gathering did not find a safe target.",
-            payload={"question": question, "missing_evidence": missing, "checked_evidence": checked},
-        )
-
-    if not state.files_read and not _has_action(state, "inspect_repo_tree"):
-        return AgentAction(type="inspect_repo_tree", reason_summary="Inspect repository inventory before answering.")
-
-    project_files = project_summary_files(request)
-    unread_project_files = [path for path in project_files if path not in state.files_read]
-    if unread_project_files and len(state.files_read) < 4:
-        return AgentAction(
-            type="read_file",
-            reason_summary="Read high-signal project files for a project-level answer.",
-            target_files=unread_project_files[:4],
-            expected_output="Project purpose and technology evidence.",
-        )
-
-    if not state.files_read and unresolved:
-        return AgentAction(
-            type="ask_clarification",
-            reason_summary="Ask a precise file clarification after repository search did not find targets.",
-            payload={"missing_files": unresolved},
-        )
-    return AgentAction(type="final_answer", reason_summary="Enough evidence is available for a grounded answer.")
-
-
-def _repeats_ineffective_action(state: AgentCoreState, action: AgentAction) -> bool:
-    signature = _action_signature(action)
-    if not signature:
-        return False
-    ineffective = 0
-    for previous, result in zip(state.actions_taken, state.action_results):
-        if _action_signature(previous) != signature:
-            continue
-        if _is_ineffective_result(previous, result):
-            ineffective += 1
-    return ineffective >= 1
-
-
-def _action_signature(action: AgentAction) -> tuple[str, str] | None:
-    if action.type == "search_text":
-        return (action.type, normalize_search_query(action.payload.get("query") or ""))
-    if action.type == "search_files":
-        queries = [normalize_search_query(item) for item in action.payload.get("queries") or [] if normalize_search_query(item)]
-        text_queries = [normalize_search_query(item) for item in action.payload.get("text_queries") or [] if normalize_search_query(item)]
-        return (action.type, "|".join([*queries, *text_queries]))
-    if action.type == "read_file":
-        return (action.type, "|".join(sorted(action.target_files)))
-    if action.command:
-        return (action.type, shlex.join(action.command))
-    return None
-
-
-def _is_ineffective_result(action: AgentAction, result: ActionResult) -> bool:
-    if result.status in {"failed", "skipped", "timed_out"}:
-        return True
-    if action.type == "search_files":
-        return not bool(result.payload.get("candidates"))
-    if action.type == "search_text":
-        return not bool(result.payload.get("matches"))
-    return False
-
-
-def _zero_result_search_count(state: AgentCoreState) -> int:
-    count = 0
-    for action, result in zip(state.actions_taken, state.action_results):
-        if action.type not in {"search_files", "search_text"}:
-            continue
-        if _is_ineffective_result(action, result):
-            count += 1
-    return count
-
-
-def _checked_evidence_summary(state: AgentCoreState) -> list[str]:
-    checked: list[str] = []
-    if any(action.type == "inspect_repo_tree" for action in state.actions_taken):
-        checked.append("repository structure")
-    searched: list[str] = []
-    for action in state.actions_taken:
-        if action.type == "search_files":
-            searched.extend(str(item) for item in [*(action.payload.get("queries") or []), *(action.payload.get("text_queries") or [])] if str(item))
-        elif action.type == "search_text":
-            query = str(action.payload.get("query") or "")
-            if query:
-                searched.append(query)
-    if searched:
-        checked.append("searches: " + ", ".join(_dedupe_text(searched[:8])))
-    if state.files_read:
-        checked.append("files read: " + ", ".join(state.files_read[-8:]))
-    return checked
-
-
-def _clarification_question(missing: list[str], checked: list[str], frame: TaskFrame) -> str:
-    missing_text = "; ".join(missing) if missing else "the remaining target or scope"
-    checked_text = "; ".join(checked) if checked else "no repository evidence could be gathered"
-    if edit_requested(frame):
-        return (
-            "I could not identify a safe implementation target from the repository evidence. "
-            f"Checked: {checked_text}. Missing: {missing_text}. "
-            "Please name the file, module, route, handler, or component that should own the change."
-        )
-    return (
-        "I need one more detail before I can answer accurately. "
-        f"Checked: {checked_text}. Missing: {missing_text}. "
-        "Please narrow the file, module, or workflow to inspect next."
-    )
-
-
 def observe_result(state: AgentCoreState, action: AgentAction, result: ActionResult, request: AgentRunRequest) -> None:
+    from repooperator_worker.agent_core.task_policy import record_ineffective_action
+
     record_ineffective_action(state, action, result)
     if result.files_read:
         for path in result.files_read:
@@ -718,7 +332,7 @@ def observe_result(state: AgentCoreState, action: AgentAction, result: ActionRes
         append_activity_event(
             run_id=state.run_id,
             request=request,
-            activity_id=f"controller-observe:{action.action_id}",
+            activity_id=f"langgraph-observe:{action.action_id}",
             event_type="activity_completed",
             phase="Observing",
             label="Recorded observation",
@@ -752,7 +366,7 @@ def emit_plan_update(state: AgentCoreState, request: AgentRunRequest, label: str
     append_activity_event(
         run_id=state.run_id,
         request=request,
-        activity_id="controller-plan",
+        activity_id="langgraph-plan",
         event_type="activity_updated",
         phase="Planning",
         label=label,
@@ -760,6 +374,75 @@ def emit_plan_update(state: AgentCoreState, request: AgentRunRequest, label: str
         observation="; ".join(state.plan[-4:]),
         aggregate={"plan_steps": list(state.plan), "loop_iteration": state.loop_iteration},
     )
+
+
+def emit_action_decision(state: AgentCoreState, request: AgentRunRequest, action: AgentAction) -> None:
+    note = action.payload.get("visible_work_note") if isinstance(action.payload, dict) else None
+    note = note if isinstance(note, dict) else {}
+    phase = "Safety" if action.type in {"preview_command", "inspect_git_state", "run_approved_command"} else "Decision"
+    safety_note = str(note.get("safety_note") or "")
+    if not safety_note and action.type in {"preview_command", "inspect_git_state", "run_approved_command"}:
+        safety_note = "Commands are checked through policy before any execution."
+    if not safety_note and action.type in {"generate_edit", "generate_change_set"}:
+        safety_note = "Edit generation is proposal-only; no files are written by this action."
+    append_work_trace(
+        run_id=state.run_id,
+        request=request,
+        activity_id=f"action:{action.action_id}",
+        phase=phase,
+        label=_action_label(action),
+        status="completed",
+        safe_reasoning_summary=str(note.get("why_this_action") or action.reason_summary),
+        current_action=_action_current_text(action),
+        next_action=action.expected_output,
+        evidence_needed=[str(item) for item in note.get("evidence_needed") or []],
+        uncertainty=[str(item) for item in note.get("uncertainty") or []],
+        safety_note=safety_note or None,
+        related_files=list(action.target_files),
+        command=action.command,
+        aggregate={"action_type": action.type},
+    )
+
+
+def _action_current_text(action: AgentAction) -> str:
+    if action.type == "read_file" and action.target_files:
+        return "Read " + ", ".join(f"`{path}`" for path in action.target_files[:6]) + "."
+    if action.type in {"search_files", "search_text"}:
+        queries = []
+        if isinstance(action.payload, dict):
+            queries = [str(item) for item in action.payload.get("queries") or []]
+            query = action.payload.get("query")
+            if query:
+                queries.append(str(query))
+        return "Search repository evidence" + (f" for {', '.join(queries[:4])}." if queries else ".")
+    if action.type in {"generate_edit", "generate_change_set"} and action.target_files:
+        return "Prepare a proposal-only patch for " + ", ".join(f"`{path}`" for path in action.target_files[:4]) + "."
+    if action.command:
+        return "Preview or run command through policy: `" + " ".join(action.command) + "`."
+    if action.type == "ask_clarification":
+        return "Ask for the missing information needed to proceed safely."
+    if action.type == "final_answer":
+        return "Prepare the final answer from gathered evidence."
+    return action.reason_summary
+
+
+def _action_label(action: AgentAction) -> str:
+    if action.type == "read_file" and action.target_files:
+        first = action.target_files[0]
+        return f"Reading {first}" if len(action.target_files) == 1 else "Reading repository files"
+    if action.type in {"search_files", "search_text"}:
+        return "Searching for repository evidence"
+    if action.type in {"preview_command", "inspect_git_state", "run_approved_command"}:
+        return "Checking command safety"
+    if action.type in {"generate_edit", "generate_change_set"}:
+        return "Preparing proposal-only edit"
+    if action.type in {"inspect_repo_tree", "analyze_repository"}:
+        return "Inspecting repository structure"
+    if action.type == "ask_clarification":
+        return "Preparing clarification"
+    if action.type == "final_answer":
+        return "Preparing final answer"
+    return "Working on the next repository step"
 
 
 def build_final_answer_text(
@@ -779,7 +462,7 @@ def build_final_answer_text(
         return repository_review.response
     edit_proposal = _latest_edit_proposal(state)
     if edit_proposal:
-        return _format_edit_proposal(edit_proposal, ide_context=ide_context_for_request(request, state))
+        return _format_edit_proposal(edit_proposal)
     proposal_error = _latest_proposal_error(state)
     if proposal_error:
         return (
@@ -922,18 +605,10 @@ def _file_role_summary(path: str, content: str) -> str:
     return "source or support file"
 
 
-def _dedupe_text(items: list[str]) -> list[str]:
-    out: list[str] = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out
-
-
 def build_final_response(state: AgentCoreState, request: AgentRunRequest) -> AgentRunResponse:
     review_response = _repository_review_response(state)
     if review_response and state.stop_reason not in {"cancelled", "waiting_approval"}:
-        return _response_json_safe(review_response.model_copy(update={"loop_iteration": state.loop_iteration}), request)
+        return _response_json_safe(review_response.model_copy(update={"loop_iteration": state.loop_iteration, "agent_flow": "langgraph"}), request)
     response_type = "command_approval" if state.pending_approval else "assistant_answer"
     graph_path = "agent_core:" + (
         "cancelled" if state.stop_reason == "cancelled"
@@ -941,79 +616,26 @@ def build_final_response(state: AgentCoreState, request: AgentRunRequest) -> Age
         else "read_file_answer" if state.files_read
         else "general_answer"
     )
-    return _response_json_safe(build_agent_response(
+    return _response_json_safe(
+        build_agent_response(
+            request,
+            response=state.final_response,
+            response_type=response_type,
+            files_read=state.files_read,
+            graph_path=graph_path,
+            intent_classification=state.classifier_result.intent,
+            run_id=state.run_id,
+            skills_used=state.skills_used,
+            stop_reason=state.stop_reason or "completed",
+            loop_iteration=max(1, state.loop_iteration),
+            command_approval=state.pending_approval,
+            commands_planned=[shlex.join(list(state.pending_approval.get("command") or []))] if state.pending_approval else [],
+            commands_run=state.commands_run,
+            activity_events=[],
+            agent_flow="langgraph",
+        ),
         request,
-        response=state.final_response,
-        response_type=response_type,
-        files_read=state.files_read,
-        graph_path=graph_path,
-        intent_classification=state.classifier_result.intent,
-        run_id=state.run_id,
-        skills_used=state.skills_used,
-        stop_reason=state.stop_reason or "completed",
-        loop_iteration=max(1, state.loop_iteration),
-        command_approval=state.pending_approval,
-        commands_planned=[shlex.join(list(state.pending_approval.get("command") or []))] if state.pending_approval else [],
-        commands_run=state.commands_run,
-        activity_events=[],
-    ), request)
-
-
-def _validate_active_repository(request: AgentRunRequest) -> None:
-    try:
-        active = get_active_repository()
-    except Exception:
-        active = None
-    if active is None:
-        return
-    requested = str(request.project_path)
-    active_path = str(active.project_path)
-    if requested != active_path:
-        raise ValueError(
-            "The active repository changed before this run started. "
-            "Open the repository again or start a new thread for the stale request."
-        )
-    if request.branch and active.branch and request.branch != active.branch:
-        raise ValueError("The active branch changed before this run started.")
-
-
-def stream_controller_graph(request: AgentRunRequest, *, run_id: str | None = None) -> Iterator[dict[str, Any]]:
-    if _use_langgraph_runtime():
-        from repooperator_worker.agent_core.langgraph_runtime import stream_langgraph_controller
-
-        yield from stream_langgraph_controller(request, run_id=run_id)
-        return
-    before_sequence = _latest_sequence(run_id) if run_id else 0
-    response = run_controller_graph(request, run_id=run_id, stream_final_answer=True)
-    for event in list_run_events(run_id or response.run_id or "", after_sequence=before_sequence):
-        if event.get("type") == "assistant_delta":
-            before_sequence = int(event.get("sequence") or before_sequence)
-            yield event
-    if not _streamed_assistant_delta(run_id or ""):
-        for chunk in _chunk_text(response.response):
-            yield {"type": "assistant_delta", "delta": chunk, "streaming_mode": "post_hoc_chunking"}
-    final = _response_json_safe(response.model_copy(update={"activity_events": []}), request)
-    yield {"type": "final_message", "result": safe_agent_response_payload(final)}
-
-
-def propose_next_action_with_model(request: AgentRunRequest, state: AgentCoreState, task_frame: TaskFrame) -> AgentAction | None:
-    return planner_propose_next_action_with_model(request, state, task_frame, model_client_factory=OpenAICompatibleModelClient)
-
-
-def _initial_state(request: AgentRunRequest, run_id: str) -> AgentCoreState:
-    return AgentCoreState(
-        run_id=run_id,
-        thread_id=request.thread_id,
-        repo=request.project_path,
-        branch=request.branch,
-        user_task=request.task,
     )
-
-
-def _use_langgraph_runtime() -> bool:
-    configured = os.getenv("REPOOPERATOR_AGENT_RUNTIME")
-    default = os.getenv("REPOOPERATOR_AGENT_RUNTIME_DEFAULT", "legacy")
-    return (configured if configured is not None else default).strip().lower() == "langgraph"
 
 
 def _safe_observation(action: AgentAction, result: ActionResult) -> str:
@@ -1036,26 +658,6 @@ def _safe_observation(action: AgentAction, result: ActionResult) -> str:
     if result.observation:
         return " ".join(str(result.observation).split())[:500]
     return ""
-
-
-def _stream_final_delta(run_id: str):
-    def emit(delta: str) -> None:
-        _append_run_event_safe(run_id, {"type": "assistant_delta", "delta": delta, "streaming_mode": "model_stream"})
-
-    return emit
-
-
-def _streamed_assistant_delta(run_id: str) -> bool:
-    if not run_id:
-        return False
-    return any(event.get("type") == "assistant_delta" for event in list_run_events(run_id))
-
-
-def _latest_sequence(run_id: str | None) -> int:
-    if not run_id:
-        return 0
-    events = list_run_events(run_id)
-    return max((int(event.get("sequence") or 0) for event in events), default=0)
 
 
 def _append_run_event_safe(run_id: str, event: dict[str, Any]) -> dict[str, Any]:
@@ -1100,6 +702,7 @@ def _response_json_safe(response: AgentRunResponse, request: AgentRunRequest) ->
             stop_reason=str(safe_payload.get("stop_reason") or "completed_with_metadata_error"),
             loop_iteration=int(safe_payload.get("loop_iteration") or 1),
             activity_events=list(safe_payload.get("activity_events") or []),
+            agent_flow="langgraph",
         )
 
 
@@ -1110,8 +713,9 @@ def _format_command_preview(command: list[str], preview: dict[str, Any]) -> str:
     return f"`{text}` is allowed by command policy. I did not run a mutating command."
 
 
-def _chunk_text(text: str, chunk_size: int = 96) -> Iterator[str]:
-    for start in range(0, len(text or ""), chunk_size):
-        chunk = text[start : start + chunk_size]
-        if chunk:
-            yield chunk
+def _dedupe_text(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out

@@ -7,7 +7,6 @@ from typing import Any
 from repooperator_worker.agent_core.capabilities.builtin import get_default_capability_registry
 from repooperator_worker.agent_core.context_packer import pack_context
 from repooperator_worker.agent_core.graph.adapters import (
-    _controller,
     _core_state_from_graph,
     _graph_transition_event,
     _request,
@@ -16,6 +15,7 @@ from repooperator_worker.agent_core.graph.adapters import (
 )
 from repooperator_worker.agent_core.graph.nodes.supervisor import _frame_is_edit_like, _should_use_supervisor
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
+from repooperator_worker.agent_core.graph.support import load_context
 from repooperator_worker.agent_core.mcp import get_default_mcp_registry
 from repooperator_worker.agent_core.plugins import get_default_plugin_registry
 from repooperator_worker.agent_core.skills import get_default_skill_registry
@@ -26,7 +26,7 @@ from repooperator_worker.services.json_safe import json_safe
 def load_context_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     request = _request(state)
     core = _core_state_from_graph(state)
-    _controller().load_context(core, request)
+    load_context(core, request)
     update = _updates_from_core(state, core)
     update["events_to_emit"] = [_graph_transition_event(state, "load_context", operation="load_context")]
     return _with_checkpoint_bump(update)

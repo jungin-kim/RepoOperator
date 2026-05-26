@@ -72,7 +72,7 @@ def safe_agent_response_payload(response: Any) -> dict[str, Any]:
         "skills_used": getattr(response, "skills_used", payload.get("skills_used", [])),
         "graph_path": getattr(response, "graph_path", payload.get("graph_path", None)),
         "run_id": getattr(response, "run_id", payload.get("run_id", None)),
-        "agent_flow": getattr(response, "agent_flow", payload.get("agent_flow", "agent_core_controller")),
+        "agent_flow": getattr(response, "agent_flow", payload.get("agent_flow", "langgraph")),
     }
     payload.update(json_safe(preserved))
     payload["metadata_serialization_error"] = True

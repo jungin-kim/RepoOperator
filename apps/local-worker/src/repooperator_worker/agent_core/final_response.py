@@ -59,7 +59,7 @@ def build_agent_response(
         "response_type": response_type,
         "intent_classification": intent_classification,
         "graph_path": graph_path,
-        "agent_flow": "agent_core_controller",
+        "agent_flow": "langgraph",
         "activity_events": activity_events or [],
         "run_id": run_id,
         "stop_reason": stop_reason,

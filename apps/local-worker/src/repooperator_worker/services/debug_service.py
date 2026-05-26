@@ -44,7 +44,9 @@ def get_debug_runtime_status() -> dict:
             "effective_sources": settings.configured_repository_sources,
         },
         "agent": {
-            "orchestration_mode": "agent_core_controller",
+            "orchestration_mode": "langgraph",
+            "runtime": "langgraph",
+            "default_runtime": "langgraph",
         },
         "thread_context": list_thread_context_items(),
         "memory": list_memory_items(),

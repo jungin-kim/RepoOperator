@@ -4,7 +4,7 @@ request_understanding adapter it wraps.
 
 Covers:
 - classify_intent returns ClassifierResult with intent="ambiguous" (no routing fields)
-- controller_graph no longer re-exports the classifier shim
+- LangGraph runtime no longer re-exports the classifier shim
 - Malformed model JSON falls back gracefully (intent="ambiguous")
 - _parse_classifier_json strips markdown fences
 - validate_classifier_payload returns ClassifierResult
@@ -45,11 +45,11 @@ class TestClassifierModule(unittest.TestCase):
         import repooperator_worker.agent_core.classifier as mod
         self.assertFalse(hasattr(mod, "CLASSIFIER_PROMPT"), "CLASSIFIER_PROMPT must not exist on the shim")
 
-    # ── controller_graph boundary ────────────────────────────────────────────
+    # ── LangGraph runtime boundary ───────────────────────────────────────────
 
-    def test_controller_graph_does_not_export_classifier_shim(self):
-        import repooperator_worker.agent_core.controller_graph as controller_graph
-        self.assertFalse(hasattr(controller_graph, "classify_intent"))
+    def test_langgraph_runtime_does_not_export_classifier_shim(self):
+        import repooperator_worker.agent_core.langgraph_runtime as runtime
+        self.assertFalse(hasattr(runtime, "classify_intent"))
 
     # ── classify_intent always returns intent="ambiguous" ────────────────────
 

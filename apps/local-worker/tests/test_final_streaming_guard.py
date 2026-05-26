@@ -12,7 +12,7 @@ SRC_DIR = TESTS_DIR.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from repooperator_worker.agent_core.controller_graph import stream_controller_graph  # noqa: E402
+from repooperator_worker.agent_core.langgraph_runtime import stream_langgraph_controller  # noqa: E402
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
 from repooperator_worker.services.event_service import list_run_events  # noqa: E402
 
@@ -45,13 +45,13 @@ class FinalStreamingGuardTests(unittest.TestCase):
             config = Path(tmp) / "config.json"
             config.write_text(json.dumps({"repooperatorHomeDir": str(Path(tmp) / ".repooperator")}), encoding="utf-8")
             with patch.dict(os.environ, {"REPOOPERATOR_CONFIG_PATH": str(config)}, clear=False), patch(
-                "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+                "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
                 return_value=_BadStreamingFinalClient(),
             ), patch(
-                "repooperator_worker.agent_core.controller_graph.get_active_repository",
+                "repooperator_worker.agent_core.graph.support.get_active_repository",
                 return_value=None,
             ):
-                events = list(stream_controller_graph(request, run_id="run-final-guard"))
+                events = list(stream_langgraph_controller(request, run_id="run-final-guard"))
                 stored_events = list_run_events("run-final-guard")
                 stored_text = json.dumps(stored_events, ensure_ascii=False)
         assistant_text = "".join(str(event.get("delta") or "") for event in events if event.get("type") == "assistant_delta")

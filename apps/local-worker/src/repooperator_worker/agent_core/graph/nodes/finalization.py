@@ -7,7 +7,6 @@ import re
 from typing import Any
 
 from repooperator_worker.agent_core.graph.adapters import (
-    _controller,
     _core_state_from_graph,
     _graph_transition_event,
     _invoke_subgraph_delta,
@@ -21,6 +20,8 @@ from repooperator_worker.agent_core.graph.nodes.context import refresh_context_p
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import response_to_snapshot
 from repooperator_worker.agent_core.graph.nodes.web import _web_source_notes_for_final
+from repooperator_worker.agent_core.graph.support import build_final_answer_text, build_final_response
+from repooperator_worker.agent_core.final_synthesis import validate_or_repair_final_answer
 from repooperator_worker.agent_core.understanding_context import append_visible_rationale, build_evidence_basis, evidence_basis_update
 from repooperator_worker.schemas import AgentRunResponse
 from repooperator_worker.services.event_service import append_run_event
@@ -113,14 +114,14 @@ def final_build_response_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         packet_context = ""
         if isinstance(core.context_packet, dict):
             packet_context = str(core.context_packet.get("skills_context") or "")
-        core.final_response = _controller().build_final_answer_text(
+        core.final_response = build_final_answer_text(
             core,
             request,
             skills_context=packet_context or str(state.get("skills_context") or ""),
             on_delta=on_delta,
         )
     draft_response = core.final_response
-    core.final_response = _controller().validate_or_repair_final_answer(core.final_response, core, request)
+    core.final_response = validate_or_repair_final_answer(core.final_response, core, request)
     if _is_explanation_only_edit_request(state) and not state.get("files_changed") and "no files were modified" not in core.final_response.lower():
         core.final_response = core.final_response.rstrip() + "\n\nNo files were modified."
     source_notes = _web_source_notes_for_final(state)
@@ -150,7 +151,7 @@ def final_emit_message_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     request = _request(state)
     core = _core_state_from_graph(state)
     response = _response_with_change_set_payload(
-        _controller().build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"}),
+        build_final_response(core, request).model_copy(update={"agent_flow": "langgraph"}),
         state,
     )
     return {

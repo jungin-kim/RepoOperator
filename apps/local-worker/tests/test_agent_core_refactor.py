@@ -13,8 +13,8 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult  # noqa: E402
-from repooperator_worker.agent_core.controller_graph import run_controller_graph  # noqa: E402
 from repooperator_worker.agent_core.events import merge_activity_states  # noqa: E402
+from repooperator_worker.agent_core.langgraph_runtime import run_langgraph_controller  # noqa: E402
 from repooperator_worker.agent_core.repository_review import run_repository_review  # noqa: E402
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
 from repooperator_worker.services.retrieval_service import StructuredRetrievalIntent, retrieve_context  # noqa: E402
@@ -74,17 +74,17 @@ class AgentCoreRefactorTests(unittest.TestCase):
 
     def test_controller_uses_agent_core_without_legacy_read_only_graph(self):
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_Client(),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ), patch(
             "repooperator_worker.services.agent_graph.run_agent_graph",
             side_effect=AssertionError("legacy read-only graph should not run"),
         ):
-            response = run_controller_graph(self._request(), run_id="run_core_test")
-        self.assertEqual(response.agent_flow, "agent_core_controller")
+            response = run_langgraph_controller(self._request(), run_id="run_core_test")
+        self.assertEqual(response.agent_flow, "langgraph")
         self.assertEqual(response.files_read, ["README.md"])
         self.assertIn("README.md", response.response)
 

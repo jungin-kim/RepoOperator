@@ -1,16 +1,12 @@
-"""Compatibility adapter for the former orchestration graph entry point.
-
-Active execution is handled by agent_core.controller_graph. This module keeps
-the old run/stream import path only.
-"""
+"""Compatibility adapter for the named orchestration graph entry point."""
 
 from __future__ import annotations
 
 from typing import Any, Iterator
 
-from repooperator_worker.agent_core.controller_graph import (
-    run_controller_graph,
-    stream_controller_graph,
+from repooperator_worker.agent_core.langgraph_runtime import (
+    run_langgraph_controller,
+    stream_langgraph_controller,
 )
 from repooperator_worker.agent_core.repository_review import (
     MAX_REPOSITORY_REVIEW_BYTES,
@@ -22,9 +18,9 @@ from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
 
 def run_agent_orchestration_graph(request: AgentRunRequest) -> AgentRunResponse:
     """Deprecated adapter for callers that still import the former graph name."""
-    return run_controller_graph(request)
+    return run_langgraph_controller(request)
 
 
 def stream_agent_orchestration_graph(request: AgentRunRequest, *, run_id: str | None = None) -> Iterator[dict[str, Any]]:
     """Deprecated adapter for callers that still import the former stream name."""
-    yield from stream_controller_graph(request, run_id=run_id)
+    yield from stream_langgraph_controller(request, run_id=run_id)

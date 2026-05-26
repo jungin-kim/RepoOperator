@@ -26,6 +26,7 @@ from repooperator_worker.agent_core.state import AgentCoreState
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator
 from repooperator_worker.agent_core.tools.registry import get_default_tool_registry
 from repooperator_worker.agent_core.graph.state import APPEND_REDUCER_FIELDS, UNIQUE_APPEND_REDUCER_FIELDS, RepoOperatorGraphState
+from repooperator_worker.agent_core.graph.support import observe_result, update_plan
 from repooperator_worker.agent_core.understanding_context import (
     append_visible_rationale,
     evidence_basis_update,
@@ -74,9 +75,8 @@ def _execute_pending_action(state: RepoOperatorGraphState, *, subgraph: str | No
     _append_action_event(str(state.get("run_id") or "run_controller"), action, result)
     core.actions_taken.append(action)
     core.action_results.append(result)
-    _controller().observe_result(core, action, result, request)
-    _controller().update_plan(core, action, result, request)
-    _controller().check_cancel(core, request)
+    observe_result(core, action, result, request)
+    update_plan(core, action, result, request)
     update = _updates_from_core_after_action(state, core, action, result)
     operation = _action_operation(action.type)
     update["events_to_emit"] = [
@@ -384,8 +384,3 @@ def _with_checkpoint_bump(update: dict[str, Any]) -> dict[str, Any]:
 
 def _is_langgraph_checkpointer(value: Any) -> bool:
     return value is not None and hasattr(value, "put") and hasattr(value, "get_tuple")
-
-def _controller() -> Any:
-    from repooperator_worker.agent_core import controller_graph
-
-    return controller_graph

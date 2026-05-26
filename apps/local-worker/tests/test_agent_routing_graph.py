@@ -19,8 +19,9 @@ if str(SRC_DIR) not in sys.path:
 
 from repooperator_worker.agent_core.action_executor import ActionExecutor  # noqa: E402
 from repooperator_worker.agent_core.actions import AgentAction, ActionResult  # noqa: E402
-from repooperator_worker.agent_core.controller_graph import build_final_answer_text, determine_loop_budget, run_controller_graph, stream_controller_graph  # noqa: E402
 from repooperator_worker.agent_core.final_synthesis import _answer_with_model, validate_or_repair_final_answer  # noqa: E402
+from repooperator_worker.agent_core.graph.support import build_final_answer_text, determine_loop_budget  # noqa: E402
+from repooperator_worker.agent_core.langgraph_runtime import run_langgraph_controller, stream_langgraph_controller  # noqa: E402
 from repooperator_worker.agent_core.planner import _existing_target_files, build_task_frame  # noqa: E402
 from repooperator_worker.agent_core.request_understanding import RequestUnderstanding  # noqa: E402
 from repooperator_worker.agent_core.state import AgentCoreState, ClassifierResult  # noqa: E402
@@ -205,7 +206,7 @@ class ActivePathMigrationTests(unittest.TestCase):
             response_type="assistant_answer",
             intent_classification="read_only_question",
             graph_path="agent_core:test",
-            agent_flow="agent_core_controller",
+            agent_flow="langgraph",
             run_id=run_id,
         )
 
@@ -301,7 +302,7 @@ class ActivePathMigrationTests(unittest.TestCase):
             target_files=target_files or [],
         )
 
-    def test_agent_service_calls_agent_core_controller(self) -> None:
+    def test_agent_service_calls_langgraph(self) -> None:
         request = self._request()
         called: list[str] = []
 
@@ -310,7 +311,7 @@ class ActivePathMigrationTests(unittest.TestCase):
             return self._response(req)
 
         with patch(
-            "repooperator_worker.agent_core.controller_graph.run_controller_graph",
+            "repooperator_worker.agent_core.langgraph_runtime.run_langgraph_controller",
             side_effect=fake_controller,
         ), patch(
             "repooperator_worker.services.agent_orchestration_graph.run_agent_orchestration_graph",
@@ -319,9 +320,9 @@ class ActivePathMigrationTests(unittest.TestCase):
             result = run_agent_task(request)
 
         self.assertEqual(called, [request.task])
-        self.assertEqual(result.agent_flow, "agent_core_controller")
+        self.assertEqual(result.agent_flow, "langgraph")
 
-    def test_agent_run_coordinator_sync_calls_agent_core_controller(self) -> None:
+    def test_agent_run_coordinator_sync_calls_langgraph(self) -> None:
         request = self._request()
         called: list[str] = []
 
@@ -330,7 +331,7 @@ class ActivePathMigrationTests(unittest.TestCase):
             return self._response(req, run_id)
 
         with patch.dict(os.environ, {"REPOOPERATOR_CONFIG_PATH": str(self.config)}, clear=False), patch(
-            "repooperator_worker.agent_core.controller_graph.run_controller_graph",
+            "repooperator_worker.agent_core.langgraph_runtime.run_langgraph_controller",
             side_effect=fake_controller,
         ), patch(
             "repooperator_worker.services.agent_service.run_agent_task",
@@ -341,7 +342,7 @@ class ActivePathMigrationTests(unittest.TestCase):
         self.assertEqual(len(called), 1)
         self.assertEqual(result.run_id, called[0])
 
-    def test_agent_run_coordinator_stream_calls_agent_core_stream(self) -> None:
+    def test_agent_run_coordinator_stream_calls_langgraph_stream(self) -> None:
         request = self._request()
         called: list[str] = []
 
@@ -352,7 +353,7 @@ class ActivePathMigrationTests(unittest.TestCase):
             yield {"type": "final_message", "result": self._response(req, run_id).model_dump(mode="json")}
 
         with patch.dict(os.environ, {"REPOOPERATOR_CONFIG_PATH": str(self.config)}, clear=False), patch(
-            "repooperator_worker.agent_core.controller_graph.stream_controller_graph",
+            "repooperator_worker.agent_core.langgraph_runtime.stream_langgraph_controller",
             side_effect=fake_stream,
         ), patch(
             "repooperator_worker.services.agent_orchestration_graph.stream_agent_orchestration_graph",
@@ -375,7 +376,7 @@ class ActivePathMigrationTests(unittest.TestCase):
     def test_agent_orchestration_graph_is_adapter(self) -> None:
         request = self._request()
         with patch(
-            "repooperator_worker.services.agent_orchestration_graph.run_controller_graph",
+            "repooperator_worker.services.agent_orchestration_graph.run_langgraph_controller",
             return_value=self._response(request),
         ) as run_controller:
             result = run_agent_orchestration_graph(request)
@@ -383,7 +384,7 @@ class ActivePathMigrationTests(unittest.TestCase):
         self.assertEqual(result.graph_path, "agent_core:test")
 
         with patch(
-            "repooperator_worker.services.agent_orchestration_graph.stream_controller_graph",
+            "repooperator_worker.services.agent_orchestration_graph.stream_langgraph_controller",
             return_value=iter([{"type": "final_message", "result": self._response(request).model_dump(mode="json")}]),
         ) as stream_controller:
             events = list(stream_agent_orchestration_graph(request, run_id="run-adapter"))
@@ -420,7 +421,7 @@ class ActivePathMigrationTests(unittest.TestCase):
             def generate_text(self, _prompt):
                 raise AssertionError("stream result should be used")
 
-        with patch("repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_Client()):
+        with patch("repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_Client()):
             answer = _answer_with_model(request, {"README.md": "# Fixture\n"})
         self.assertEqual(answer, "Final answer")
         self.assertNotIn("<think>", answer)
@@ -456,13 +457,13 @@ class ActivePathMigrationTests(unittest.TestCase):
     def test_controller_loop_reads_target_file_then_answers(self) -> None:
         request = self._request()
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_LoopClient(),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="loop-target-file")
+            result = run_langgraph_controller(request, run_id="loop-target-file")
         self.assertGreater(result.loop_iteration, 1)
         self.assertEqual(result.files_read, ["README.md"])
         self.assertEqual(result.graph_path, "agent_core:read_file_answer")
@@ -473,13 +474,13 @@ class ActivePathMigrationTests(unittest.TestCase):
         request = self._request()
         request.task = "README.md랑 GameManager.cs만 읽고, 이 게임의 플레이 흐름을 설명해줘."
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_LoopClient(),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="explicit-target-files")
+            result = run_langgraph_controller(request, run_id="explicit-target-files")
         self.assertIn("README.md", result.files_read)
         self.assertIn("Assets/Scripts/GameManager.cs", result.files_read)
         action_events = [event for event in list_run_events("explicit-target-files") if event.get("type") == "action_result"]
@@ -499,13 +500,13 @@ class ActivePathMigrationTests(unittest.TestCase):
             )
         ]
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_LoopClient(),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="follow-up-ball")
+            result = run_langgraph_controller(request, run_id="follow-up-ball")
         self.assertIn("Assets/Scripts/Ball.cs", result.files_read)
 
     def test_edit_target_file_is_resolved_and_reported_as_proposal(self) -> None:
@@ -524,10 +525,10 @@ class ActivePathMigrationTests(unittest.TestCase):
             "repooperator_worker.agent_core.tools.builtin.model_generate_edit_proposal",
             side_effect=generic_proposal,
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="border-edit-proposal")
+            result = run_langgraph_controller(request, run_id="border-edit-proposal")
         self.assertIn("Assets/Scripts/Border.cs", result.files_read)
         self.assertIn("proposed patch only", result.response)
         self.assertIn("No files were modified", result.response)
@@ -538,10 +539,10 @@ class ActivePathMigrationTests(unittest.TestCase):
         request = self._request()
         request.task = "저장 로직을 안전하게 고쳐줘."
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=_edit_understanding(request)), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="safe-save-proposal")
+            result = run_langgraph_controller(request, run_id="safe-save-proposal")
         self.assertIn("Assets/Scripts/DataHandler.cs", result.files_read)
         self.assertNotIn("max_loop_iterations", result.response)
         self.assertNotIn("I stopped because", result.response)
@@ -580,10 +581,10 @@ class ActivePathMigrationTests(unittest.TestCase):
         request = self._request()
         request.task = "이 프로젝트에 기명 메세지 기능을 넣고싶어."
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=_edit_understanding(request)), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="feature-named-message")
+            result = run_langgraph_controller(request, run_id="feature-named-message")
         self.assertIn("README.md", result.files_read)
         self.assertIn("main.py", result.files_read)
         self.assertNotIn("max_loop_iterations", result.response)
@@ -602,13 +603,13 @@ class ActivePathMigrationTests(unittest.TestCase):
             {"action_type": "search_text", "reason_summary": "Search missing symbol again.", "query": " missingsymbol ", "confidence": 0.9},
         )
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=planner,
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            run_controller_graph(request, run_id="zero-search-repeat")
+            run_langgraph_controller(request, run_id="zero-search-repeat")
         search_text_queries = [
             (event["action"].get("payload") or {}).get("query", "").strip().lower()
             for event in list_run_events("zero-search-repeat")
@@ -641,10 +642,10 @@ class ActivePathMigrationTests(unittest.TestCase):
         request = self._request()
         request.task = "최근 커밋 보여줘."
         with patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="recent-commits")
+            result = run_langgraph_controller(request, run_id="recent-commits")
         self.assertIn("git log --oneline -n 5", result.response)
         self.assertIn("Initial fixture", result.response)
         action_events = [event for event in list_run_events("recent-commits") if event.get("type") == "action_result"]
@@ -661,10 +662,10 @@ class ActivePathMigrationTests(unittest.TestCase):
         request = self._request()
         request.task = "최근 커밋 보여줘. 커밋해줘."
         with patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="combined-git")
+            result = run_langgraph_controller(request, run_id="combined-git")
         action_events = [event for event in list_run_events("combined-git") if event.get("type") == "action_result"]
         commands = [event["action"].get("command") for event in action_events]
         self.assertIn(["git", "log", "--oneline", "-n", "5"], commands)
@@ -676,10 +677,10 @@ class ActivePathMigrationTests(unittest.TestCase):
         request = self._request()
         request.task = "MissingManager.cs만 읽고 설명해줘."
         with patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="missing-file")
+            result = run_langgraph_controller(request, run_id="missing-file")
         self.assertEqual(result.stop_reason, "needs_clarification")
         self.assertIn("MissingManager.cs", result.response)
         self.assertEqual(result.files_read, [])
@@ -701,13 +702,13 @@ class ActivePathMigrationTests(unittest.TestCase):
             }
         )
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=planner,
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="planner-git-history")
+            result = run_langgraph_controller(request, run_id="planner-git-history")
         self.assertIn("git log --oneline -n 5", result.response)
         self.assertIn("Initial fixture", result.response)
         action_types = [event["action"]["type"] for event in list_run_events("planner-git-history") if event.get("type") == "action_result"]
@@ -731,11 +732,11 @@ class ActivePathMigrationTests(unittest.TestCase):
                 },
             }
         )
-        with patch("repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=planner), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+        with patch("repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=planner), patch(
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            run_controller_graph(request, run_id="planner-work-note")
+            run_langgraph_controller(request, run_id="planner-work-note")
         trace_events = [event for event in list_run_events("planner-work-note") if event.get("event_type") == "work_trace"]
         decision = next(event for event in trace_events if event.get("display") == "primary" and event.get("aggregate", {}).get("action_type") == "search_text")
         self.assertIn("fastest safe way", str(decision.get("safe_reasoning_summary")))
@@ -745,11 +746,11 @@ class ActivePathMigrationTests(unittest.TestCase):
 
     def test_low_level_activity_events_are_not_primary_work_trace(self) -> None:
         request = self._request()
-        with patch("repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_LoopClient()), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+        with patch("repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_LoopClient()), patch(
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            run_controller_graph(request, run_id="low-level-visibility")
+            run_langgraph_controller(request, run_id="low-level-visibility")
         low_labels = {"Loaded context", "Framed request", "Recorded observation", "Updated plan", "Created initial plan"}
         low_events = [event for event in list_run_events("low-level-visibility") if event.get("label") in low_labels]
         self.assertTrue(low_events)
@@ -776,16 +777,16 @@ class ActivePathMigrationTests(unittest.TestCase):
             tools=["search_text", "read_file", "generate_edit"],
         )
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=understanding), patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=planner,
         ), patch(
             "repooperator_worker.agent_core.tools.builtin.OpenAICompatibleModelClient",
             side_effect=RuntimeError("force deterministic validated fallback"),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="planner-persistence-search")
+            result = run_langgraph_controller(request, run_id="planner-persistence-search")
         self.assertIn("Assets/Scripts/DataHandler.cs", result.files_read)
         self.assertNotIn("max_loop_iterations", result.response)
         self.assertNotIn("Assets/Scripts/Unrelated0.cs", result.files_read[:1])
@@ -834,10 +835,10 @@ class ActivePathMigrationTests(unittest.TestCase):
             "repooperator_worker.agent_core.tools.builtin.model_generate_edit_proposal",
             side_effect=bitwise_safe_proposal,
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="border-bitwise-safe")
+            result = run_langgraph_controller(request, run_id="border-bitwise-safe")
         self.assertIn("return isLeft && isReady", result.response)
         self.assertIn("return left & right", result.response)
         self.assertNotIn("return left && right", result.response)
@@ -876,10 +877,10 @@ class ActivePathMigrationTests(unittest.TestCase):
             "repooperator_worker.agent_core.tools.builtin.model_generate_edit_proposal",
             side_effect=preserve_structure_proposal,
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="datahandler-preserve")
+            result = run_langgraph_controller(request, run_id="datahandler-preserve")
         self.assertIn("Awake()", result.response)
         self.assertIn("Start()", result.response)
         self.assertIn("No files were modified", result.response)
@@ -891,13 +892,13 @@ class ActivePathMigrationTests(unittest.TestCase):
         request.task = "이 프로젝트가 뭐 하는 프로젝트인지 알아내줘."
         answer = "This project is a Unity turn-based ball-striking game.\n\nPurpose: players ready up and score through timed strike phases.\nTech stack: Unity/C#.\nKey modules: GameManager coordinates flow; DataHandler persists player data."
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_SynthesisClient(answer),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="project-synthesis")
+            result = run_langgraph_controller(request, run_id="project-synthesis")
         self.assertTrue(result.response.startswith("This project is"))
         self.assertIn("Purpose:", result.response)
         self.assertIn("Tech stack:", result.response)
@@ -909,13 +910,13 @@ class ActivePathMigrationTests(unittest.TestCase):
         request = self._request()
         request.task = "README.md랑 GameManager.cs만 읽고 플레이 흐름 설명해줘."
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_SynthesisClient("I cannot read the files because the files object is empty."),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="no-cannot-read")
+            result = run_langgraph_controller(request, run_id="no-cannot-read")
         self.assertIn("README.md", result.files_read)
         self.assertIn("Assets/Scripts/GameManager.cs", result.files_read)
         self.assertNotIn("cannot read", result.response.lower())
@@ -942,16 +943,16 @@ class ActivePathMigrationTests(unittest.TestCase):
             }
         )
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=_edit_understanding(request)), patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=planner,
         ), patch(
             "repooperator_worker.agent_core.tools.builtin.OpenAICompatibleModelClient",
             side_effect=RuntimeError("force deterministic validated fallback"),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="planner-overrides-last-read")
+            result = run_langgraph_controller(request, run_id="planner-overrides-last-read")
         self.assertIn("Assets/Scripts/DataHandler.cs", result.files_read)
         self.assertNotIn("max_loop_iterations", result.response)
 
@@ -967,13 +968,13 @@ class ActivePathMigrationTests(unittest.TestCase):
             }
         )
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=planner,
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="reject-final-no-evidence")
+            result = run_langgraph_controller(request, run_id="reject-final-no-evidence")
         action_types = [event["action"]["type"] for event in list_run_events("reject-final-no-evidence") if event.get("type") == "action_result"]
         self.assertTrue({"inspect_repo_tree", "search_files", "read_file"} & set(action_types))
         self.assertNotEqual(action_types[:1], ["final_answer"])
@@ -992,20 +993,21 @@ class ActivePathMigrationTests(unittest.TestCase):
             }
         )
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=planner,
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="planner-mutating-preview")
+            result = run_langgraph_controller(request, run_id="planner-mutating-preview")
         action_events = [event for event in list_run_events("planner-mutating-preview") if event.get("type") == "action_result"]
         action_types = [event["action"]["type"] for event in action_events]
-        self.assertIn("inspect_git_state", action_types)
+        self.assertIn("git_status", action_types)
+        self.assertIn("git_diff", action_types)
         self.assertNotIn("run_approved_command", action_types)
         self.assertEqual(result.stop_reason, "waiting_approval")
-        trace_events = [event for event in list_run_events("planner-mutating-preview") if event.get("event_type") == "work_trace"]
-        self.assertTrue(any(event.get("phase") == "Safety" and event.get("safety_note") for event in trace_events))
+        self.assertEqual((result.command_approval or {}).get("needs_approval"), True)
+        self.assertIn("Commit approval required", result.response)
 
     def test_edit_validation_rejects_unjustified_awake_removal(self) -> None:
         original = (
@@ -1066,13 +1068,13 @@ class ActivePathMigrationTests(unittest.TestCase):
         request.task = "이 레포가 뭐 하는 프로젝트인지 알아내줘."
         bad = "Purpose and architecture should be synthesized from those files..."
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_SynthesisClient(bad),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="satellite-project-summary")
+            result = run_langgraph_controller(request, run_id="satellite-project-summary")
         self.assertNotIn("should be synthesized", result.response)
         self.assertNotIn("I inspected the gathered project evidence", result.response)
         self.assertIn("satellite", result.response.lower())
@@ -1085,13 +1087,13 @@ class ActivePathMigrationTests(unittest.TestCase):
         request.task = "README.md랑 main.py만 읽고, 실행 흐름을 설명해줘."
         bad = "I can answer from those files, but the model answer needed repair..."
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_SynthesisClient(bad),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="satellite-flow")
+            result = run_langgraph_controller(request, run_id="satellite-flow")
         self.assertNotIn("model answer needed repair", result.response)
         self.assertNotIn("I can answer from those files", result.response)
         self.assertIn("main.py", result.response)
@@ -1119,13 +1121,13 @@ class ActivePathMigrationTests(unittest.TestCase):
             answer="Ask for a narrower change or review focus and I can continue from those files.",
         )
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=planner,
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="satellite-architecture")
+            result = run_langgraph_controller(request, run_id="satellite-architecture")
         self.assertIn("아키텍처", result.response)
         self.assertIn("main.py", result.response)
         self.assertIn("algorithms.py", result.response)
@@ -1150,13 +1152,13 @@ class ActivePathMigrationTests(unittest.TestCase):
             {"action_type": "final_answer", "reason_summary": "Answer now.", "confidence": 0.9, "enough_evidence": True}
         )
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=planner,
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            result = run_controller_graph(request, run_id="generic-observation-not-enough")
+            result = run_langgraph_controller(request, run_id="generic-observation-not-enough")
         actions = [event["action"]["type"] for event in list_run_events("generic-observation-not-enough") if event.get("type") == "action_result"]
         self.assertNotEqual(actions[:1], ["final_answer"])
         self.assertIn("README.md", result.files_read)
@@ -1166,13 +1168,13 @@ class ActivePathMigrationTests(unittest.TestCase):
         request = self._request()
         request.task = "이 레포가 뭐 하는 프로젝트인지 알아내줘."
         with patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_SynthesisClient("This is a satellite orbit simulation project."),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            run_controller_graph(request, run_id="no-worked-progress")
+            run_langgraph_controller(request, run_id="no-worked-progress")
         events = list_run_events("no-worked-progress")
         forbidden_phase = "Act" + "ivity"
         forbidden_label = "Work" + "ed"
@@ -1181,13 +1183,13 @@ class ActivePathMigrationTests(unittest.TestCase):
     def test_stream_final_message_omits_streamed_activity_metadata(self) -> None:
         request = self._request()
         with patch.dict(os.environ, {"REPOOPERATOR_CONFIG_PATH": str(self.config)}, clear=False), patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient",
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient",
             return_value=_LoopClient(),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ):
-            events = list(stream_controller_graph(request, run_id="stream-no-duplicate"))
+            events = list(stream_langgraph_controller(request, run_id="stream-no-duplicate"))
         final = next(event for event in events if event.get("type") == "final_message")
         self.assertEqual(final["result"]["activity_events"], [])
 
@@ -1251,17 +1253,17 @@ class ActivePathMigrationTests(unittest.TestCase):
         for value in [ClassifierResult(), SteeringDecision(), action, result, event, response]:
             json.dumps(json_safe(value), ensure_ascii=False)
 
-    def test_stream_controller_graph_final_message_result_is_json_safe(self) -> None:
+    def test_stream_langgraph_controller_final_message_result_is_json_safe(self) -> None:
         request = self._request()
         bad_response = self._response(request, "run-stream-safe").model_copy(update={"activity_events": [{"bad": object()}]})
         with patch.dict(os.environ, {"REPOOPERATOR_CONFIG_PATH": str(self.config)}, clear=False), patch(
             "repooperator_worker.services.event_service.get_repooperator_home_dir",
             return_value=Path(self.home.name),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.run_controller_graph",
+            "repooperator_worker.agent_core.graph.runtime.run_langgraph_controller",
             return_value=bad_response,
         ):
-            events = list(stream_controller_graph(request, run_id="run-stream-safe"))
+            events = list(stream_langgraph_controller(request, run_id="run-stream-safe"))
         final = next(event for event in events if event.get("type") == "final_message")
         json.dumps(final["result"], ensure_ascii=False)
         self.assertEqual(final["result"]["response"], bad_response.response)
@@ -1281,7 +1283,7 @@ class ActivePathMigrationTests(unittest.TestCase):
             "repooperator_worker.services.event_service.get_repooperator_home_dir",
             return_value=Path(self.home.name),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.stream_controller_graph",
+            "repooperator_worker.agent_core.langgraph_runtime.stream_langgraph_controller",
             side_effect=fake_stream,
         ):
             run_id, stream = stream_run(request)
@@ -1358,13 +1360,13 @@ class ActivePathMigrationTests(unittest.TestCase):
             "repooperator_worker.agent_core.repository_review.OpenAICompatibleModelClient",
             return_value=_LoopClient(),
         ), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository",
+            "repooperator_worker.agent_core.graph.support.get_active_repository",
             return_value=None,
         ), patch(
             "repooperator_worker.services.event_service.get_repooperator_home_dir",
             return_value=Path(self.home.name),
         ):
-            response = run_controller_graph(request, run_id="run-repo-review-json-safe")
+            response = run_langgraph_controller(request, run_id="run-repo-review-json-safe")
         json.dumps(response.model_dump(mode="json"), ensure_ascii=False)
         self.assertNotIn("ClassifierResult(", response.response)
 
@@ -1380,18 +1382,18 @@ class ActivePathMigrationTests(unittest.TestCase):
             classifier_result=classifier,
         )
 
-    def test_agent_service_error_uses_agent_core_metadata(self) -> None:
+    def test_agent_service_error_uses_langgraph_metadata(self) -> None:
         request = self._request()
         with patch(
-            "repooperator_worker.agent_core.controller_graph.run_controller_graph",
+            "repooperator_worker.agent_core.langgraph_runtime.run_langgraph_controller",
             side_effect=RuntimeError("boom"),
         ), patch(
             "repooperator_worker.services.agent_service.logger.exception",
         ):
             result = run_agent_task(request)
         self.assertEqual(result.response_type, "agent_error")
-        self.assertEqual(result.agent_flow, "agent_core_controller")
-        self.assertEqual(result.graph_path, "agent_core:error")
+        self.assertEqual(result.agent_flow, "langgraph")
+        self.assertEqual(result.graph_path, "langgraph:error")
 
 
 if __name__ == "__main__":

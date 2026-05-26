@@ -54,10 +54,10 @@ from repooperator_worker.agent_core.change_set import (  # noqa: E402
     ChangeSetProposal,
     validate_change_set,
 )
-from repooperator_worker.agent_core.controller_graph import run_controller_graph  # noqa: E402
 from repooperator_worker.agent_core.tool_orchestrator import ToolOrchestrator  # noqa: E402
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
 from repooperator_worker.services.agent_run_coordinator import resume_approval, wait_for_approval  # noqa: E402
+from repooperator_worker.services.agent_service import run_agent_task  # noqa: E402
 from repooperator_worker.services.event_service import get_run, list_run_events, start_active_run  # noqa: E402
 from repooperator_worker.services.json_safe import json_safe  # noqa: E402
 
@@ -169,8 +169,8 @@ class LangGraphRuntimeTests(unittest.TestCase):
 
     def test_run_langgraph_controller_direct_entrypoint_works(self) -> None:
         request = self._request("Summarize README.md")
-        with patch("repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None), patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()
+        with patch("repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None), patch(
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()
         ):
             response = run_langgraph_controller(request, run_id="run-direct-langgraph")
         self.assertEqual(response.agent_flow, "langgraph")
@@ -230,27 +230,33 @@ class LangGraphRuntimeTests(unittest.TestCase):
         self.assertEqual(append_items([result], []), [result])
         self.assertEqual(append_items([{"id": "a"}], [{"id": "b"}]), [{"id": "a"}, {"id": "b"}])
 
-    def test_langgraph_route_does_not_call_legacy_chooser(self) -> None:
-        request = self._request("Summarize README.md")
-        with patch.dict(os.environ, {"REPOOPERATOR_AGENT_RUNTIME": "langgraph"}, clear=False), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None
-        ), patch("repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()), patch(
-            "repooperator_worker.agent_core.controller_graph.controller_choose_next_action",
-            side_effect=AssertionError("legacy chooser should not run"),
-        ):
-            response = run_controller_graph(request, run_id="run-no-legacy-chooser")
-        self.assertIn("README.md", response.files_read)
+    def test_langgraph_runtime_has_no_legacy_chooser_dependency(self) -> None:
+        import importlib.util
+        import inspect
+        import repooperator_worker.agent_core.graph.routes as graph_routes
 
-    def test_runtime_default_env_can_select_langgraph(self) -> None:
+        self.assertIsNone(importlib.util.find_spec("repooperator_worker.agent_core.controller_graph"))
+        self.assertNotIn("controller_choose_next_action", inspect.getsource(graph_routes))
         request = self._request("Summarize README.md")
-        with patch.dict(os.environ, {"REPOOPERATOR_AGENT_RUNTIME_DEFAULT": "langgraph"}, clear=False), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None
-        ), patch("repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()), patch(
-            "repooperator_worker.agent_core.controller_graph.controller_choose_next_action",
-            side_effect=AssertionError("legacy chooser should not run"),
-        ):
-            response = run_controller_graph(request, run_id="run-default-langgraph")
+        with patch.dict(os.environ, {"REPOOPERATOR_AGENT_RUNTIME": "legacy"}, clear=False), patch(
+            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
+        ), patch("repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()):
+            response = run_langgraph_controller(request, run_id="run-no-legacy-chooser")
         self.assertIn("README.md", response.files_read)
+        self.assertEqual(response.agent_flow, "langgraph")
+
+    def test_agent_service_uses_langgraph_even_with_legacy_runtime_env(self) -> None:
+        request = self._request("Summarize README.md")
+        with patch.dict(
+            os.environ,
+            {"REPOOPERATOR_AGENT_RUNTIME": "legacy", "REPOOPERATOR_AGENT_RUNTIME_DEFAULT": "legacy"},
+            clear=False,
+        ), patch(
+            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
+        ), patch("repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()):
+            response = run_agent_task(request)
+        self.assertIn("README.md", response.files_read)
+        self.assertEqual(response.agent_flow, "langgraph")
 
     def test_approval_and_cancellation_routes_stop_at_safe_boundaries(self) -> None:
         state = initial_graph_state(self._request("Run git status"), run_id="run-approval")
@@ -279,11 +285,11 @@ class LangGraphRuntimeTests(unittest.TestCase):
             return original_execute_action(self, action)
 
         with patch.dict(os.environ, {"REPOOPERATOR_AGENT_RUNTIME": "langgraph"}, clear=False), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None
-        ), patch("repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()), patch(
+            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
+        ), patch("repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()), patch(
             "repooperator_worker.agent_core.graph.adapters.ToolOrchestrator.execute_action", tracking_execute_action
         ):
-            response = run_controller_graph(request, run_id="run-langgraph-summary")
+            response = run_langgraph_controller(request, run_id="run-langgraph-summary")
         self.assertIn("README.md", response.files_read)
         self.assertIn("README.md evidence", response.response)
         self.assertIn("read_file", calls)

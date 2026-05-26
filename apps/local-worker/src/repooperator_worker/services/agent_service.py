@@ -13,20 +13,20 @@ logger = logging.getLogger(__name__)
 
 
 def run_agent_task(request: AgentRunRequest) -> AgentRunResponse:
-    """Run the authoritative agent_core controller path.
+    """Run the authoritative LangGraph agent path.
 
     User-facing validation errors are allowed to propagate. Any unexpected
     runtime failure becomes a structured ``agent_error`` so the caller can show
-    a retryable error without falling back to old routing.
+    a retryable error without falling back to another runtime.
     """
     try:
-        from repooperator_worker.agent_core.controller_graph import run_controller_graph
+        from repooperator_worker.agent_core.langgraph_runtime import run_langgraph_controller
 
-        return run_controller_graph(request)
+        return run_langgraph_controller(request)
     except ValueError:
         raise
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Agent orchestration failed without legacy fallback: %s", exc)
+        logger.exception("LangGraph agent orchestration failed: %s", exc)
         return _agent_error_response(request, exc)
 
 
@@ -59,8 +59,8 @@ def _agent_error_response(request: AgentRunRequest, exc: Exception) -> AgentRunR
         ),
         response_type="agent_error",
         intent_classification="agent_error",
-        graph_path="agent_core:error",
-        agent_flow="agent_core_controller",
+        graph_path="langgraph:error",
+        agent_flow="langgraph",
         proposal_error_details=str(exc),
         validation_status="agent_error",
     )

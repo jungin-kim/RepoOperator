@@ -323,6 +323,7 @@ def _change_set_from_latest_result(state: RepoOperatorGraphState, result: Action
 def _final_text_for_change_set(state: RepoOperatorGraphState, proposal: dict[str, Any]) -> str:
     changes = [item for item in proposal.get("changes") or [] if isinstance(item, dict)]
     files = [f"- {str(item.get('operation') or 'modify')}: `{str(item.get('path') or '')}`" for item in changes]
+    previews = _change_set_preview_lines(changes)
     validation = proposal.get("validation") if isinstance(proposal.get("validation"), dict) else {}
     validation_status = str(validation.get("status") or proposal.get("status") or "pending")
     ide_context_line = _active_editor_context_line(state, proposal)
@@ -330,18 +331,36 @@ def _final_text_for_change_set(state: RepoOperatorGraphState, proposal: dict[str
     sandbox_line = _sandbox_validation_line(sandbox)
     return "\n".join(
         [
-            "I prepared a ChangeSetProposal. No files were modified.",
+            "I prepared a proposed patch only as a ChangeSetProposal. No files were modified.",
             f"Proposal id: {proposal.get('proposal_id') or 'unknown'}.",
             *([ide_context_line] if ide_context_line else []),
             "",
             "Proposed files:",
             *(files or ["- No files"]),
+            *(["", "Proposal preview:", *previews] if previews else []),
             "",
             f"Validation result: {validation_status}.",
             sandbox_line,
             "Review the diff and approve Apply changes to write it to disk.",
         ]
     )
+
+
+def _change_set_preview_lines(changes: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for item in changes[:3]:
+        path = str(item.get("path") or "unknown file")
+        summary = str(item.get("summary") or "").strip()
+        proposed = "" if item.get("operation") == "delete" else str(item.get("proposed_content") or "")
+        lines.append(f"`{path}`" + (f": {summary}" if summary else ""))
+        if proposed.strip():
+            excerpt = proposed.strip()
+            if len(excerpt) > 2400:
+                excerpt = excerpt[:2400].rstrip() + "\n..."
+            lines.append("```")
+            lines.append(excerpt)
+            lines.append("```")
+    return lines
 
 
 def _attach_sandbox_validation(state: RepoOperatorGraphState, proposal) -> None:

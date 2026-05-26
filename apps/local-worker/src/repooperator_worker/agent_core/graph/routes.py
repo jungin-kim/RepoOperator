@@ -8,7 +8,6 @@ from typing import Any
 from repooperator_worker.agent_core.graph_routes import choose_graph_next_action
 from repooperator_worker.agent_core.graph_state import action_to_snapshot, task_frame_to_snapshot
 from repooperator_worker.agent_core.graph.adapters import (
-    _controller,
     _core_state_from_graph,
     _graph_transition_event,
     _latest_result,
@@ -17,10 +16,12 @@ from repooperator_worker.agent_core.graph.adapters import (
     _updates_from_core,
     _with_checkpoint_bump,
 )
+from repooperator_worker.agent_core.graph.support import check_cancel, emit_action_decision, should_continue
 from repooperator_worker.agent_core.graph.nodes.git import _git_workflow_requested
 from repooperator_worker.agent_core.graph.nodes.supervisor import _should_use_supervisor
 from repooperator_worker.agent_core.graph.nodes.web import _has_web_evidence, _web_research_available, _web_research_needed
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
+from repooperator_worker.agent_core.planner import build_task_frame
 from repooperator_worker.agent_core.understanding_context import (
     append_visible_rationale,
     rationale_basis_refs_for_action,
@@ -66,14 +67,14 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     if state.get("stop_reason") in {"approval_denied"}:
         return {"next_node": "final_synthesis", "events_to_emit": [_graph_transition_event(state, "route_next", operation="approval_denied")]}
 
-    should_continue = _controller().should_continue(
+    can_continue = should_continue(
         core,
         request=request,
         started=float(state.get("graph_started_at") or time.perf_counter()),
         max_wall_clock_seconds=300,
     )
     update = _updates_from_core(state, core)
-    if not should_continue:
+    if not can_continue:
         update.update({"next_node": "final_synthesis", "pending_action": None})
         update["events_to_emit"] = [_graph_transition_event(state, "route_next", operation="stop_budget")]
         update.update(
@@ -89,7 +90,7 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         )
         return _with_checkpoint_bump(update)
 
-    _controller().check_cancel(core, request)
+    check_cancel(core, request)
     if core.cancellation_requested:
         update = _updates_from_core(state, core)
         update.update({"next_node": "final_synthesis", "pending_action": None})
@@ -117,6 +118,8 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     consume_steering_for_state(core, request)
     action = choose_graph_next_action(core, request)
     core.current_step = action.reason_summary
+    if action.type != "final_answer":
+        emit_action_decision(core, request, action)
     update = _updates_from_core(state, core)
     action_snapshot = action_to_snapshot(action)
     route = route_by_stage({**dict(state), **update, "pending_action": action_snapshot})
@@ -125,7 +128,7 @@ def route_next_node(state: RepoOperatorGraphState) -> dict[str, Any]:
             "pending_action": action_snapshot,
             "next_node": route,
             "current_step": action.reason_summary,
-            "task_frame_snapshot": task_frame_to_snapshot(_controller().build_task_frame(request, core)),
+            "task_frame_snapshot": task_frame_to_snapshot(build_task_frame(request, core)),
             "events_to_emit": [
                 _graph_transition_event(
                     state,

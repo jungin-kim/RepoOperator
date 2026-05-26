@@ -21,7 +21,8 @@ from repooperator_worker.agent_core.task_policy import (  # noqa: E402
     next_recovery_action,
     update_subtasks_after_action,
 )
-from repooperator_worker.agent_core.controller_graph import build_task_frame, run_controller_graph  # noqa: E402
+from repooperator_worker.agent_core.langgraph_runtime import run_langgraph_controller  # noqa: E402
+from repooperator_worker.agent_core.planner import build_task_frame  # noqa: E402
 from repooperator_worker.schemas import AgentRunRequest, ConversationMessage  # noqa: E402
 from repooperator_worker.services.event_service import list_run_events  # noqa: E402
 
@@ -86,11 +87,11 @@ class GeneralAgentPolicyTests(unittest.TestCase):
             }
 
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=understanding), patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()
         ), patch("repooperator_worker.agent_core.tools.builtin.model_generate_edit_proposal", side_effect=proposal), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None
+            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
         ):
-            result = run_controller_graph(request, run_id="generic-feature-evidence")
+            result = run_langgraph_controller(request, run_id="generic-feature-evidence")
 
         actions = [event["action"]["type"] for event in list_run_events("generic-feature-evidence") if event.get("type") == "action_result"]
         self.assertGreaterEqual(actions.index("inspect_repo_tree"), 0)
@@ -113,9 +114,9 @@ class GeneralAgentPolicyTests(unittest.TestCase):
             likely_needed_tools=["read_file"],
         )
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=understanding), patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()
-        ), patch("repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None):
-            result = run_controller_graph(request, run_id="generic-followup-evidence")
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()
+        ), patch("repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None):
+            result = run_langgraph_controller(request, run_id="generic-followup-evidence")
 
         self.assertIn("src/domain.ts", result.files_read)
         actions = [event["action"]["type"] for event in list_run_events("generic-followup-evidence") if event.get("type") == "action_result"]
@@ -135,9 +136,9 @@ class GeneralAgentPolicyTests(unittest.TestCase):
             likely_needed_tools=["search_files", "read_file"],
         )
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=understanding), patch(
-            "repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()
-        ), patch("repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None):
-            result = run_controller_graph(request, run_id="generic-broad-batch")
+            "repooperator_worker.agent_core.graph.support.OpenAICompatibleModelClient", return_value=_QuietClient()
+        ), patch("repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None):
+            result = run_langgraph_controller(request, run_id="generic-broad-batch")
 
         actions = [event["action"]["type"] for event in list_run_events("generic-broad-batch") if event.get("type") == "action_result"]
         self.assertIn("inspect_repo_tree", actions)
@@ -152,9 +153,9 @@ class GeneralAgentPolicyTests(unittest.TestCase):
         request = self._request("Explain MissingWidget.ts")
         understanding = RequestUnderstanding(user_goal=request.task, mentioned_files=["MissingWidget.ts"], likely_needed_tools=["read_file"])
         with patch("repooperator_worker.agent_core.request_understanding.understand_request", return_value=understanding), patch(
-            "repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None
+            "repooperator_worker.agent_core.graph.support.get_active_repository", return_value=None
         ):
-            result = run_controller_graph(request, run_id="generic-missing-file")
+            result = run_langgraph_controller(request, run_id="generic-missing-file")
         actions = [event["action"]["type"] for event in list_run_events("generic-missing-file") if event.get("type") == "action_result"]
         self.assertEqual(actions[:1], ["search_files"])
         self.assertEqual(result.stop_reason, "needs_clarification")

@@ -22,9 +22,11 @@ from repooperator_worker.agent_core.planner import (
     emit_target_resolution,
     known_context_files,
     pending_commit_context,
+    propose_next_action_with_model,
     project_summary_files,
     resolve_target_files,
 )
+from repooperator_worker.agent_core.graph import support as graph_support
 from repooperator_worker.agent_core.state import AgentCoreState
 from repooperator_worker.agent_core.task_policy import (
     block_current_subtask,
@@ -55,6 +57,7 @@ def choose_graph_next_action(state: AgentCoreState, request: AgentRunRequest) ->
         _next_explicit_target_action,
         _next_symbol_action,
         _next_policy_evidence_action,
+        _next_model_planner_action,
         _next_command_action,
         _next_search_candidate_action,
         _next_edit_action,
@@ -136,6 +139,15 @@ def _next_policy_evidence_action(state: AgentCoreState, request: AgentRunRequest
     return None
 
 
+def _next_model_planner_action(state: AgentCoreState, request: AgentRunRequest, frame: Any) -> AgentAction | None:
+    return propose_next_action_with_model(
+        request,
+        state,
+        frame,
+        model_client_factory=graph_support.OpenAICompatibleModelClient,
+    )
+
+
 def _next_command_action(state: AgentCoreState, request: AgentRunRequest, frame: Any) -> AgentAction | None:
     del request
     unrun_preview = _latest_unrun_read_only_preview(state)
@@ -196,7 +208,7 @@ def _next_edit_action(state: AgentCoreState, request: AgentRunRequest, frame: An
     if edit_targets:
         if not (_has_action(state, "generate_change_set") or _has_action(state, "generate_edit")):
             return AgentAction(
-                type="generate_change_set",
+                type="generate_edit",
                 reason_summary="Prepare a ChangeSetProposal for validated current edit targets.",
                 target_files=edit_targets,
                 expected_output="Validated ChangeSetProposal with before/after diff summary.",
