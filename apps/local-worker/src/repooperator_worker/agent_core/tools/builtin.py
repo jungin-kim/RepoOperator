@@ -2200,7 +2200,7 @@ def find_matching_brace(content: str, start: int) -> int:
 
 
 def is_stale_duplicate_copy(relative_path: Path) -> bool:
-    return bool(re.search(r" 2\.(py|tsx|js|json|cs)$", str(relative_path), flags=re.IGNORECASE))
+    return bool(re.search(r"(?:\s+\d+|\s+copy)(?=\.[^.]+$)|\.(?:bak|orig)$", str(relative_path), flags=re.IGNORECASE))
 
 
 def is_supported_text_file(path: Path) -> bool:

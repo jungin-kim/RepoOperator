@@ -189,7 +189,7 @@ def _classify_command(
     if not sandbox.get("allowCommandRun", True):
         return _preview(approval_id, argv, display, repo_path, "high", False, False, outside_repo, True, True, "Command execution is disabled by the current permission profile.", pattern)
     if outside_repo and profile["mode"] != PERMISSION_MODE_FULL_ACCESS:
-        return _preview(approval_id, argv, display, repo_path, "high", False, False, True, True, True, "Commands that access paths outside the active repository are blocked in Basic permissions and Auto review.", pattern)
+        return _preview(approval_id, argv, display, repo_path, "high", False, False, True, True, True, "Commands that access paths outside the active repository are blocked unless full_access is active.", pattern)
     if _has_secret_dump(argv):
         return _preview(approval_id, argv, display, repo_path, "high", False, False, False, True, True, "Commands that may expose secrets are blocked.", pattern)
     policy_argv = _policy_argv(argv)

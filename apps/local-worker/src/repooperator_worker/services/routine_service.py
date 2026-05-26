@@ -31,7 +31,7 @@ class RoutineTrigger:
 
 @dataclass(frozen=True)
 class RoutinePermission:
-    profile: str = "basic"
+    profile: str = "routine_safe"
     allow_writes_without_approval: bool = False
     allow_git_remote_write_without_approval: bool = False
 

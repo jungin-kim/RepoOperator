@@ -151,6 +151,22 @@ git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
 ```
 
+## Duplicate Conflict Files Appear
+
+Symptoms:
+
+- files such as `skills 2.py`, `package-lock 6.json`, or `cache 2` appear after repeated edits, tests, or builds
+- git refs such as `origin/HEAD 2` appear under `.git/refs`, `.git/logs/refs`, or `.git/packed-refs`
+
+Checks:
+
+1. Run `python3 scripts/check-workspace-hygiene.py`.
+2. If `origin/HEAD 2` or similar git refs appear, delete the broken duplicate ref files, then run `git remote prune origin` and `git fetch origin`.
+3. Do not keep the repository inside an iCloud, Dropbox, OneDrive, or other cloud-sync folder if `.git` refs are being duplicated.
+4. If duplicate files keep appearing, disable sync conflict handling for this repo or move it to a non-synced directory.
+
+Generated caches such as `apps/web/.next/`, `apps/web/test-results/`, and `packages/cli/runtime/` can be removed and regenerated. Source, test, docs, and package files with conflict suffixes should be investigated before deletion unless they are known generated artifacts.
+
 ## Push Fails
 
 Symptoms:

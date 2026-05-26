@@ -82,14 +82,19 @@ const permissionModes: Array<{
   disabled?: boolean;
 }> = [
   {
-    mode: "basic",
-    label: "Basic permissions",
-    description: "Work inside the active repository sandbox with guardrails.",
+    mode: "default",
+    label: "Default",
+    description: "Work inside the active repository sandbox with approval gates.",
   },
   {
-    mode: "auto_review",
-    label: "Auto review",
+    mode: "accept_edits",
+    label: "Accept edits",
     description: "Use approval cards for elevated actions, network, and risky tools.",
+  },
+  {
+    mode: "auto_readonly",
+    label: "Read-only",
+    description: "Allow repository reads and safe git inspection without writes.",
   },
   {
     mode: "full_access",
@@ -110,7 +115,13 @@ function validateBranchName(name: string): string | null {
 }
 
 function permissionLabel(mode: PermissionMode): string {
-  return permissionModes.find((item) => item.mode === mode)?.label ?? "Basic permissions";
+  return permissionModes.find((item) => item.mode === mode)?.label ?? mode.replaceAll("_", " ");
+}
+
+function permissionTone(mode: PermissionMode): "review" | "full" | "default" {
+  if (mode === "accept_edits" || mode === "routine_safe" || mode === "headless_safe") return "review";
+  if (mode === "full_access") return "full";
+  return "default";
 }
 
 export function ChatHeader({
@@ -404,7 +415,7 @@ export function ChatHeader({
           )}
           <div className="permission-control">
             <button
-              className={`permission-trigger${writeMode === "auto_review" ? " permission-trigger-review" : ""}`}
+              className={`permission-trigger${permissionTone(writeMode) === "review" ? " permission-trigger-review" : ""}`}
               type="button"
               aria-label="Permission mode"
               aria-expanded={showPermissions}
@@ -413,7 +424,7 @@ export function ChatHeader({
               title="Change RepoOperator permission mode"
             >
               <span className="permission-trigger-icon" aria-hidden="true">
-                {writeMode === "auto_review" ? "◇" : writeMode === "full_access" ? "!" : "●"}
+                {permissionTone(writeMode) === "review" ? "◇" : permissionTone(writeMode) === "full" ? "!" : "●"}
               </span>
               {permissionPending ? "Updating…" : permissionLabel(writeMode)}
               <span className="permission-trigger-caret" aria-hidden="true">▾</span>

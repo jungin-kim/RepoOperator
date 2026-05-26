@@ -7,9 +7,7 @@ from typing import Any
 from repooperator_worker.config import (
     AVAILABLE_PERMISSION_MODES,
     PERMISSION_MODE_ACCEPT_EDITS,
-    PERMISSION_MODE_AUTO_REVIEW,
     PERMISSION_MODE_AUTO_READONLY,
-    PERMISSION_MODE_BASIC,
     PERMISSION_MODE_DEFAULT,
     PERMISSION_MODE_FULL_ACCESS,
     PERMISSION_MODE_HEADLESS_SAFE,
@@ -51,7 +49,7 @@ def permission_profile(mode: str | None = None) -> dict[str, Any]:
                 "shell": "approved-local-commands",
             },
         }
-    if selected in {PERMISSION_MODE_AUTO_REVIEW, PERMISSION_MODE_ACCEPT_EDITS, PERMISSION_MODE_ROUTINE_SAFE}:
+    if selected in {PERMISSION_MODE_ACCEPT_EDITS, PERMISSION_MODE_ROUTINE_SAFE}:
         return {
             "mode": selected,
             "coreMode": PERMISSION_MODE_ACCEPT_EDITS if selected != PERMISSION_MODE_ROUTINE_SAFE else PERMISSION_MODE_ROUTINE_SAFE,
@@ -105,7 +103,7 @@ def permission_profile(mode: str | None = None) -> dict[str, Any]:
             },
         }
     return {
-        "mode": selected if selected == PERMISSION_MODE_DEFAULT else PERMISSION_MODE_BASIC,
+        "mode": PERMISSION_MODE_DEFAULT,
         "coreMode": PERMISSION_MODE_DEFAULT,
         "write_mode": WRITE_MODE_AUTO_APPLY,
         "sandbox": {
@@ -174,9 +172,9 @@ def _normalize_mode(value: str | None) -> str:
         return PERMISSION_MODE_DEFAULT
     normalized = value.strip().lower().replace("-", "_")
     aliases = {
-        "basic": PERMISSION_MODE_BASIC,
+        "basic": PERMISSION_MODE_DEFAULT,
         "default": PERMISSION_MODE_DEFAULT,
-        "read_only": PERMISSION_MODE_BASIC,
+        "read_only": PERMISSION_MODE_AUTO_READONLY,
         "auto_readonly": PERMISSION_MODE_AUTO_READONLY,
         "auto_read_only": PERMISSION_MODE_AUTO_READONLY,
         "readonly": PERMISSION_MODE_AUTO_READONLY,
@@ -184,9 +182,9 @@ def _normalize_mode(value: str | None) -> str:
         "plan_only": PERMISSION_MODE_PLAN_ONLY,
         "proposal": PERMISSION_MODE_PROPOSAL_ONLY,
         "proposal_only": PERMISSION_MODE_PROPOSAL_ONLY,
-        "auto_review": PERMISSION_MODE_AUTO_REVIEW,
+        "auto_review": PERMISSION_MODE_ACCEPT_EDITS,
         "accept_edits": PERMISSION_MODE_ACCEPT_EDITS,
-        "write_with_approval": PERMISSION_MODE_AUTO_REVIEW,
+        "write_with_approval": PERMISSION_MODE_ACCEPT_EDITS,
         "full_access": PERMISSION_MODE_FULL_ACCESS,
         "auto_apply": PERMISSION_MODE_FULL_ACCESS,
         "routine_safe": PERMISSION_MODE_ROUTINE_SAFE,

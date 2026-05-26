@@ -26,6 +26,7 @@ class RoutineServiceTests(unittest.TestCase):
         routine = self.store.create({"name": "Nightly", "repo_identity": "/repo", "task_prompt": "Summarize", "trigger": {"type": "manual"}})
         loaded = RoutineStore(Path(self.tmp.name)).get(routine.id)
         self.assertEqual(loaded.name, "Nightly")
+        self.assertEqual(loaded.permission_profile.profile, "routine_safe")
         self.assertTrue(loaded.requires_approval_for_writes)
 
     def test_disabled_routine_does_not_run(self) -> None:

@@ -38,8 +38,6 @@ AVAILABLE_PERMISSION_MODES = [
     PERMISSION_MODE_PROPOSAL_ONLY,
     PERMISSION_MODE_ACCEPT_EDITS,
     PERMISSION_MODE_AUTO_READONLY,
-    PERMISSION_MODE_BASIC,
-    PERMISSION_MODE_AUTO_REVIEW,
     PERMISSION_MODE_FULL_ACCESS,
     PERMISSION_MODE_ROUTINE_SAFE,
     PERMISSION_MODE_HEADLESS_SAFE,
@@ -393,13 +391,13 @@ def _resolve_permission_mode(runtime_config: dict) -> str:
             return mode
         legacy = _normalize_optional_value(permissions.get("writeMode"))
         if legacy == WRITE_MODE_WRITE_WITH_APPROVAL:
-            return PERMISSION_MODE_AUTO_REVIEW
+            return PERMISSION_MODE_ACCEPT_EDITS
         if legacy == WRITE_MODE_AUTO_APPLY:
             return PERMISSION_MODE_FULL_ACCESS
         if legacy == WRITE_MODE_READ_ONLY:
-            return PERMISSION_MODE_BASIC
+            return PERMISSION_MODE_AUTO_READONLY
 
-    return PERMISSION_MODE_BASIC
+    return PERMISSION_MODE_DEFAULT
 
 
 def _normalize_permission_mode(value: str | None) -> str | None:
@@ -408,7 +406,7 @@ def _normalize_permission_mode(value: str | None) -> str | None:
         return None
     lowered = normalized.strip().lower().replace("-", "_")
     aliases = {
-        "basic": PERMISSION_MODE_BASIC,
+        "basic": PERMISSION_MODE_DEFAULT,
         "default": PERMISSION_MODE_DEFAULT,
         "plan": PERMISSION_MODE_PLAN_ONLY,
         "plan_only": PERMISSION_MODE_PLAN_ONLY,
@@ -420,12 +418,12 @@ def _normalize_permission_mode(value: str | None) -> str | None:
         "readonly": PERMISSION_MODE_AUTO_READONLY,
         "routine_safe": PERMISSION_MODE_ROUTINE_SAFE,
         "headless_safe": PERMISSION_MODE_HEADLESS_SAFE,
-        "auto_review": PERMISSION_MODE_AUTO_REVIEW,
-        "autoreview": PERMISSION_MODE_AUTO_REVIEW,
+        "auto_review": PERMISSION_MODE_ACCEPT_EDITS,
+        "autoreview": PERMISSION_MODE_ACCEPT_EDITS,
         "full_access": PERMISSION_MODE_FULL_ACCESS,
         "fullaccess": PERMISSION_MODE_FULL_ACCESS,
-        WRITE_MODE_READ_ONLY: PERMISSION_MODE_BASIC,
-        WRITE_MODE_WRITE_WITH_APPROVAL: PERMISSION_MODE_AUTO_REVIEW,
+        WRITE_MODE_READ_ONLY: PERMISSION_MODE_AUTO_READONLY,
+        WRITE_MODE_WRITE_WITH_APPROVAL: PERMISSION_MODE_ACCEPT_EDITS,
         WRITE_MODE_AUTO_APPLY: PERMISSION_MODE_FULL_ACCESS,
     }
     return aliases.get(lowered)

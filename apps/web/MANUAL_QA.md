@@ -24,6 +24,15 @@ Use this checklist after runtime or chat-stream changes.
 20. Send `README.md랑 main.py만 읽고 실행 흐름 설명해줘.`
 21. Confirm the work trace says it will read the named files first, observes the entrypoint evidence, and prepares an answer from only those files.
 
+## Apply, Validation, And Git Approval
+
+1. Request a small code change and confirm a proposal is created before disk writes.
+2. Approve apply and confirm a validation result/card appears after the change is written.
+3. Request a commit and confirm a commit approval card appears before any git write.
+4. Deny the commit and verify no git commit was created.
+5. Request push or PR/MR creation and confirm it is approval-gated.
+6. If approval is requested or denied without execution, confirm the UI accurately says no commit, push, or PR/MR was created.
+
 ## Agent Work Trace
 
 - Work trace cards should show concise safe summaries: why the next action was chosen, what evidence was observed, remaining uncertainty, and any safety decision.

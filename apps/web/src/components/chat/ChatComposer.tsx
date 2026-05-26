@@ -1,6 +1,7 @@
 "use client";
 
 import { type KeyboardEvent } from "react";
+import type { PermissionMode } from "@/lib/local-worker-client";
 
 interface ChatComposerProps {
   value: string;
@@ -11,7 +12,7 @@ interface ChatComposerProps {
   onStopRun?: () => void;
   disabled: boolean;
   pending: boolean;
-  writeMode?: "basic" | "auto_review" | "full_access";
+  writeMode?: PermissionMode;
   queuedMessages?: Array<{ id: string; text: string; status: string; error?: string | null }>;
 }
 
@@ -24,7 +25,7 @@ export function ChatComposer({
   onStopRun,
   disabled,
   pending,
-  writeMode = "basic",
+  writeMode = "default",
   queuedMessages = [],
 }: ChatComposerProps) {
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -43,7 +44,7 @@ export function ChatComposer({
     ? "Open a repository above before asking a question…"
     : pending
       ? "Type to queue a follow-up message… (⌘+Enter to queue)"
-      : writeMode === "auto_review"
+      : writeMode === "accept_edits"
         ? "Ask a question or request a change… (⌘+Enter to send)"
         : "Ask a question about the repository… (⌘+Enter to send)";
 
@@ -53,16 +54,18 @@ export function ChatComposer({
       ? queuedMessages.length > 0
         ? `${queuedMessages.length} message${queuedMessages.length === 1 ? "" : "s"} queued — will run after current task finishes.`
         : "Agent is running — type to queue a follow-up."
-      : writeMode === "auto_review"
-        ? "Auto review — elevated commands and risky actions use approval cards."
+      : writeMode === "accept_edits"
+        ? "Accept edits — elevated commands and risky actions use approval cards."
         : writeMode === "full_access"
           ? "Full access — broader local actions are enabled and logged."
-          : "Basic permissions — repository sandbox work is allowed with guardrails.";
+          : writeMode === "auto_readonly" || writeMode === "plan_only"
+            ? "Read-only mode — repository inspection is available without writes."
+            : "Default permissions — repository sandbox work is allowed with approval gates.";
 
   const buttonLabel = pending
     ? value.trim()
       ? "Queue"
-      : writeMode === "auto_review"
+      : writeMode === "accept_edits"
         ? "Working…"
         : "Working…"
     : "Ask RepoOperator";

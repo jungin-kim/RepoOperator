@@ -160,11 +160,21 @@ def _external_search_items(skill_registry, plugin_registry, mcp_registry) -> lis
                     "side_effect_level": "none",
                     "requires_approval_by_default": False,
                     "capability_names": list(spec.required_capabilities),
-                    "tool_search_keywords": [spec.id, spec.name, *spec.required_tools, *spec.required_capabilities],
-                    "prompt_summary": spec.description,
+                    "tool_search_keywords": [
+                        spec.id,
+                        spec.name,
+                        spec.when_to_use,
+                        *str(spec.id).replace("_", " ").split(),
+                        *str(spec.name).replace("_", " ").split(),
+                        *str(spec.when_to_use).replace("_", " ").split(),
+                        *spec.required_tools,
+                        *spec.required_capabilities,
+                    ],
+                    "prompt_summary": spec.description or spec.when_to_use,
                     "input_schema_summary": "No direct execution; selected skills are context instructions only.",
                     "output_schema_summary": spec.output_contract,
                     "enabled": spec.enabled,
+                    "executable": False,
                 }
             )
     if plugin_registry is not None:

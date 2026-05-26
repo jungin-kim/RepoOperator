@@ -16,7 +16,7 @@ class HealthResponse(BaseModel):
     config_source_path: str | None = None
     config_hash: str | None = None
     write_mode: str = "read-only"
-    permission_mode: str = "basic"
+    permission_mode: str = "default"
     sandbox_scope: str = "repository"
     approval_policy: dict = {}
     tool_permissions: dict = {}
@@ -24,7 +24,7 @@ class HealthResponse(BaseModel):
 
 
 class PermissionModeResponse(BaseModel):
-    mode: str = "basic"
+    mode: str = "default"
     write_mode: str
     available_modes: list[str]
     unsupported_modes: list[str] = []

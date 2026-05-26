@@ -500,7 +500,7 @@ class PermissionModeRequest(BaseModel):
         }
         if normalized not in allowed:
             raise ValueError(
-                "permission mode must be one of: basic, auto_review, full_access"
+                "permission mode must be one of: default, plan_only, proposal_only, accept_edits, auto_readonly, full_access, routine_safe, headless_safe"
             )
         return normalized
 

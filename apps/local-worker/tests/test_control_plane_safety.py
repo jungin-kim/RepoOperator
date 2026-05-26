@@ -33,7 +33,7 @@ from repooperator_worker.services.git_service import commit_changes  # noqa: E40
 from repooperator_worker.services.model_client import split_visible_reasoning  # noqa: E402
 
 
-def _write_config(home: Path, mode: str = "basic") -> Path:
+def _write_config(home: Path, mode: str = "default") -> Path:
     config = home / ".repooperator" / "config.json"
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(
@@ -106,12 +106,12 @@ class ControlPlaneSafetyTests(unittest.TestCase):
                 with self.assertRaises(PermissionError):
                     commit_changes(GitCommitRequest(project_path=str(repo), message="Update docs", stage_all=True))
 
-    def test_basic_permission_allows_safe_repo_write_and_blocks_git_dir(self) -> None:
+    def test_default_permission_allows_safe_repo_write_and_blocks_git_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_home:
             home = Path(temp_home)
             repo = home / "repo"
             _init_repo(repo)
-            config = _write_config(home, mode="basic")
+            config = _write_config(home, mode="default")
             with patch.dict(os.environ, {"REPOOPERATOR_CONFIG_PATH": str(config)}, clear=True):
                 result = write_text_file(
                     FileWriteRequest(

@@ -135,7 +135,7 @@ export function ChatApp() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [threadStoreState, setThreadStoreState] = useState<ThreadStoreState>("loading");
   const [question, setQuestion] = useState("");
-  const [writeMode, setWriteMode] = useState<PermissionMode>("basic");
+  const [writeMode, setWriteMode] = useState<PermissionMode>("default");
   const [permissionPending, setPermissionPending] = useState(false);
   const [permissionMessage, setPermissionMessage] = useState<string | null>(null);
   const [permissionError, setPermissionError] = useState<string | null>(null);
@@ -287,7 +287,7 @@ export function ChatApp() {
       setConfiguredModelConnectionMode(payload.configured_model_connection_mode || "");
       setConfiguredModelProvider(payload.configured_model_provider || "");
       setConfiguredModelName(payload.configured_model_name || "");
-      setWriteMode(payload.permission_mode ?? "basic");
+      setWriteMode(payload.permission_mode ?? "default");
       if (options.syncProvider && nextSource) setGitProvider(nextSource);
       if (payload.configured_repository_sources?.length) {
         const currentProviderAvailable = payload.configured_repository_sources.some(
@@ -307,7 +307,7 @@ export function ChatApp() {
       setConfiguredModelConnectionMode("");
       setConfiguredModelProvider("");
       setConfiguredModelName("");
-      setWriteMode("basic");
+      setWriteMode("default");
     }
   }
 
@@ -859,11 +859,13 @@ export function ChatApp() {
       const payload = await updatePermissionMode(mode);
       setWriteMode(payload.mode);
       setPermissionMessage(
-        payload.mode === "auto_review"
-          ? "Auto review enabled. Elevated actions will use approval cards."
+        payload.mode === "accept_edits"
+          ? "Accept edits enabled. Elevated actions will use approval cards."
           : payload.mode === "full_access"
             ? "Full access enabled. Risky commands are still logged and previewed where practical."
-            : "Basic permissions enabled. Repo sandbox work is allowed with guardrails.",
+            : payload.mode === "auto_readonly"
+              ? "Read-only mode enabled. Repository inspection stays non-mutating."
+              : "Default permissions enabled. Repo sandbox work is allowed with approval gates.",
       );
       window.setTimeout(() => setPermissionMessage(null), 3200);
     } catch (error) {
@@ -1316,21 +1318,23 @@ export function ChatApp() {
 
   async function handleStopRun() {
     if (!activeRunId) return;
+    const runId = activeRunId;
+    const runThreadId = activeThreadId;
     try {
-      await cancelAgentRun(activeRunId);
+      const response = await cancelAgentRun(runId);
+      if (response.status === "cancelling" && runThreadId) {
+        rememberActiveRun(runId, runThreadId);
+        setQuestionPending(true);
+      }
     } finally {
-      const runThreadId = activeThreadId;
-      if (runThreadId) rememberActiveRun(null, runThreadId);
-      setQuestionPending(false);
       setProgressSteps((prev) => [
         ...prev,
         {
           phase: "Finished",
-          label: "Run cancelled",
-          detail: "RepoOperator stopped this run at a safe checkpoint.",
-          status: "completed",
+          label: "Cancellation requested",
+          detail: "RepoOperator will stop this run at the next safe checkpoint.",
+          status: "waiting",
           startedAt: new Date().toISOString(),
-          endedAt: new Date().toISOString(),
           durationMs: 0,
         },
       ]);

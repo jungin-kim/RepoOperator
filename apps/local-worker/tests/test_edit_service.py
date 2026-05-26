@@ -55,7 +55,7 @@ class EditServiceTests(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
-                        "permissions": {"mode": "auto_review"},
+                        "permissions": {"mode": "accept_edits"},
                         "model": {
                             "connectionMode": "local-runtime",
                             "provider": "vllm",

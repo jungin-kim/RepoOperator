@@ -5,6 +5,7 @@ import type {
   AgentRunPayload,
   CommandResultPayload,
   EditArchiveRecord,
+  PermissionMode,
   RepoOpenPayload,
 } from "@/lib/local-worker-client";
 import { MarkdownContent } from "./MarkdownContent";
@@ -542,7 +543,7 @@ interface ChatMessagesProps {
   progressSteps?: ProgressStep[];
   streamedAnswer?: string;
   gitProvider: string;
-  writeMode?: "basic" | "auto_review" | "full_access";
+  writeMode?: PermissionMode;
   onProposalStatusChange?: (id: string, status: ProposalStatus, message?: string, result?: AgentRunPayload) => void;
   onClarificationSelect?: (candidate: string) => void;
   onCommandDecision?: (metadata: AgentRunPayload, decision: "yes" | "yes_session" | "no_explain") => void;
@@ -555,7 +556,7 @@ export function ChatMessages({
   progressSteps = [],
   streamedAnswer = "",
   gitProvider,
-  writeMode = "basic",
+  writeMode = "default",
   onProposalStatusChange,
   onClarificationSelect,
   onCommandDecision,

@@ -1,6 +1,14 @@
 "use client";
 
-export type PermissionMode = "basic" | "auto_review" | "full_access";
+export type PermissionMode =
+  | "default"
+  | "plan_only"
+  | "proposal_only"
+  | "accept_edits"
+  | "auto_readonly"
+  | "full_access"
+  | "routine_safe"
+  | "headless_safe";
 export type LegacyWriteMode = "read-only" | "write-with-approval" | "auto-apply";
 
 export type WorkerHealthPayload = {
@@ -712,11 +720,11 @@ export async function steerAgentRun(runId: string, content: string): Promise<{ s
   return parseWorkerResponse<{ status: string }>(response);
 }
 
-export async function cancelAgentRun(runId: string): Promise<{ status: string }> {
+export async function cancelAgentRun(runId: string): Promise<{ status: string; run?: AgentRunRecord }> {
   const response = await fetch(`/api/worker/agent/runs/${encodeURIComponent(runId)}/cancel`, {
     method: "POST",
   });
-  return parseWorkerResponse<{ status: string }>(response);
+  return parseWorkerResponse<{ status: string; run?: AgentRunRecord }>(response);
 }
 
 export async function readRepositoryFile(input: {

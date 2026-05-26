@@ -358,9 +358,11 @@ def review_skip_reason(path: Path, relative_path: Path) -> str | None:
 
 
 def is_stale_duplicate_copy(relative_path: Path) -> bool:
-    stem = relative_path.stem.lower()
     suffix = relative_path.suffix.lower()
-    return suffix in REPOSITORY_REVIEW_SUFFIXES and (stem.endswith(" 2") or stem.startswith("test_") and stem.endswith(" 2"))
+    name = relative_path.name.lower()
+    if re.search(r"\.(?:bak|orig)$", name, flags=re.IGNORECASE):
+        return True
+    return suffix in REPOSITORY_REVIEW_SUFFIXES and bool(re.search(r"(?:\s+\d+|\s+copy)(?=\.[^.]+$)", name, flags=re.IGNORECASE))
 
 
 def review_progress_labels(relative_paths: list[str]) -> dict[str, str]:

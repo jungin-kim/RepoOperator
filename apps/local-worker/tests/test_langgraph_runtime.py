@@ -150,6 +150,8 @@ class LangGraphRuntimeTests(unittest.TestCase):
         self.assertIs(facade.resume_langgraph_controller, graph_runtime.resume_langgraph_controller)
         self.assertIs(facade.route_after_tool_result, graph_routes.route_after_tool_result)
         self.assertIs(facade.final_emit_message_node, finalization.final_emit_message_node)
+        self.assertFalse(hasattr(facade, "ToolOrchestrator"))
+        self.assertFalse(any(name.startswith("_") for name in getattr(facade, "__all__", [])))
 
     def test_major_work_subgraphs_compile(self) -> None:
         subgraphs = [
@@ -210,6 +212,17 @@ class LangGraphRuntimeTests(unittest.TestCase):
         state["pending_action"] = AgentAction(type="final_answer", reason_summary="Finish.")
         self.assertEqual(route_after_understanding(state), "final_synthesis")
 
+    def test_route_evidence_next_snapshots_policy_action(self) -> None:
+        from repooperator_worker.agent_core.graph.nodes.evidence import route_evidence_next_node
+
+        state = initial_graph_state(self._request("Summarize README.md"), run_id="run-evidence-route")
+        update = route_evidence_next_node(state)
+        self.assertIsInstance(update.get("pending_action"), dict)
+        action = action_from_snapshot(update.get("pending_action"))
+        self.assertIsNotNone(action)
+        self.assertEqual(action.type, "inspect_repo_tree")
+        self.assertTrue(update.get("events_to_emit"))
+
     def test_append_reducer_keeps_action_and_result_history(self) -> None:
         action = AgentAction(type="inspect_repo_tree", reason_summary="Inspect.")
         result = ActionResult(action_id=action.action_id, status="success")
@@ -268,7 +281,7 @@ class LangGraphRuntimeTests(unittest.TestCase):
         with patch.dict(os.environ, {"REPOOPERATOR_AGENT_RUNTIME": "langgraph"}, clear=False), patch(
             "repooperator_worker.agent_core.controller_graph.get_active_repository", return_value=None
         ), patch("repooperator_worker.agent_core.controller_graph.OpenAICompatibleModelClient", return_value=_QuietClient()), patch(
-            "repooperator_worker.agent_core.langgraph_runtime.ToolOrchestrator.execute_action", tracking_execute_action
+            "repooperator_worker.agent_core.graph.adapters.ToolOrchestrator.execute_action", tracking_execute_action
         ):
             response = run_controller_graph(request, run_id="run-langgraph-summary")
         self.assertIn("README.md", response.files_read)
@@ -287,7 +300,7 @@ class LangGraphRuntimeTests(unittest.TestCase):
             calls.append(action.type)
             return original_execute_action(self, action)
 
-        with patch("repooperator_worker.agent_core.langgraph_runtime.ToolOrchestrator.execute_action", tracking_execute_action):
+        with patch("repooperator_worker.agent_core.graph.nodes.supervisor.ToolOrchestrator.execute_action", tracking_execute_action):
             update = supervisor_node(state)
         self.assertTrue(update["supervisor_mode"])
         self.assertGreater(len(update["worker_tasks"]), 1)

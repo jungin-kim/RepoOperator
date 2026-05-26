@@ -317,15 +317,41 @@ class WorkerContractTests(unittest.TestCase):
                 payload = update_permission_mode("auto_review")
                 settings = get_settings()
 
-            self.assertEqual(payload.mode, "auto_review")
+            self.assertEqual(payload.mode, "accept_edits")
             self.assertEqual(payload.write_mode, "auto-apply")
             self.assertEqual(settings.write_mode, "auto-apply")
-            self.assertEqual(settings.permission_mode, "auto_review")
+            self.assertEqual(settings.permission_mode, "accept_edits")
             updated = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(updated["model"]["model"], "qwen2.5-coder:7b")
             self.assertEqual(updated["gitProvider"]["token"], "secret-token")
-            self.assertEqual(updated["permissions"]["mode"], "auto_review")
+            self.assertEqual(updated["permissions"]["mode"], "accept_edits")
             self.assertEqual(updated["permissions"]["writeMode"], "auto-apply")
+
+    def test_permission_modes_advertise_core_modes_and_accept_legacy_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_home:
+            config_dir = Path(temp_home) / ".repooperator"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            config_path = config_dir / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "HOME": temp_home,
+                    "REPOOPERATOR_CONFIG_PATH": "",
+                    "REPOOPERATOR_WRITE_MODE": "",
+                },
+                clear=False,
+            ):
+                legacy = update_permission_mode("basic")
+                accepted = update_permission_mode("auto_review")
+
+            self.assertEqual(legacy.mode, "default")
+            self.assertEqual(accepted.mode, "accept_edits")
+            self.assertNotIn("basic", accepted.available_modes)
+            self.assertNotIn("auto_review", accepted.available_modes)
+            self.assertIn("default", accepted.available_modes)
+            self.assertIn("accept_edits", accepted.available_modes)
 
     def test_repository_sources_are_loaded_as_list_with_default_separate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_home:

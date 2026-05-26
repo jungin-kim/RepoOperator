@@ -225,6 +225,14 @@ class RepositoryReviewProgressTests(unittest.TestCase):
         stale = [item for item in inventory["skipped"] if item["file"] == "test_agent_routing_graph 2.py"]
         self.assertEqual(stale[0]["reason"], "stale duplicate copy")
 
+    def test_stale_duplicate_copy_detection_covers_conflict_suffixes(self) -> None:
+        from repooperator_worker.agent_core.repository_review import is_stale_duplicate_copy
+
+        for name in ("skills 6.py", "debug page 10.tsx", "settings copy.json", "module.py.bak", "module.py.orig"):
+            with self.subTest(name=name):
+                self.assertTrue(is_stale_duplicate_copy(Path(name)))
+        self.assertFalse(is_stale_duplicate_copy(Path("package-lock.json")))
+
     def test_selected_files_override_repository_wide_classifier_fields(self) -> None:
         classifier = SimpleNamespace(target_files=["server.py"], mentioned_files=[])
         self.assertFalse(should_use_repository_wide_review(classifier))

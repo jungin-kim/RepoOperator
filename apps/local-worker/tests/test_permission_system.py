@@ -26,6 +26,7 @@ from repooperator_worker.agent_core.tools.builtin import (  # noqa: E402
     RunApprovedCommandTool,
 )
 from repooperator_worker.schemas import AgentRunRequest  # noqa: E402
+from repooperator_worker.services.command_service import preview_command, run_command_with_policy  # noqa: E402
 
 
 class PermissionSystemTests(unittest.TestCase):
@@ -62,6 +63,17 @@ class PermissionSystemTests(unittest.TestCase):
         self.assertEqual(decision.decision, "ask")
         self.assertTrue(decision.approval_id)
         self.assertTrue(decision.metadata["command_preview"]["needs_approval"])
+
+    def test_command_service_policy_matches_tool_permission_preview(self) -> None:
+        status_preview = preview_command(["git", "status", "--short"], project_path=str(self.repo))
+        commit_preview = preview_command(["git", "commit", "-m", "test"], project_path=str(self.repo))
+
+        self.assertTrue(status_preview["read_only"])
+        self.assertFalse(status_preview["needs_approval"])
+        self.assertFalse(commit_preview["read_only"])
+        self.assertTrue(commit_preview["needs_approval"])
+        with self.assertRaises(PermissionError):
+            run_command_with_policy(["git", "commit", "-m", "test"], project_path=str(self.repo))
 
     def test_bypass_mode_exists_but_does_not_bypass_command_policy(self) -> None:
         decision = RunApprovedCommandTool().check_permission({"command": ["git", "commit", "-m", "test"]}, self._context(PermissionMode.BYPASS))

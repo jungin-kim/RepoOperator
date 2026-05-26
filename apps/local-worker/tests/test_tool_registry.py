@@ -10,8 +10,12 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from repooperator_worker.agent_core.planner import PLANNER_ACTION_TYPES  # noqa: E402
+from repooperator_worker.agent_core.mcp import MCPRegistry, MCPServerSpec  # noqa: E402
+from repooperator_worker.agent_core.plugins import PluginRegistry, PluginSpec  # noqa: E402
+from repooperator_worker.agent_core.skills import SkillRegistry, SkillSpec  # noqa: E402
 from repooperator_worker.agent_core.tools import ToolSearch  # noqa: E402
 from repooperator_worker.agent_core.tools.registry import ToolRegistry, get_default_tool_registry  # noqa: E402
+from repooperator_worker.agent_core.tools.base import ToolSpec  # noqa: E402
 from repooperator_worker.agent_core.tools.builtin import ReadFileTool  # noqa: E402
 
 
@@ -179,6 +183,31 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("git_push", git_names)
         self.assertIn("github_create_pr", git_names)
 
+    def test_context_memory_tools_stay_default_but_debug_safe(self) -> None:
+        specs = {item["name"]: item for item in get_default_tool_registry().specs_for_model()}
+        for name in ("refresh_context_pack", "compact_thread_context"):
+            self.assertIn(name, specs)
+            self.assertTrue(specs[name]["always_load"])
+            self.assertEqual(specs[name]["evidence_kind"], "context_pack")
+            self.assertNotIn("context_pack_report", specs[name])
+            self.assertNotIn("input_schema", specs[name])
+
+    def test_tool_spec_aliases_normalize_without_diverging(self) -> None:
+        spec = ToolSpec(
+            name="alias_test",
+            description="Alias test.",
+            operation="custom",
+            input_schema={},
+            read_only=True,
+            concurrency_safe=True,
+            capabilities=("repository_read",),
+            max_result_chars=12_345,
+        )
+        self.assertEqual(spec.capability_names, ("repository_read",))
+        self.assertEqual(spec.capabilities, spec.capability_names)
+        self.assertEqual(spec.max_result_size_chars, 12_345)
+        self.assertEqual(spec.max_result_chars, spec.max_result_size_chars)
+
     def test_tool_search_finds_relevant_deferred_tools(self) -> None:
         registry = get_default_tool_registry()
         web_names = [item["name"] for item in ToolSearch(registry).search(capability="web_research")]
@@ -187,6 +216,26 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("git_status", git_names)
         self.assertIn("git_push", git_names)
         self.assertIn("github_create_pr", git_names)
+
+    def test_tool_search_defaults_to_executable_tool_specs_only(self) -> None:
+        registry = get_default_tool_registry()
+        search = ToolSearch(
+            registry,
+            skill_registry=SkillRegistry([SkillSpec(id="dependency_research", name="Dependency Research", when_to_use="dependency research")]),
+            plugin_registry=PluginRegistry(
+                [PluginSpec(id="issue_tracker", name="Issue Tracker", enabled=True, tools=[{"name": "linear_search", "description": "Find Linear issues"}])]
+            ),
+            mcp_registry=MCPRegistry([MCPServerSpec(id="docs", name="Docs", enabled=True, tools=[{"name": "lookup", "description": "Lookup docs"}])]),
+        )
+
+        default_results = search.search(query="read_file dependency linear docs", limit=20)
+        opt_in_results = search.search(query="read_file dependency linear docs", include_external=True, limit=20)
+
+        self.assertTrue(default_results)
+        self.assertTrue(all(item.get("kind") not in {"skill", "plugin_tool", "mcp_tool"} for item in default_results))
+        self.assertTrue(any(item.get("kind") == "skill" for item in opt_in_results))
+        self.assertTrue(any(item.get("kind") == "plugin_tool" for item in opt_in_results))
+        self.assertTrue(any(item.get("kind") == "mcp_tool" for item in opt_in_results))
 
     def test_destructive_and_network_tools_have_permission_metadata(self) -> None:
         registry = get_default_tool_registry()

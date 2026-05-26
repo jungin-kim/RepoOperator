@@ -13,6 +13,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from repooperator_worker.agent_core.trace_harness import (  # noqa: E402
+    FORBIDDEN_VISIBLE_MARKERS,
     TRACE_SCENARIO_NAMES,
     TRACE_UPDATE_ENV,
     compare_trace,
@@ -58,6 +59,28 @@ class AgentTraceHarnessTests(unittest.TestCase):
                 first = run_agent_trace("", scenario_name).to_dict()
                 second = run_agent_trace("", scenario_name).to_dict()
                 self.assertEqual(first, second)
+
+    def test_forbidden_visible_markers_cover_reasoning_leaks(self) -> None:
+        expected = {
+            "Work log",
+            "Technical Log",
+            "hidden reasoning",
+            "<think>",
+            "chain-of-thought",
+            "chain of thought",
+            "private_reasoning",
+            "raw reasoning",
+            "reasoning_delta",
+        }
+        self.assertTrue(expected.issubset(set(FORBIDDEN_VISIBLE_MARKERS)))
+
+    def test_forbidden_visible_markers_are_contract_enforced_without_snapshot_churn(self) -> None:
+        snapshot = run_agent_trace("", "simple_project_summary")
+        payload = snapshot.to_dict()
+        payload["expected_final_response_contract"]["text"] = "private_reasoning leaked"
+        rebuilt = type(snapshot)(**payload)
+        issues = validate_trace_contract(rebuilt)
+        self.assertIn("visible trace contains forbidden marker: private_reasoning", issues)
 
 
 if __name__ == "__main__":

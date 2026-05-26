@@ -8,6 +8,7 @@ import {
   type AgentRunPayload,
   type AgentProposeFilePayload,
   type ChangeSetProposalPayload,
+  type PermissionMode,
 } from "@/lib/local-worker-client";
 import { operationLabel, proposalApplyWarning, type ChangeProposal, type ProposalChange, type ProposalStatus } from "./proposal-card-copy";
 
@@ -15,7 +16,7 @@ export type { ChangeProposal, ProposalStatus } from "./proposal-card-copy";
 
 interface ProposalCardProps {
   proposal: ChangeProposal;
-  writeMode: "basic" | "auto_review" | "full_access";
+  writeMode: PermissionMode;
   onStatusChange: (id: string, status: ProposalStatus, message?: string, result?: AgentRunPayload) => void;
 }
 

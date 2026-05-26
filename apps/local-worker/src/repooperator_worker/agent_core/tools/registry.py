@@ -55,6 +55,8 @@ ALWAYS_LOAD_TOOL_NAMES = {
     "generate_change_set",
     "validate_change_set",
     "final_answer",
+    # These are always-load so compaction and refresh remain explicit model-visible
+    # recovery options. The tool payloads return summaries/reports, never raw packs.
     "refresh_context_pack",
     "compact_thread_context",
 }
