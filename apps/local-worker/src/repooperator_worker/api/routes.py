@@ -653,7 +653,8 @@ def agent_run_steer(run_id: str, payload: dict) -> dict:
 @router.post("/agent/runs/{run_id}/cancel")
 def agent_run_cancel(run_id: str) -> dict:
     try:
-        return {"status": "cancelled", "run": cancel_run(run_id)}
+        run = cancel_run(run_id)
+        return {"status": run.get("status") or "cancelling", "run": run}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

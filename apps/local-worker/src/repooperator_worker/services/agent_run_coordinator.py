@@ -96,6 +96,32 @@ def stream_run(request: AgentRunRequest) -> tuple[str, Iterator[str]]:
     """Start a background streamed run and return an SSE iterator."""
     run_id = new_run_id()
     start_active_run(run_id=run_id, request=request, thread_id=request.thread_id)
+    deferred_finalization: dict[str, Any] = {}
+    deferred_finalization_lock = RLock()
+
+    def defer_stream_finalization(
+        *,
+        status: str,
+        final_result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        with deferred_finalization_lock:
+            deferred_finalization.clear()
+            deferred_finalization.update(
+                {
+                    "status": status,
+                    "final_result": json_safe(final_result),
+                    "error": error,
+                }
+            )
+
+    def take_deferred_stream_finalization() -> dict[str, Any] | None:
+        with deferred_finalization_lock:
+            if not deferred_finalization:
+                return None
+            payload = dict(deferred_finalization)
+            deferred_finalization.clear()
+            return payload
 
     def worker() -> None:
         final_result: dict | None = None
@@ -104,7 +130,14 @@ def stream_run(request: AgentRunRequest) -> tuple[str, Iterator[str]]:
             from repooperator_worker.agent_core.controller_graph import stream_controller_graph
 
             for event in stream_controller_graph(request, run_id=run_id):
-                if should_cancel(run_id):
+                if isinstance(event, str):
+                    try:
+                        event = json.loads(event)
+                    except json.JSONDecodeError:
+                        continue
+                if not isinstance(event, dict):
+                    continue
+                if should_cancel(run_id) and event.get("type") != "final_message":
                     append_activity(
                         run_id,
                         request=request,
@@ -113,13 +146,8 @@ def stream_run(request: AgentRunRequest) -> tuple[str, Iterator[str]]:
                         status="failed",
                         event_type="run_cancelled",
                     )
-                    complete_active_run(run_id=run_id, status="cancelled", error="Cancelled by user.")
+                    defer_stream_finalization(status="cancelled", error="Cancelled by user.")
                     return
-                if isinstance(event, str):
-                    try:
-                        event = json.loads(event)
-                    except json.JSONDecodeError:
-                        continue
                 if event.get("type") == "final_message":
                     final_result = json_safe(event.get("result"))
                 if not event.get("persisted"):
@@ -152,9 +180,12 @@ def stream_run(request: AgentRunRequest) -> tuple[str, Iterator[str]]:
             terminal_status = "cancelled" if (
                 isinstance(final_result, dict) and final_result.get("stop_reason") == "cancelled"
             ) or run_meta.get("status") == "cancelling" else "completed"
-            complete_active_run(run_id=run_id, status=terminal_status, final_result=final_result)
-            if terminal_status == "completed":
-                _drain_queue_after_run(request)
+            if terminal_status == "cancelled":
+                defer_stream_finalization(status="cancelled", final_result=final_result)
+            else:
+                complete_active_run(run_id=run_id, status=terminal_status, final_result=final_result)
+                if terminal_status == "completed":
+                    _drain_queue_after_run(request)
         except Exception as exc:  # noqa: BLE001
             append_run_event(run_id, {"type": "error", "message": str(exc), "status": "failed"})
             complete_active_run(run_id=run_id, status="failed", error=str(exc))
@@ -176,8 +207,19 @@ def stream_run(request: AgentRunRequest) -> tuple[str, Iterator[str]]:
             for event in events:
                 last_sequence = int(event.get("sequence") or last_sequence)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if not events:
+                deferred = take_deferred_stream_finalization()
+                if deferred is not None:
+                    complete_active_run(
+                        run_id=run_id,
+                        status=str(deferred.get("status") or "completed"),
+                        final_result=deferred.get("final_result"),
+                        error=deferred.get("error"),
+                    )
+                    break
             run = get_run(run_id)
-            if run and run.get("status") != "running" and not events:
+            active_stream_statuses = {"pending", "running", "waiting_approval", "cancelling"}
+            if run and run.get("status") not in active_stream_statuses and not events:
                 break
             time.sleep(0.25)
         yield "data: [DONE]\n\n"
