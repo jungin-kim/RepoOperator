@@ -455,14 +455,24 @@ function appendActionToSection(
 }
 
 function sectionStatusText(step: ProgressStep, actionType: string | null): string | null {
-  if (step.display === "hidden" || step.visibility === "internal") return null;
-  if (isLowValuePrimaryLabel(step.label) && !step.safeReasoningSummary && !step.safetyNote) return null;
-  if (step.safeReasoningSummary?.trim()) return step.safeReasoningSummary.trim();
-  if (!actionType && step.safetyNote?.trim()) return step.safetyNote.trim();
+  if (!isPrimaryActionStep(step)) return null;
+  if (isLowValuePrimaryLabel(step.label)) return null;
+  const status = String(step.status || "").toLowerCase();
+  const safetyNote = step.safetyNote?.trim();
+  if (safetyNote && (status === "waiting" || status === "waiting_approval" || /approval/i.test(safetyNote))) {
+    return safetyNote;
+  }
+  if (status === "failed") return safetyNote || step.observation?.trim() || step.label?.trim() || "Action failed";
+  if (status === "cancelled") return safetyNote || step.label?.trim() || "Run cancelled";
+  if (status === "timed_out") return safetyNote || step.label?.trim() || "Action timed out";
+  if (!actionType && step.kind === "final_answer" && step.label?.trim()) return step.label.trim();
   return null;
 }
 
 function isPrimaryActionStep(step: ProgressStep): boolean {
+  const audience = String(step.audience || "").toLowerCase();
+  const kind = String(step.kind || "").toLowerCase();
+  if (audience === "debug" || audience === "internal" || audience === "secondary" || kind === "debug_rationale") return false;
   if (step.display === "hidden" || step.visibility === "internal") return false;
   if (step.display === "secondary" || step.visibility === "debug") return false;
   return true;
@@ -612,14 +622,14 @@ function sectionSummary(section: AgentTranscriptSection): AgentTranscriptSection
 
 function sectionSummaryText(summary: AgentTranscriptSection["summary"]): string {
   const parts: string[] = [];
-  if (summary.filesEdited > 0) parts.push(`파일 ${summary.filesEdited}개 수정`);
-  if (summary.filesRead > 0) parts.push(`파일 ${summary.filesRead}개`);
-  if (summary.searches > 0) parts.push(`검색 ${summary.searches}회`);
-  if (summary.filesListed > 0) parts.push(`목록 ${summary.filesListed}개 탐색`);
+  if (summary.filesEdited > 0) parts.push(`Prepared proposal for ${summary.filesEdited} file${summary.filesEdited === 1 ? "" : "s"}`);
+  if (summary.filesRead > 0) parts.push(`Read ${summary.filesRead} file${summary.filesRead === 1 ? "" : "s"}`);
+  if (summary.searches > 0) parts.push(`Searched ${summary.searches === 1 ? "once" : `${summary.searches} times`}`);
+  if (summary.filesListed > 0) parts.push(summary.filesListed === 1 ? "Listed repository" : `Listed repository ${summary.filesListed} times`);
   if (summary.commandsRun > 0) {
-    parts.push(`ran ${summary.commandsRun} command${summary.commandsRun === 1 ? "" : "s"}`);
+    parts.push(`Ran ${summary.commandsRun} command${summary.commandsRun === 1 ? "" : "s"}`);
   }
-  if (summary.webSources > 0) parts.push(`web sources ${summary.webSources}`);
+  if (summary.webSources > 0) parts.push(`Checked ${summary.webSources} web source${summary.webSources === 1 ? "" : "s"}`);
   return parts.join(", ") || "No recorded actions";
 }
 

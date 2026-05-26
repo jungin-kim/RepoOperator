@@ -10,6 +10,20 @@ export type PermissionMode =
   | "routine_safe"
   | "headless_safe";
 export type LegacyWriteMode = "read-only" | "write-with-approval" | "auto-apply";
+export type EventKind =
+  | "graph_transition"
+  | "tool_action"
+  | "action_result"
+  | "validation"
+  | "proposal"
+  | "approval"
+  | "git"
+  | "web"
+  | "final_answer"
+  | "debug_rationale";
+export type EventAudience = "primary" | "secondary" | "debug" | "internal";
+export type ValidationKind = "change_set" | "post_apply" | "command" | "git";
+export type ValidationStatus = "passed" | "failed" | "skipped" | "blocked" | "warning";
 
 export type WorkerHealthPayload = {
   status: string;
@@ -258,8 +272,10 @@ export type ValidationCommandSelectionPayload = {
 };
 
 export type ValidationResultPayload = {
-  kind?: string;
-  status?: string;
+  kind?: ValidationKind | string;
+  source?: ValidationKind | string;
+  status?: ValidationStatus | string;
+  raw_status?: string;
   command?: string[];
   display_command?: string;
   candidate_commands?: ValidationCommandCandidatePayload[];
@@ -362,6 +378,8 @@ export type AgentActivityEvent = {
   timestamp?: string | null;
   persisted?: boolean;
   event_type?: string | null;
+  kind?: EventKind | string | null;
+  audience?: EventAudience | string | null;
   visibility?: "user" | "debug" | "internal" | string | null;
   display?: "primary" | "secondary" | "hidden" | string | null;
   phase?: string;

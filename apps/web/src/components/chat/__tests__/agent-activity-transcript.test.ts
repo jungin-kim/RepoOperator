@@ -42,16 +42,15 @@ describe("buildAgentActivityTranscript sections", () => {
     expect(buildAgentActivityTranscript([])).toEqual([]);
   });
 
-  it("status note starts a section", () => {
+  it("rationale-only status note does not start a normal section", () => {
     const sections = buildAgentActivityTranscript([
       statusStep("I will map the restore path first.", { activityId: "note:1" }),
     ]);
 
-    expect(sections).toHaveLength(1);
-    expect(sections[0].statusText).toBe("I will map the restore path first.");
+    expect(sections).toEqual([]);
   });
 
-  it("actions after status note attach to that section", () => {
+  it("actions after rationale-only note produce concrete work section", () => {
     const sections = buildAgentActivityTranscript([
       statusStep("I will inspect thread persistence.", { activityId: "note:1" }),
       toolStep("search_text", { activityId: "search:1", relatedSearchQuery: "active thread" }),
@@ -59,11 +58,12 @@ describe("buildAgentActivityTranscript sections", () => {
     ]);
 
     expect(sections).toHaveLength(1);
+    expect(sections[0].statusText).toBe("Working");
     expect(sections[0].details.map((detail) => detail.kind)).toEqual(["search", "read_file"]);
     expect(sections[0].summary).toMatchObject({ searches: 1, filesRead: 1 });
   });
 
-  it("next status note starts a new section", () => {
+  it("rationale-only notes do not split concrete work sections", () => {
     const sections = buildAgentActivityTranscript([
       statusStep("First phase.", { activityId: "note:1" }),
       toolStep("search_text", { activityId: "search:1", relatedSearchQuery: "thread" }),
@@ -71,10 +71,9 @@ describe("buildAgentActivityTranscript sections", () => {
       toolStep("read_file", { activityId: "read:1", files: ["run-event-state.ts"] }),
     ]);
 
-    expect(sections).toHaveLength(2);
-    expect(sections[0].details).toHaveLength(1);
-    expect(sections[1].details).toHaveLength(1);
-    expect(sections[1].statusText).toBe("Second phase.");
+    expect(sections).toHaveLength(1);
+    expect(sections[0].details).toHaveLength(2);
+    expect(sections[0].statusText).toBe("Working");
   });
 
   it("completed sections are collapsible by default", () => {
@@ -153,8 +152,7 @@ describe("buildAgentActivityTranscript sections", () => {
       }),
     ]);
 
-    expect(sections).toHaveLength(1);
-    expect(sections[0].details).toEqual([]);
+    expect(sections).toEqual([]);
   });
 
   it("action before status note creates quiet implicit section only for primary work", () => {
@@ -178,8 +176,8 @@ describe("buildAgentActivityTranscript sections", () => {
 
     expect(sections[0].status).toBe("completed");
     expect(sections[0].summary).toMatchObject({ searches: 1, filesListed: 1, filesRead: 2, commandsRun: 1 });
-    expect(sections[0].summaryText).toContain("검색 1회");
-    expect(sections[0].summaryText).toContain("ran 1 command");
+    expect(sections[0].summaryText).toContain("Searched once");
+    expect(sections[0].summaryText).toContain("Ran 1 command");
   });
 
   it("web research rows show source counts", () => {
@@ -284,7 +282,7 @@ describe("buildAgentActivityTranscript sections", () => {
     ]);
 
     expect(sections).toHaveLength(1);
-    expect(sections[0].statusText).toContain("README");
+    expect(sections[0].statusText).toBe("Working");
     expect(sections[0].details).toHaveLength(1);
     expect(sections[0].details[0]).toMatchObject({ kind: "read_file", files: ["README.md"] });
   });
@@ -360,8 +358,29 @@ describe("buildAgentActivityTranscript sections", () => {
       statusStep("I am preparing the grounded answer.", { activityId: "note:final" }),
     ], { finalizeRunning: true });
 
-    expect(sections).toHaveLength(2);
+    expect(sections).toHaveLength(1);
     expect(sections[0].summary).toMatchObject({ filesListed: 1, filesRead: 1 });
     expect(sections[0].details.map((detail) => detail.kind)).toEqual(["list_files", "read_file"]);
+  });
+
+  it("does not produce status text from rationale-only progress", () => {
+    const sections = buildAgentActivityTranscript([
+      step({
+        activityId: "rationale:1",
+        eventType: "work_trace",
+        kind: "debug_rationale",
+        audience: "debug",
+        visibility: "debug",
+        display: "secondary",
+        label: "Validate result",
+        safeReasoningSummary: ["I recorded", "the tool result status before deciding whether to continue."].join(" "),
+      }),
+      toolStep("read_file", { activityId: "read:main", files: ["main.py"] }),
+    ]);
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0].statusText).toBe("Working");
+    expect(JSON.stringify(sections)).not.toContain(["I recorded", "the tool result status"].join(" "));
+    expect(sections[0].details[0]).toMatchObject({ kind: "read_file", files: ["main.py"] });
   });
 });

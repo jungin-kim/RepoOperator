@@ -17,6 +17,7 @@ from repooperator_worker.agent_core.graph.adapters import (
 )
 from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import action_to_snapshot, result_from_snapshot
+from repooperator_worker.agent_core.events import normalize_validation_status
 from repooperator_worker.agent_core.understanding_context import append_visible_rationale, evidence_basis_update
 from repooperator_worker.services.json_safe import json_safe
 
@@ -358,7 +359,15 @@ def post_apply_validation_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     update = {
             "post_apply_validation_status": status,
             "change_set_proposal": proposal or state.get("change_set_proposal"),
-            "validation_results": [{"kind": "post_apply", "status": status, "errors": []}],
+            "validation_results": [
+                {
+                    "kind": "post_apply",
+                    "source": "post_apply",
+                    "status": normalize_validation_status(status) or "skipped",
+                    "raw_status": status,
+                    "errors": [],
+                }
+            ],
             "routing_stage": "after_apply",
             "events_to_emit": [
                 _graph_transition_event(
@@ -366,7 +375,13 @@ def post_apply_validation_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     "post_apply_validation",
                     operation="post_apply_validation",
                     status="completed",
-                    validation_result={"status": status, "errors": []},
+                    validation_result={
+                        "kind": "post_apply",
+                        "source": "post_apply",
+                        "status": normalize_validation_status(status) or "skipped",
+                        "raw_status": status,
+                        "errors": [],
+                    },
                 )
             ],
         }

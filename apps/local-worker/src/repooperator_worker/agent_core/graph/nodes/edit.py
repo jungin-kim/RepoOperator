@@ -13,6 +13,7 @@ from repooperator_worker.agent_core.change_set import (
     proposal_from_edit_result,
     validate_change_set as validate_change_set_model,
 )
+from repooperator_worker.agent_core.events import normalize_validation_status
 from repooperator_worker.agent_core.graph.adapters import (
     _execute_if_action_type,
     _graph_transition_event,
@@ -111,7 +112,11 @@ def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
         proposal = typed.model_dump()
     validation = {
         "kind": "change_set",
-        "status": (proposal.get("status") if proposal else None) or (latest.status if latest else "skipped"),
+        "source": "change_set",
+        "status": normalize_validation_status(
+            (proposal.get("status") if proposal else None) or (latest.status if latest else "skipped")
+        ) or "skipped",
+        "proposal_status": (proposal.get("status") if proposal else None) or (latest.status if latest else "skipped"),
         "action_id": latest.action_id if latest else None,
         "proposal_files": [str(item.get("path")) for item in proposal.get("changes") or [] if isinstance(item, dict)],
         "errors": list((proposal.get("validation") or {}).get("errors") or []),
@@ -119,7 +124,7 @@ def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     pending_approval = None
     stop_reason = state.get("stop_reason")
     final_response = state.get("final_response") or ""
-    if validation["status"] == "valid" and proposal.get("changes") and not proposal.get("applied"):
+    if validation["proposal_status"] == "valid" and proposal.get("changes") and not proposal.get("applied"):
         proposal_id = str(proposal.get("proposal_id") or "")
         pending_approval = {
             "kind": "change_set_apply",
@@ -133,7 +138,7 @@ def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
             "change_set_proposal": proposal,
             "pending_approval": pending_approval if pending_approval is not None else state.get("pending_approval"),
             "proposal_id": proposal.get("proposal_id") if isinstance(proposal, dict) else None,
-            "proposal_status": validation["status"],
+            "proposal_status": validation["proposal_status"],
             "apply_status": "pending" if pending_approval else state.get("apply_status"),
             "stop_reason": stop_reason,
             "final_response": final_response,
@@ -146,7 +151,7 @@ def validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     "validate_change_set",
                     subgraph="edit_graph",
                     operation="validate_change_set",
-                    status=validation["status"],
+                    status="failed" if validation["status"] == "failed" else "completed",
                     files=validation["proposal_files"],
                     validation_result=validation,
                 )
@@ -265,7 +270,11 @@ def edit_validate_change_set_node(state: RepoOperatorGraphState) -> dict[str, An
     proposal = _change_set_from_latest_result(state, latest)
     validation = {
         "kind": "change_set",
-        "status": (proposal.get("status") if proposal else None) or (latest.status if latest else "skipped"),
+        "source": "change_set",
+        "status": normalize_validation_status(
+            (proposal.get("status") if proposal else None) or (latest.status if latest else "skipped")
+        ) or "skipped",
+        "proposal_status": (proposal.get("status") if proposal else None) or (latest.status if latest else "skipped"),
         "action_id": latest.action_id if latest else None,
         "errors": list((proposal.get("validation") or {}).get("errors") or []),
     }

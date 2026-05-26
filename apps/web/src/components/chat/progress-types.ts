@@ -4,6 +4,8 @@ export type ProgressStep = {
   runId?: string;
   sequence?: number | null;
   eventType?: string | null;
+  kind?: string | null;
+  audience?: string | null;
   visibility?: "user" | "debug" | "internal" | string | null;
   display?: "primary" | "secondary" | "hidden" | string | null;
   phase?: string;

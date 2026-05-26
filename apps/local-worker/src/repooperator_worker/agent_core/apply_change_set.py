@@ -13,6 +13,7 @@ from repooperator_worker.agent_core.change_set import (
     change_set_from_payload,
     validate_change_set,
 )
+from repooperator_worker.agent_core.events import normalize_validation_status
 from repooperator_worker.agent_core.tools.builtin import is_supported_text_file
 from repooperator_worker.services.common import get_repooperator_home_dir, resolve_project_path
 from repooperator_worker.services.event_service import append_run_event, get_run
@@ -70,7 +71,7 @@ def apply_change_set_for_run(
         return ApplyChangeSetResult(
             applied=False,
             proposal_id=proposal.proposal_id,
-            validation_result=validation.model_dump(),
+            validation_result=_change_set_validation_result(validation),
             errors=["Proposal validation failed before apply.", *validation.errors],
             change_set_proposal=proposal.model_dump(),
         )
@@ -83,7 +84,7 @@ def apply_change_set_for_run(
         applied=False,
         proposal_id=proposal.proposal_id,
         applied_change_set_id=applied_change_set_id,
-        validation_result=validation.model_dump(),
+        validation_result=_change_set_validation_result(validation),
     )
     try:
         for change in _deterministic_changes(proposal.changes):
@@ -137,6 +138,18 @@ def _load_persisted_proposal(run_id: str, proposal_id: str) -> dict[str, Any] | 
         if isinstance(source, dict) and source.get("proposal_id") == proposal_id:
             return source
     return None
+
+
+def _change_set_validation_result(validation: Any) -> dict[str, Any]:
+    payload = validation.model_dump() if hasattr(validation, "model_dump") else dict(validation or {})
+    status = normalize_validation_status(payload.get("status")) or "blocked"
+    return {
+        **payload,
+        "kind": "change_set",
+        "source": "change_set",
+        "status": status,
+        "raw_status": payload.get("status"),
+    }
 
 
 def _deterministic_changes(changes: list[ProposedFileChange]) -> list[ProposedFileChange]:

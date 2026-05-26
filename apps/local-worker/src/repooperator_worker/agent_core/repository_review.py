@@ -7,7 +7,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from repooperator_worker.agent_core.events import append_activity_event, utc_now
+from repooperator_worker.agent_core.events import (
+    EVENT_AUDIENCE_PRIMARY,
+    EVENT_KIND_ACTION_RESULT,
+    EVENT_KIND_TOOL_ACTION,
+    append_activity_event,
+    utc_now,
+)
 from repooperator_worker.agent_core.final_response import build_agent_response
 from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
 from repooperator_worker.services.common import resolve_project_path
@@ -625,6 +631,13 @@ def fallback_file_review_summary(relative_path: str, content: str, truncated: bo
 
 
 def _emit(events: list[dict[str, Any]], **kwargs: Any) -> None:
+    kwargs.setdefault(
+        "kind",
+        EVENT_KIND_ACTION_RESULT if str(kwargs.get("event_type") or "").endswith(("completed", "failed")) else EVENT_KIND_TOOL_ACTION,
+    )
+    kwargs.setdefault("audience", EVENT_AUDIENCE_PRIMARY)
+    kwargs.setdefault("visibility", "user")
+    kwargs.setdefault("display", "primary")
     event = append_activity_event(**kwargs)
     events.append(event)
 

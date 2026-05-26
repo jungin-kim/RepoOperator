@@ -274,15 +274,50 @@ def _graph_transition_event(
     next_node: str | None = None,
     aggregate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from repooperator_worker.agent_core.events import (
+        EVENT_AUDIENCE_PRIMARY,
+        EVENT_AUDIENCE_DEBUG,
+        EVENT_KIND_APPROVAL,
+        EVENT_KIND_DEBUG_RATIONALE,
+        EVENT_KIND_FINAL_ANSWER,
+        EVENT_KIND_GIT,
+        EVENT_KIND_GRAPH_TRANSITION,
+        EVENT_KIND_PROPOSAL,
+        EVENT_KIND_VALIDATION,
+        EVENT_KIND_WEB,
+        activity_event,
+        normalize_validation_result,
+    )
+
+    real_validation_result = normalize_validation_result(validation_result)
+    action_result = None if real_validation_result else validation_result
+    event_kind = _graph_event_kind(
+        node=node,
+        operation=operation,
+        action_type=action_type,
+        validation_result=real_validation_result,
+        aggregate=aggregate,
+        constants={
+            "approval": EVENT_KIND_APPROVAL,
+            "debug": EVENT_KIND_DEBUG_RATIONALE,
+            "final": EVENT_KIND_FINAL_ANSWER,
+            "git": EVENT_KIND_GIT,
+            "graph": EVENT_KIND_GRAPH_TRANSITION,
+            "proposal": EVENT_KIND_PROPOSAL,
+            "validation": EVENT_KIND_VALIDATION,
+            "web": EVENT_KIND_WEB,
+        },
+    )
+    event_audience = EVENT_AUDIENCE_PRIMARY if real_validation_result else EVENT_AUDIENCE_DEBUG
     graph_metadata = {
         "graph_node": node,
         "subgraph": subgraph,
         "subtask_id": state.get("current_subtask_id"),
-        "validation_result": validation_result,
+        "validation_result": real_validation_result,
+        "action_result": action_result,
         "change_set_summary": aggregate,
         "next_node": next_node,
     }
-    from repooperator_worker.agent_core.events import activity_event
 
     event = activity_event(
         run_id=str(state.get("run_id") or "run_controller"),
@@ -291,9 +326,11 @@ def _graph_transition_event(
         event_type="graph_transition",
         phase="Thinking",
         label=_graph_event_label(node, operation),
+        kind=event_kind,
+        audience=event_audience,
         status=status,
-        visibility="debug",
-        display="secondary",
+        visibility="user" if event_audience == EVENT_AUDIENCE_PRIMARY else "debug",
+        display="primary" if event_audience == EVENT_AUDIENCE_PRIMARY else "secondary",
         operation=operation,
         action_type=action_type,
         related_files=files or [],
@@ -304,6 +341,32 @@ def _graph_transition_event(
     event = json_safe(event)
     _append_graph_event_safe(str(state.get("run_id") or "run_controller"), event)
     return event
+
+def _graph_event_kind(
+    *,
+    node: str,
+    operation: str,
+    action_type: str | None,
+    validation_result: dict[str, Any] | None,
+    aggregate: dict[str, Any] | None,
+    constants: dict[str, str],
+) -> str:
+    if validation_result:
+        return constants["validation"]
+    text = " ".join(str(item or "") for item in (node, operation, action_type)).lower()
+    if "approval" in text or "await_" in text:
+        return constants["approval"]
+    if "git" in text or "commit" in text or "push" in text or "pr_" in text or "mr" in text:
+        return constants["git"]
+    if "web" in text or "fetch" in text:
+        return constants["web"]
+    if "change_set" in text or "proposal" in text or "edit" in text or (aggregate and aggregate.get("proposal_id")):
+        return constants["proposal"]
+    if "final" in text or node in {"quality_guard", "repair_final_answer", "build_response", "emit_final_message"}:
+        return constants["final"]
+    if node in {"context_pack", "understand_request", "route_next", "quality_guard", "repair_final_answer"}:
+        return constants["debug"]
+    return constants["graph"]
 
 def _graph_event_label(node: str, operation: str) -> str:
     labels = {
@@ -356,12 +419,16 @@ def _append_graph_event_safe(run_id: str, event: dict[str, Any]) -> None:
         return
 
 def _append_action_event(run_id: str, action: AgentAction, result: ActionResult) -> None:
+    from repooperator_worker.agent_core.events import EVENT_AUDIENCE_DEBUG, EVENT_KIND_ACTION_RESULT
+
     try:
         append_run_event(
             run_id,
             {
                 "type": "action_result",
                 "event_type": "action_result",
+                "kind": EVENT_KIND_ACTION_RESULT,
+                "audience": EVENT_AUDIENCE_DEBUG,
                 "status": result.status,
                 "action": action.model_dump(),
                 "result": result.model_dump(),

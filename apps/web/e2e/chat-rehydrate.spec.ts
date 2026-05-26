@@ -235,6 +235,12 @@ async function revealCompletedActivity(page: Page) {
   }
 }
 
+async function expectConcreteActivity(page: Page) {
+  const transcript = page.locator(".agent-transcript-section").first();
+  await expect(transcript).toBeVisible({ timeout: 5000 });
+  await expect(transcript.getByText("README.md", { exact: false })).toBeVisible({ timeout: 5000 });
+}
+
 // ── Scenario A: Active thread survives navigation during active run ────────────
 
 test("A: active thread survives navigation away and back during active run", async ({ page }) => {
@@ -260,7 +266,7 @@ test("A: active thread survives navigation away and back during active run", asy
   await page.goto("/app");
 
   await expect(page.getByText(USER_MSG)).toBeVisible({ timeout: 5000 });
-  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expectConcreteActivity(page);
   await expect(page.locator(".agent-transcript-section")).toHaveCount(1);
   await expect(page.getByTestId("stop-run-button")).toBeVisible();
 
@@ -273,7 +279,7 @@ test("A: active thread survives navigation away and back during active run", asy
   await expect(page.getByText(USER_MSG)).toBeVisible({ timeout: 5000 });
   await expect(page.locator(".sidebar-thread.sidebar-item-active")).toContainText("mock/repo");
 
-  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expectConcreteActivity(page);
   await expect(page.locator(".agent-transcript-section")).toHaveCount(1);
   await expect(page.getByTestId("stop-run-button")).toBeVisible();
   await expect(page.getByText("Loaded context")).toHaveCount(0);
@@ -320,7 +326,7 @@ test("B: active run completes while user is on debug page and rehydrates on retu
   await setStorageForThread(page, THREAD_ID, RUN_ID);
   await page.goto("/app");
   await expect(page.getByText(USER_MSG)).toBeVisible({ timeout: 5000 });
-  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expectConcreteActivity(page);
 
   await page.goto("/debug");
   await expect(page.getByText("RepoOperator Debug")).toBeVisible();
@@ -345,7 +351,7 @@ test("B: active run completes while user is on debug page and rehydrates on retu
   await expect(page.getByText(USER_MSG)).toBeVisible({ timeout: 5000 });
   await expect(page.getByText(FINAL_RESPONSE, { exact: false })).toBeVisible({ timeout: 8000 });
   await revealCompletedActivity(page);
-  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expectConcreteActivity(page);
   await expect(page.getByText("Work log:")).toHaveCount(0);
   await expect(page.locator(".agent-transcript-section")).toHaveCount(1);
   await expect(page.getByTestId("stop-run-button")).toHaveCount(0);
@@ -487,7 +493,7 @@ test("C: transcript replacement hides low-value labels and expands structured de
   await setStorageForThread(page, THREAD_ID, RUN_ID);
   await page.goto("/app");
 
-  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expectConcreteActivity(page);
   for (const hiddenLabel of [
     "Loaded context",
     "Framed request",
@@ -529,7 +535,7 @@ test("C1: progress_delta events keep run alive when assistant_delta is delayed",
   await page.goto("/app");
   await page.waitForTimeout(600);
 
-  await expect(page.getByText(WORK_NOTE)).toBeVisible({ timeout: 5000 });
+  await expectConcreteActivity(page);
 
   // No empty/blank assistant message should have been created
   const emptyAssistant = page.locator('[data-testid="assistant-message"]:has-text("")');
@@ -724,7 +730,7 @@ test("F: waiting_approval and cancelling statuses keep active run visible", asyn
 
 // ── Scenario G: work trace fields rehydrate and merge ────────────────────────
 
-test("G: work trace rehydrates safe summaries and merges by activity_id", async ({ page }) => {
+test("G: work trace rehydrates concrete actions and merges by activity_id", async ({ page }) => {
   const workTraceEvents = [
     {
       phase: "Decision",
@@ -735,6 +741,11 @@ test("G: work trace rehydrates safe summaries and merges by activity_id", async 
       event_type: "work_trace",
       visibility: "user",
       display: "primary",
+      operation: "read_file",
+      action_type: "read_file",
+      tool_name: "read_file",
+      files: ["README.md"],
+      aggregate: { action_type: "read_file", operation: "read_file", file_path: "README.md" },
       safe_reasoning_summary: "The user named README.md, so I will read that file before answering.",
       current_action: "Read README.md.",
       evidence_needed: ["README.md contents"],
@@ -748,6 +759,11 @@ test("G: work trace rehydrates safe summaries and merges by activity_id", async 
       event_type: "work_trace",
       visibility: "user",
       display: "primary",
+      operation: "read_file",
+      action_type: "read_file",
+      tool_name: "read_file",
+      files: ["README.md"],
+      aggregate: { action_type: "read_file", operation: "read_file", file_path: "README.md" },
       observation: "Read 12 lines.",
       next_action: "Prepare answer from README.md.",
       safety_note: "Read-only file access.",
@@ -792,7 +808,9 @@ test("G: work trace rehydrates safe summaries and merges by activity_id", async 
   await page.goto("/app");
   await page.waitForTimeout(800);
 
-  await expect(page.getByText("The user named README.md", { exact: false })).toBeVisible({ timeout: 8000 });
+  await revealCompletedActivity(page);
+  await expect(page.locator(".agent-transcript-section").first().getByText("README.md", { exact: false })).toBeVisible({ timeout: 8000 });
+  await expect(page.getByText("The user named README.md", { exact: false })).toHaveCount(0);
   await expect(page.getByText("Chose next action")).toHaveCount(0);
   await expect(page.getByText("do-not-render-hidden")).toHaveCount(0);
   await expect(page.getByText("do-not-render-private")).toHaveCount(0);

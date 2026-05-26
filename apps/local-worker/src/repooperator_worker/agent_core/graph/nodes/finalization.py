@@ -22,6 +22,7 @@ from repooperator_worker.agent_core.graph_state import response_to_snapshot
 from repooperator_worker.agent_core.graph.nodes.web import _web_source_notes_for_final
 from repooperator_worker.agent_core.graph.final_answer_support import build_final_answer_text, build_final_response
 from repooperator_worker.agent_core.final_synthesis import validate_or_repair_final_answer
+from repooperator_worker.agent_core.events import normalize_validation_result
 from repooperator_worker.agent_core.understanding_context import append_visible_rationale, build_evidence_basis, evidence_basis_update
 from repooperator_worker.schemas import AgentRunResponse
 from repooperator_worker.services.event_service import append_run_event
@@ -213,7 +214,10 @@ def _workflow_response_updates(state: RepoOperatorGraphState) -> dict[str, Any]:
     updates: dict[str, Any] = {}
     selection = state.get("validation_command_selection") if isinstance(state.get("validation_command_selection"), dict) else None
     validation_results = [item for item in state.get("validation_results") or [] if isinstance(item, dict)]
-    latest_validation = validation_results[-1] if validation_results else None
+    latest_validation = next(
+        (normalized for item in reversed(validation_results) if (normalized := normalize_validation_result(item))),
+        None,
+    )
     if selection:
         updates["validation_command_selection"] = json_safe(selection)
         updates["validation_commands"] = list(selection.get("candidates") or [])

@@ -11,6 +11,7 @@ from repooperator_worker.agent_core.graph.state import RepoOperatorGraphState
 from repooperator_worker.agent_core.graph_state import action_to_snapshot, result_from_snapshot
 from repooperator_worker.agent_core.graph.nodes.apply import await_approval_node
 from repooperator_worker.agent_core.understanding_context import append_visible_rationale, evidence_basis_update
+from repooperator_worker.agent_core.events import normalize_validation_status
 from repooperator_worker.agent_core.validation_selector import ValidationCommandSelector
 from repooperator_worker.services.permissions_service import permission_profile
 
@@ -22,6 +23,7 @@ def execute_tool_node(state: RepoOperatorGraphState) -> dict[str, Any]:
 def validate_result_node(state: RepoOperatorGraphState) -> dict[str, Any]:
     latest = _latest_result(state)
     validation: dict[str, Any] = {
+        "kind": "action_result",
         "status": latest.status if latest else "skipped",
         "action_id": latest.action_id if latest else None,
         "errors": list(latest.errors if latest else []),
@@ -42,7 +44,7 @@ def validate_result_node(state: RepoOperatorGraphState) -> dict[str, Any]:
                     subgraph="validation_graph",
                     operation="validate_result",
                     status=validation["status"],
-                    validation_result=validation,
+                    aggregate={"action_result": validation},
                 )
             ],
         }
@@ -84,7 +86,15 @@ def validation_parse_errors_node(state: RepoOperatorGraphState) -> dict[str, Any
     latest = _latest_result(state)
     errors = list(latest.errors if latest else [])
     update = {
-        "validation_results": [{"kind": "command", "status": latest.status if latest else "skipped", "errors": errors}],
+        "validation_results": [
+            {
+                "kind": "command",
+                "source": "command",
+                "status": normalize_validation_status(latest.status if latest else "skipped") or "skipped",
+                "raw_status": latest.status if latest else "skipped",
+                "errors": errors,
+            }
+        ],
         "events_to_emit": [_graph_transition_event(state, "parse_errors", subgraph="validation_graph", operation="parse_errors")],
     }
     next_state = _merge_updates(dict(state), update)
@@ -146,7 +156,16 @@ def select_validation_commands_node(state: RepoOperatorGraphState) -> dict[str, 
             )
         )
     else:
-        update["validation_results"] = [{"kind": "post_apply_validation", "status": status, "errors": [], "selection": payload}]
+        update["validation_results"] = [
+            {
+                "kind": "post_apply",
+                "source": "post_apply",
+                "status": "skipped",
+                "raw_status": status,
+                "errors": [],
+                "selection": payload,
+            }
+        ]
     next_state = _merge_updates(dict(state), update)
     update = _merge_updates(update, evidence_basis_update(next_state, trigger_node="select_validation_commands"))
     update = _merge_updates(
@@ -252,10 +271,13 @@ def parse_validation_result_node(state: RepoOperatorGraphState) -> dict[str, Any
         output = latest.observation
     if latest and latest.status == "failed":
         errors.append(output or "Validation command failed.")
-    status = _validation_status_from_latest(latest, state, bool(selected))
+    raw_status = _raw_validation_status_from_latest(latest, state, bool(selected))
+    status = normalize_validation_status(raw_status) or "blocked"
     result = {
-        "kind": "post_apply_validation",
+        "kind": "post_apply",
+        "source": "post_apply",
         "status": status,
+        "raw_status": raw_status,
         "command": command,
         "display_command": shlex.join(command) if command else selected.get("display_command"),
         "candidate": selected or None,
@@ -295,7 +317,14 @@ def _post_apply_validation_status_update(state: RepoOperatorGraphState, status: 
     proposal = dict(state.get("change_set_proposal") or {})
     if proposal:
         proposal["post_apply_validation_status"] = status
-    result = {"kind": "post_apply_validation", "status": status, "errors": [], "reason": reason}
+    result = {
+        "kind": "post_apply",
+        "source": "post_apply",
+        "status": normalize_validation_status(status) or "blocked",
+        "raw_status": status,
+        "errors": [],
+        "reason": reason,
+    }
     return _with_checkpoint_bump(
         {
             "post_apply_validation_status": status,
@@ -314,7 +343,7 @@ def _post_apply_validation_status_update(state: RepoOperatorGraphState, status: 
         }
     )
 
-def _validation_status_from_latest(latest: Any, state: RepoOperatorGraphState, had_selected_command: bool) -> str:
+def _raw_validation_status_from_latest(latest: Any, state: RepoOperatorGraphState, had_selected_command: bool) -> str:
     if state.get("stop_reason") == "approval_denied":
         return "approval_denied"
     if not had_selected_command:
@@ -332,15 +361,20 @@ def _validation_status_from_latest(latest: Any, state: RepoOperatorGraphState, h
 def _final_response_with_validation_status(existing: str, result: dict[str, Any]) -> str:
     command = str(result.get("display_command") or "").strip()
     status = str(result.get("status") or "not_run")
+    raw_status = str(result.get("raw_status") or status)
     if status == "passed":
         line = f"Post-apply validation passed with `{command}`." if command else "Post-apply validation passed."
     elif status == "failed":
         detail = "; ".join(str(item) for item in result.get("errors") or []) or "validation command failed"
         line = f"Post-apply validation failed with `{command}`: {detail}" if command else f"Post-apply validation failed: {detail}"
-    elif status == "approval_denied":
+    elif raw_status == "approval_denied":
         line = "Post-apply validation was not run because command approval was denied."
-    elif status == "skipped_no_validation_command":
+    elif raw_status == "skipped_no_validation_command":
         line = "Post-apply validation was skipped because no candidate command was selected."
+    elif status == "skipped":
+        line = "Post-apply validation was skipped."
+    elif status == "blocked":
+        line = "Post-apply validation was blocked."
     else:
         line = f"Post-apply validation status: {status}."
     if line in existing:

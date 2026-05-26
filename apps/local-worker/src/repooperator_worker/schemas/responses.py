@@ -1,4 +1,23 @@
+from typing import Literal, TypeAlias
+
 from pydantic import BaseModel
+
+
+EventKind: TypeAlias = Literal[
+    "graph_transition",
+    "tool_action",
+    "action_result",
+    "validation",
+    "proposal",
+    "approval",
+    "git",
+    "web",
+    "final_answer",
+    "debug_rationale",
+]
+EventAudience: TypeAlias = Literal["primary", "secondary", "debug", "internal"]
+ValidationKind: TypeAlias = Literal["change_set", "post_apply", "command", "git"]
+ValidationStatus: TypeAlias = Literal["passed", "failed", "skipped", "blocked", "warning"]
 
 
 class HealthResponse(BaseModel):

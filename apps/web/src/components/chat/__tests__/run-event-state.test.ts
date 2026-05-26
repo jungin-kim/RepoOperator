@@ -121,6 +121,37 @@ describe("run-event-state transcript reconstruction", () => {
     expect(steps[0].files).toEqual(["README.md"]);
   });
 
+  it("ignores debug safeReasoningSummary-only events in normal progress steps", () => {
+    const steps = mergeRunEventsIntoProgressSteps([
+      progressEvent({
+        activity_id: "rationale-only",
+        kind: "debug_rationale",
+        audience: "debug",
+        visibility: "debug",
+        display: "secondary",
+        label: "Validate result",
+        aggregate: {},
+        safe_reasoning_summary: ["I recorded", "the tool result status before deciding whether to continue."].join(" "),
+      }),
+      progressEvent({
+        activity_id: "read-main",
+        kind: "tool_action",
+        audience: "primary",
+        operation: "read_file",
+        action_type: "read_file",
+        label: "main.py",
+        files: ["main.py"],
+        aggregate: { action_type: "read_file", file_path: "main.py" },
+      }),
+    ]);
+    const transcript = buildAgentActivityTranscript(steps, { finalizeRunning: true });
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0].files).toEqual(["main.py"]);
+    expect(JSON.stringify(transcript)).not.toContain(["I recorded", "the tool result status"].join(" "));
+    expect(transcript[0].details[0]).toMatchObject({ kind: "read_file", files: ["main.py"] });
+  });
+
   it("does not duplicate transcript items after rehydrate merges duplicate activity_id", () => {
     const steps = mergeRunEventsIntoProgressSteps([
       progressEvent({ activity_id: "same", status: "running", sequence: 1 }),

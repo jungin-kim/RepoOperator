@@ -40,6 +40,8 @@ export function progressStepFromEvent(
     runId: event.run_id,
     sequence: event.sequence,
     eventType: event.event_type,
+    kind: event.kind,
+    audience: event.audience,
     visibility: event.visibility,
     display: event.display,
     phase: event.phase,
@@ -175,27 +177,100 @@ export function mergeProgressStep(current: ProgressStep[], incoming: ProgressSte
 }
 
 function hasProgressStepContent(event: Partial<AgentRunEvent & ProgressStep>): boolean {
+  if (isDebugOnlyEvent(event)) return false;
+  const aggregate = aggregateOf(event);
   return Boolean(
-    event.label
-      || event.message
-      || event.safe_reasoning_summary
-      || event.safeReasoningSummary
-      || event.current_action
-      || event.currentAction
-      || event.observation
-      || event.next_action
-      || event.nextAction
+    hasPrimaryLabel(event)
+      || hasConcreteActionSignal(event)
+      || hasRealValidationSignal(event, aggregate)
+      || hasMeaningfulAggregate(aggregate),
+  );
+}
+
+function isDebugOnlyEvent(event: Partial<AgentRunEvent & ProgressStep>): boolean {
+  const audience = String(event.audience || "").toLowerCase();
+  const kind = String(event.kind || "").toLowerCase();
+  const visibility = String(event.visibility || "").toLowerCase();
+  const display = String(event.display || "").toLowerCase();
+  return (
+    audience === "debug"
+    || audience === "internal"
+    || kind === "debug_rationale"
+    || visibility === "internal"
+    || display === "hidden"
+  );
+}
+
+function hasPrimaryLabel(event: Partial<AgentRunEvent & ProgressStep>): boolean {
+  const label = String(event.label || event.message || "").trim();
+  if (!label) return false;
+  const audience = String(event.audience || "").toLowerCase();
+  const visibility = String(event.visibility || "").toLowerCase();
+  const display = String(event.display || "").toLowerCase();
+  return audience === "primary" || visibility === "user" || display === "primary";
+}
+
+function hasConcreteActionSignal(event: Partial<AgentRunEvent & ProgressStep>): boolean {
+  return Boolean(
+    event.operation
+      || event.action_type
+      || event.actionType
+      || event.tool_name
+      || event.toolName
       || event.related_search_query
       || event.relatedSearchQuery
-      || event.safety_note
-      || event.safetyNote
       || event.command
       || event.related_command
       || event.files?.length
       || event.proposal_id
-      || event.proposalId
-      || (event.aggregate && Object.keys(event.aggregate).length > 0),
+      || event.proposalId,
   );
+}
+
+function hasRealValidationSignal(
+  event: Partial<AgentRunEvent & ProgressStep>,
+  aggregate: Record<string, unknown>,
+): boolean {
+  if (String(event.kind || "").toLowerCase() === "validation") return true;
+  const validation = aggregate.validation_result;
+  if (!validation || typeof validation !== "object") return false;
+  const item = validation as Record<string, unknown>;
+  return isRealValidationKind(item.kind) || isRealValidationKind(item.source);
+}
+
+function hasMeaningfulAggregate(aggregate: Record<string, unknown>): boolean {
+  const meaningfulKeys = [
+    "action_type",
+    "tool",
+    "operation",
+    "query",
+    "queries",
+    "text_queries",
+    "file_path",
+    "path",
+    "directory",
+    "entries_count",
+    "display_command",
+    "command",
+    "exit_code",
+    "returncode",
+    "edit_archive",
+    "source_count",
+    "sources",
+  ];
+  return meaningfulKeys.some((key) => {
+    const value = aggregate[key];
+    if (Array.isArray(value)) return value.length > 0;
+    return value !== undefined && value !== null && value !== "";
+  });
+}
+
+function aggregateOf(event: Partial<AgentRunEvent & ProgressStep>): Record<string, unknown> {
+  return event.aggregate && typeof event.aggregate === "object" ? event.aggregate : {};
+}
+
+function isRealValidationKind(value: unknown): boolean {
+  return ["change_set", "post_apply", "command", "git"].includes(String(value || ""));
 }
 
 export function maxEventSequence(events?: AgentRunEvent[]): number {

@@ -38,6 +38,13 @@ from repooperator_worker.agent_core.langgraph_runtime import (  # noqa: E402
     route_after_understanding,
     route_to_final_or_continue,
 )
+from repooperator_worker.agent_core.events import (  # noqa: E402
+    EVENT_AUDIENCE_DEBUG,
+    EVENT_KIND_DEBUG_RATIONALE,
+    activity_event,
+)
+from repooperator_worker.agent_core.graph.adapters import _graph_transition_event  # noqa: E402
+from repooperator_worker.agent_core.graph.nodes.finalization import _workflow_response_updates  # noqa: E402
 from repooperator_worker.agent_core.graph_checkpoints import EventServiceLangGraphSaver  # noqa: E402
 from repooperator_worker.agent_core.graph_state import (  # noqa: E402
     action_from_snapshot,
@@ -197,6 +204,53 @@ class LangGraphRuntimeTests(unittest.TestCase):
         self.assertEqual(result_from_snapshot(result_snapshot).files_read, ["README.md"])
         self.assertEqual(request_from_snapshot(request_to_snapshot(request)).project_path, request.project_path)
         json.dumps(json_safe({**state, "actions_taken": [action_snapshot], "action_results": [result_snapshot]}))
+
+    def test_safe_reasoning_only_event_is_debug_rationale(self) -> None:
+        event = activity_event(
+            run_id="taxonomy-safe-summary",
+            request=self._request(),
+            activity_id="rationale-only",
+            event_type="work_trace",
+            phase="Decision",
+            label="Planning",
+            safe_reasoning_summary="I separated " + "the request into internal steps.",
+        )
+
+        self.assertEqual(event.get("kind"), EVENT_KIND_DEBUG_RATIONALE)
+        self.assertEqual(event.get("audience"), EVENT_AUDIENCE_DEBUG)
+        self.assertEqual(event.get("visibility"), "debug")
+        self.assertEqual(event.get("display"), "secondary")
+
+    def test_graph_transition_bare_success_is_not_real_validation(self) -> None:
+        state = initial_graph_state(self._request(), run_id="run-graph-transition-taxonomy")
+        event = _graph_transition_event(
+            state,
+            "validate_result",
+            subgraph="validation_graph",
+            operation="validate_result",
+            validation_result={"status": "success"},
+        )
+
+        self.assertNotEqual(event.get("kind"), "validation")
+        self.assertNotIn("validation_result", event)
+        self.assertEqual(event.get("action_result", {}).get("status"), "success")
+
+    def test_response_updates_ignore_action_result_validation_and_normalize_real_validation(self) -> None:
+        state = initial_graph_state(self._request(), run_id="run-validation-taxonomy")
+        state["validation_results"] = [{"kind": "action_result", "status": "success"}]
+        self.assertNotIn("validation_result", _workflow_response_updates(state))
+
+        state["validation_results"] = [{"kind": "command", "status": "success", "display_command": "npm test"}]
+        updates = _workflow_response_updates(state)
+        self.assertEqual(updates["validation_result"]["kind"], "command")
+        self.assertEqual(updates["validation_result"]["source"], "command")
+        self.assertEqual(updates["validation_result"]["status"], "passed")
+
+        state["validation_results"] = [{"kind": "change_set", "status": "valid"}]
+        updates = _workflow_response_updates(state)
+        self.assertEqual(updates["validation_result"]["kind"], "change_set")
+        self.assertEqual(updates["validation_result"]["source"], "change_set")
+        self.assertEqual(updates["validation_result"]["status"], "passed")
 
     def test_route_after_understanding_maps_actions_to_work_modes(self) -> None:
         state = initial_graph_state(self._request(), run_id="run-route")

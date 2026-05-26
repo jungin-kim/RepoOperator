@@ -13,7 +13,11 @@ import uuid
 from typing import Any
 
 from repooperator_worker.agent_core.actions import AgentAction
-from repooperator_worker.agent_core.events import append_work_trace
+from repooperator_worker.agent_core.events import (
+    EVENT_AUDIENCE_DEBUG,
+    EVENT_KIND_DEBUG_RATIONALE,
+    append_work_trace,
+)
 from repooperator_worker.agent_core.graph_state import request_from_snapshot
 from repooperator_worker.schemas import AgentRunRequest
 from repooperator_worker.services.json_safe import json_safe
@@ -566,6 +570,10 @@ def _emit_rationale_trace(state: dict[str, Any], entry: dict[str, Any], action_p
         activity_id=entry.get("action_id") and f"action:{entry['action_id']}" or f"rationale:{entry['id']}",
         phase=_phase_for_node(str(entry.get("node") or ""), str(action_type or "")),
         label=_label_for_rationale(str(entry.get("node") or ""), str(action_type or "")),
+        kind=EVENT_KIND_DEBUG_RATIONALE,
+        audience=EVENT_AUDIENCE_DEBUG,
+        visibility="debug",
+        display="secondary",
         status="completed",
         safe_reasoning_summary=str(entry.get("summary") or ""),
         uncertainty=[str(item) for item in entry.get("uncertainty") or []],

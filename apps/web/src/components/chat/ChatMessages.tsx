@@ -16,6 +16,7 @@ import {
 } from "./ProposalCard";
 import type { ProgressStep } from "./progress-types";
 import { AgentActivityTranscript } from "./AgentActivityTranscript";
+import { renderableValidationResult } from "./validation-result";
 
 export type ChatMessage = {
   id: string;
@@ -97,9 +98,9 @@ function CommandResultCard({ result }: { result: CommandResultPayload }) {
   );
 }
 
-function ValidationResultCard({ metadata }: { metadata: AgentRunPayload }) {
-  const result = metadata.validation_result;
-  const status = result?.status || metadata.post_apply_validation_status;
+export function ValidationResultCard({ metadata }: { metadata: AgentRunPayload }) {
+  const result = renderableValidationResult(metadata);
+  const status = result?.status;
   if (!status) return null;
   const commands = result?.candidate_commands || metadata.validation_commands || metadata.validation_command_selection?.candidates || [];
   return (
