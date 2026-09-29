@@ -42,6 +42,17 @@ class ToolCallResponse:
     def has_tool_calls(self) -> bool:
         return bool(self.tool_calls)
 
+    @property
+    def usage(self) -> dict[str, int]:
+        """Normalized token usage, including prompt-cache hits when reported.
+
+        Keys: ``input_tokens`` (all prompt tokens, cached included),
+        ``cached_input_tokens`` (served from the provider's prompt cache),
+        ``cache_write_tokens`` (Anthropic cache creation), ``output_tokens``.
+        Empty when the provider reported nothing.
+        """
+        return normalize_usage(self.raw)
+
     def model_dump(self) -> dict[str, Any]:
         return {
             "text": self.text,
@@ -49,6 +60,38 @@ class ToolCallResponse:
             "tool_calls": [call.model_dump() for call in self.tool_calls],
             "finish_reason": self.finish_reason,
         }
+
+
+def normalize_usage(raw: Any) -> dict[str, int]:
+    """Read token usage from an OpenAI-compatible or Anthropic response body."""
+
+    if not isinstance(raw, dict):
+        return {}
+    usage = raw.get("usage")
+    out: dict[str, int] = {}
+    if isinstance(usage, dict):
+        def _int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        if "input_tokens" in usage:  # Anthropic Messages API
+            cached = _int(usage.get("cache_read_input_tokens"))
+            written = _int(usage.get("cache_creation_input_tokens"))
+            out["input_tokens"] = _int(usage.get("input_tokens")) + cached + written
+            out["cached_input_tokens"] = cached
+            out["cache_write_tokens"] = written
+            out["output_tokens"] = _int(usage.get("output_tokens"))
+        else:  # OpenAI-compatible (OpenAI, vLLM, Ollama /v1, DashScope, Gemini compat)
+            details = usage.get("prompt_tokens_details") or {}
+            out["input_tokens"] = _int(usage.get("prompt_tokens"))
+            out["cached_input_tokens"] = _int(details.get("cached_tokens") if isinstance(details, dict) else 0)
+            out["output_tokens"] = _int(usage.get("completion_tokens"))
+    elif "prompt_eval_count" in raw:  # native Ollama body
+        out["input_tokens"] = int(raw.get("prompt_eval_count") or 0)
+        out["output_tokens"] = int(raw.get("eval_count") or 0)
+    return {key: value for key, value in out.items() if value}
 
 
 def _normalized_schema(schema: Any) -> dict[str, Any]:

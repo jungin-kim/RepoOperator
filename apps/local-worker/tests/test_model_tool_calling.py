@@ -8,6 +8,7 @@ from repooperator_worker.agent_core.model_profile import detect_model_profile
 from repooperator_worker.services import model_client
 from repooperator_worker.services.model_tools import (
     ToolCall,
+    ToolCallResponse,
     parse_anthropic_response,
     parse_openai_response,
     to_anthropic_tools,
@@ -162,9 +163,40 @@ class ProviderClientTests(unittest.TestCase):
         self.assertIn("x-api-key", headers)
         self.assertIn("anthropic-version", headers)
         payload = captured["payload"]
-        self.assertEqual(payload["system"], "sys")
+        # System prompt and the last tool carry cache breakpoints so the
+        # stable prefix (tools + system) is served from Anthropic's prompt cache.
+        self.assertEqual(payload["system"], [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}])
         self.assertIn("max_tokens", payload)
         self.assertEqual(len(payload["tools"]), 2)
+        self.assertNotIn("cache_control", payload["tools"][0])
+        self.assertEqual(payload["tools"][-1]["cache_control"], {"type": "ephemeral"})
+
+    def test_anthropic_message_breakpoint_skips_trailing_status(self) -> None:
+        messages = model_client._with_message_cache_breakpoint(
+            model_client._openai_messages_to_anthropic(
+                [
+                    {"role": "user", "content": "task"},
+                    {"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+                    {"role": "tool", "tool_call_id": "t1", "content": "body"},
+                    {"role": "user", "content": "[run status] {}"},
+                ]
+            )
+        )
+        last = messages[-1]["content"]
+        # tool_result (stable) is the breakpoint; the per-step status after it is not cached.
+        self.assertEqual(last[0]["type"], "tool_result")
+        self.assertEqual(last[0]["cache_control"], {"type": "ephemeral"})
+        self.assertNotIn("cache_control", last[1])
+
+    def test_usage_normalizes_cache_hits(self) -> None:
+        openai = ToolCallResponse(raw={"usage": {"prompt_tokens": 1000, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 900}}})
+        self.assertEqual(openai.usage, {"input_tokens": 1000, "cached_input_tokens": 900, "output_tokens": 20})
+        anthropic = ToolCallResponse(raw={"usage": {"input_tokens": 50, "cache_read_input_tokens": 900, "cache_creation_input_tokens": 100, "output_tokens": 20}})
+        self.assertEqual(
+            anthropic.usage,
+            {"input_tokens": 1050, "cached_input_tokens": 900, "cache_write_tokens": 100, "output_tokens": 20},
+        )
+        self.assertEqual(ToolCallResponse(raw=None).usage, {})
 
     def test_build_model_client_selects_provider(self) -> None:
         self.assertIsInstance(

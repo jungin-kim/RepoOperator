@@ -34,6 +34,29 @@ from repooperator_worker.services.model_client import (
 )
 
 MAX_TRANSCRIPT_ACTIONS = 12
+# The transcript window slides in blocks rather than one action at a time.
+# Dropping the oldest action on every step changes the message prefix on every
+# model call, which defeats provider prompt caching (OpenAI/vLLM/Ollama prefix
+# caches, Anthropic cache_control). Sliding by a block keeps the prefix
+# byte-identical for TRANSCRIPT_WINDOW_BLOCK consecutive steps.
+TRANSCRIPT_WINDOW_BLOCK = 8
+# Read-only evidence tools the model may request several of in one response.
+# Only these are batched; anything that mutates, runs a command, touches the
+# network, or needs approval still goes one call per model turn.
+BATCHABLE_ACTION_TYPES = frozenset(
+    {
+        "inspect_repo_tree",
+        "read_file",
+        "read_many_files",
+        "search_files",
+        "search_text",
+        "inspect_symbol",
+        "analyze_file",
+        "inspect_git_state",
+    }
+)
+MAX_BATCHED_ACTIONS = 6
+_RUN_CACHE_LIMIT = 256
 # Budget for prior conversation turns carried into the loop (multi-turn memory).
 # Older turns beyond this budget are dropped so the transcript can never
 # overflow the model window — a lightweight, always-on compaction of history.
@@ -152,12 +175,15 @@ def propose_next_action_with_tool_calling(
     if not tool_calling_available(settings):
         return None
 
+    # Read-only calls the model already asked for in its previous response run
+    # first, without another model round trip.
+    queued = _pop_queued_action(state)
+    if queued is not None:
+        return queued
+
     registry = get_default_tool_registry()
     allowed = set(registry.allowed_action_types())
-    tool_specs = registry.specs_for_model(
-        capabilities=_capability_hints(registry, task_frame),
-        tool_names=[str(item) for item in getattr(task_frame, "likely_needed_tools", []) or []],
-    )
+    tool_specs = _run_tool_specs(registry, state, task_frame)
     if not tool_specs:
         return None
 
@@ -173,8 +199,10 @@ def propose_next_action_with_tool_calling(
         )
     except Exception:
         return None
+    _record_usage(state, response)
 
-    action = _action_from_response(response, allowed)
+    actions = _actions_from_response(response, allowed)
+    action = actions[0] if actions else None
     # Guard against a lazy model that answers (or asks to clarify) before
     # gathering any evidence. Defer to the deterministic evidence-gathering
     # choosers so the agent inspects the tree / reads files first; the model
@@ -244,7 +272,127 @@ def propose_next_action_with_tool_calling(
                 return None
         except Exception:
             pass
+    if action is not None:
+        _queue_batched_actions(state, action, actions[1:])
     return action
+
+
+# ---------------------------------------------------------------------------
+# Per-run caches. Process-local: a worker restart only costs one cache miss.
+
+
+def _run_key(state: Any) -> str | None:
+    run_id = getattr(state, "run_id", None)
+    return str(run_id) if run_id else None
+
+
+def _bounded_put(cache: dict, key: Any, value: Any) -> None:
+    if key not in cache and len(cache) >= _RUN_CACHE_LIMIT:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
+_RUN_TOOL_NAMES: dict[str, list[str]] = {}
+_RUN_STABLE_PAYLOAD: dict[str, str] = {}
+_RUN_ACTION_QUEUE: dict[str, dict[str, Any]] = {}
+_RUN_USAGE: dict[str, dict[str, int]] = {}
+
+
+def _run_tool_specs(registry, state: Any, task_frame: Any) -> list[dict[str, Any]]:
+    """Tool specs for this model call, kept stable for the whole run.
+
+    Tool definitions sit at the very front of the cached prefix, so a tool list
+    that changes between steps (task-frame hints drift as evidence arrives)
+    invalidates the cache for the entire request. The first call fixes the set;
+    later calls only append newly hinted tools at the end.
+    """
+    hinted_tools = [str(item) for item in getattr(task_frame, "likely_needed_tools", []) or []]
+    specs = registry.specs_for_model(capabilities=_capability_hints(registry, task_frame), tool_names=hinted_tools)
+    key = _run_key(state)
+    if key is None:
+        return specs
+    previous = _RUN_TOOL_NAMES.get(key)
+    if previous is None:
+        _bounded_put(_RUN_TOOL_NAMES, key, [str(spec.get("name")) for spec in specs])
+        return specs
+    current_names = [str(spec.get("name")) for spec in specs]
+    names = list(previous) + [name for name in current_names if name not in previous]
+    if names != previous:
+        _bounded_put(_RUN_TOOL_NAMES, key, names)
+    by_name = {str(spec.get("name")): spec for spec in specs}
+    missing = [name for name in names if name not in by_name]
+    if missing:
+        for spec in registry.specs_for_model(tool_names=missing, include_default=False):
+            by_name.setdefault(str(spec.get("name")), spec)
+    return [by_name[name] for name in names if name in by_name]
+
+
+def _queue_batched_actions(state: Any, first: AgentAction, rest: list[AgentAction]) -> None:
+    """Queue the read-only calls that followed ``first`` in the same response."""
+    key = _run_key(state)
+    if key is None:
+        return
+    _RUN_ACTION_QUEUE.pop(key, None)
+    if first.type not in BATCHABLE_ACTION_TYPES:
+        return
+    batch: list[AgentAction] = []
+    for extra in rest:
+        if extra.type not in BATCHABLE_ACTION_TYPES or len(batch) >= MAX_BATCHED_ACTIONS:
+            break
+        batch.append(extra)
+    if batch:
+        _bounded_put(_RUN_ACTION_QUEUE, key, {"after": first.action_id, "actions": batch})
+
+
+def _pop_queued_action(state: Any) -> AgentAction | None:
+    """Next queued read-only call, if the batch is still in sequence.
+
+    The queue is dropped as soon as anything other than the batch ran (a
+    deterministic chooser, an approval, a recovery step), so a stale read never
+    fires after the repository changed.
+    """
+    key = _run_key(state)
+    if key is None:
+        return None
+    entry = _RUN_ACTION_QUEUE.get(key)
+    if not entry:
+        return None
+    taken = list(getattr(state, "actions_taken", []) or [])
+    if not taken or getattr(taken[-1], "action_id", None) != entry["after"]:
+        _RUN_ACTION_QUEUE.pop(key, None)
+        return None
+    already_read = set(getattr(state, "files_read", []) or [])
+    queue: list[AgentAction] = entry["actions"]
+    while queue:
+        candidate = queue.pop(0)
+        # Skip reads that earlier steps already covered (graph_routes has the
+        # full repeat check, but importing it here would be circular).
+        redundant = candidate.type == "read_file" and candidate.target_files and set(candidate.target_files) <= already_read
+        if not redundant:
+            entry["after"] = candidate.action_id
+            if not queue:
+                _RUN_ACTION_QUEUE.pop(key, None)
+            return candidate
+    _RUN_ACTION_QUEUE.pop(key, None)
+    return None
+
+
+def _record_usage(state: Any, response: Any) -> None:
+    """Accumulate token usage (including prompt-cache hits) per run."""
+    usage = getattr(response, "usage", None) or {}
+    if not usage:
+        return
+    key = _run_key(state) or "_anonymous"
+    totals = _RUN_USAGE.get(key) or {}
+    for name, value in usage.items():
+        totals[name] = int(totals.get(name, 0)) + int(value or 0)
+    totals["calls"] = int(totals.get("calls", 0)) + 1
+    _bounded_put(_RUN_USAGE, key, totals)
+
+
+def run_usage(run_id: str) -> dict[str, int]:
+    """Token usage the agentic loop spent for a run (prompt, cached, output, calls)."""
+    return dict(_RUN_USAGE.get(str(run_id)) or {})
 
 
 def _has_command_evidence(state: Any, command: list[str]) -> bool:
@@ -492,25 +640,76 @@ def _recent_history_messages(request: AgentRunRequest) -> list[dict[str, Any]]:
     return messages
 
 
-def _build_transcript(request: AgentRunRequest, state: AgentCoreState, task_frame: Any) -> list[dict[str, Any]]:
-    user_payload = {
-        "task": request.task,
-        "task_frame": json_safe(task_frame),
-        "context_packet": json_safe(getattr(state, "context_packet", {}) or {}),
+def _stable_task_payload(request: AgentRunRequest, state: AgentCoreState, task_frame: Any) -> str:
+    """The run's opening user turn, serialized once and reused byte-for-byte.
+
+    task_frame and context_packet are snapshotted at the first model call. What
+    the agent learns afterwards reaches the model through tool results, so the
+    opening turn never needs to change within a run.
+    """
+    key = _run_key(state)
+    if key is not None and key in _RUN_STABLE_PAYLOAD:
+        return _RUN_STABLE_PAYLOAD[key]
+    payload = json.dumps(
+        {
+            "task": request.task,
+            "task_frame": json_safe(task_frame),
+            "context_packet": json_safe(getattr(state, "context_packet", {}) or {}),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    if key is not None:
+        _bounded_put(_RUN_STABLE_PAYLOAD, key, payload)
+    return payload
+
+
+def _transcript_window_start(total: int) -> int:
+    """Index of the first action kept, advancing in TRANSCRIPT_WINDOW_BLOCK steps."""
+    if total <= MAX_TRANSCRIPT_ACTIONS:
+        return 0
+    overflow = total - MAX_TRANSCRIPT_ACTIONS
+    blocks = -(-overflow // TRANSCRIPT_WINDOW_BLOCK)  # ceil
+    return blocks * TRANSCRIPT_WINDOW_BLOCK
+
+
+def _run_status_message(state: AgentCoreState) -> dict[str, Any]:
+    """Per-step progress, placed LAST so it never invalidates the cached prefix."""
+    status = {
         "files_read": list(getattr(state, "files_read", []) or []),
+        "files_changed": list(getattr(state, "files_changed", []) or []),
         "budgets": {
             "max_file_reads": getattr(state, "max_file_reads", None),
             "max_commands": getattr(state, "max_commands", None),
             "loop_iteration": getattr(state, "loop_iteration", None),
         },
     }
+    return {"role": "user", "content": "[run status]\n" + json.dumps(status, ensure_ascii=False, sort_keys=True)}
+
+
+def _build_transcript(request: AgentRunRequest, state: AgentCoreState, task_frame: Any) -> list[dict[str, Any]]:
+    """Build the model transcript so that each step only APPENDS to the last one.
+
+    Layout: history -> stable task turn -> (omitted-steps note) -> tool calls and
+    results -> run status. Everything before the run status is identical to the
+    previous step's request, so provider prompt caches keep hitting.
+    """
     messages: list[dict[str, Any]] = []
     messages.extend(_recent_history_messages(request))
-    messages.append({"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)})
+    messages.append({"role": "user", "content": _stable_task_payload(request, state, task_frame)})
 
     actions = list(getattr(state, "actions_taken", []) or [])
     results = list(getattr(state, "action_results", []) or [])
-    for action, result in list(zip(actions, results))[-MAX_TRANSCRIPT_ACTIONS:]:
+    pairs = list(zip(actions, results))
+    start = _transcript_window_start(len(pairs))
+    if start:
+        messages.append(
+            {
+                "role": "user",
+                "content": f"[{start} earlier tool step(s) omitted; files already read are listed in the run status]",
+            }
+        )
+    for action, result in pairs[start:]:
         messages.append(
             {
                 "role": "assistant",
@@ -521,7 +720,7 @@ def _build_transcript(request: AgentRunRequest, state: AgentCoreState, task_fram
                         "type": "function",
                         "function": {
                             "name": action.type,
-                            "arguments": json.dumps(_action_arguments(action), ensure_ascii=False),
+                            "arguments": json.dumps(_action_arguments(action), ensure_ascii=False, sort_keys=True),
                         },
                     }
                 ],
@@ -534,6 +733,7 @@ def _build_transcript(request: AgentRunRequest, state: AgentCoreState, task_fram
                 "content": _observation_text(result),
             }
         )
+    messages.append(_run_status_message(state))
     return messages
 
 
@@ -573,30 +773,55 @@ def _observation_text(result: Any) -> str:
     return text
 
 
-def _action_from_response(response: Any, allowed: set[str]) -> AgentAction | None:
+def _action_from_call(call: Any, response: Any, allowed: set[str]) -> AgentAction | None:
+    name = str(call.name or "")
+    if name not in allowed:
+        return None
+    args = dict(call.arguments or {})
+    reason = str(args.get("reason_summary") or (response.text or "") or f"Use {name} for the next step.").strip()
+    action = AgentAction(
+        type=name,  # type: ignore[arg-type]
+        reason_summary=(reason or f"Use {name}.")[:300],
+        payload=json_safe(args),
+    )
+    _map_common_fields(action, args)
+    return action
+
+
+def _actions_from_response(response: Any, allowed: set[str]) -> list[AgentAction]:
+    """Every usable tool call in the response, in order.
+
+    Models that support parallel tool calls often ask for several reads at
+    once. Previously only ``tool_calls[0]`` was used and the rest were silently
+    dropped, costing one extra model round trip per file.
+    """
     if getattr(response, "has_tool_calls", False):
-        call = response.tool_calls[0]
-        name = str(call.name or "")
-        if name not in allowed:
-            return None
-        args = dict(call.arguments or {})
-        reason = str(args.get("reason_summary") or (response.text or "") or f"Use {name} for the next step.").strip()
-        action = AgentAction(
-            type=name,  # type: ignore[arg-type]
-            reason_summary=(reason or f"Use {name}.")[:300],
-            payload=json_safe(args),
-        )
-        _map_common_fields(action, args)
-        return action
+        actions: list[AgentAction] = []
+        for index, call in enumerate(response.tool_calls):
+            action = _action_from_call(call, response, allowed)
+            if action is None:
+                if index == 0:
+                    return []
+                break
+            actions.append(action)
+        return actions
 
     text = (getattr(response, "text", "") or "").strip()
     if text:
-        return AgentAction(
-            type="final_answer",
-            reason_summary="Answer from gathered evidence.",
-            payload={"model_answer": text[:MAX_ANSWER_CHARS]},
-        )
-    return None
+        return [
+            AgentAction(
+                type="final_answer",
+                reason_summary="Answer from gathered evidence.",
+                payload={"model_answer": text[:MAX_ANSWER_CHARS]},
+            )
+        ]
+    return []
+
+
+def _action_from_response(response: Any, allowed: set[str]) -> AgentAction | None:
+    """First action of the response (kept for callers that need exactly one)."""
+    actions = _actions_from_response(response, allowed)
+    return actions[0] if actions else None
 
 
 def _map_common_fields(action: AgentAction, args: dict[str, Any]) -> None:
