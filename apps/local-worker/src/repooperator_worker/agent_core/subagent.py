@@ -54,6 +54,7 @@ def allowed_tools_for_role(role: str, registry) -> set[str]:
 
 
 MAX_SUBAGENT_STEPS = 6
+MAX_CALLS_PER_STEP = 6
 MAX_OBSERVATION_CHARS = 1200
 
 SUBAGENT_SYSTEM_PROMPT = """\
@@ -147,26 +148,35 @@ def run_worker_subagent(
             summary = (getattr(response, "text", "") or "").strip()
             break
 
-        call = response.tool_calls[0]
-        if call.name not in allowed:
+        # Run every allowed call the model asked for in this response. Models
+        # with parallel tool calling batch their reads; taking only the first
+        # call dropped the rest and cost an extra round trip per file.
+        calls = []
+        for call in response.tool_calls[:MAX_CALLS_PER_STEP]:
+            if call.name not in allowed:
+                break
+            calls.append(call)
+        if not calls:
             summary = (getattr(response, "text", "") or "").strip()
             break
 
-        action = _action_from_call(call)
-        result = orchestrator.execute_action(action)
-        for path in result.files_read or []:
-            if path not in files_analyzed:
-                files_analyzed.append(path)
         messages.append(
             {
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [
                     {"id": call.id, "type": "function", "function": {"name": call.name, "arguments": json.dumps(dict(call.arguments), ensure_ascii=False)}}
+                    for call in calls
                 ],
             }
         )
-        messages.append({"role": "tool", "tool_call_id": call.id, "content": _observation_text(result)})
+        for call in calls:
+            action = _action_from_call(call)
+            result = orchestrator.execute_action(action)
+            for path in result.files_read or []:
+                if path not in files_analyzed:
+                    files_analyzed.append(path)
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": _observation_text(result)})
 
     if not summary:
         summary = f"{role} gathered evidence for {scope or 'the assigned scope'} across {len(files_analyzed)} file(s)."

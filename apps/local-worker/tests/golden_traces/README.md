@@ -21,4 +21,6 @@ A semantic contract failure means the harness found unsafe or inconsistent behav
 
 ## Future Trace Seam
 
-TODO: add a fake-model real-LangGraph run that records the same contracts through production graph execution. Optional real-model evals can build on that later, but this deterministic harness should stay stable.
+TODO: add a fake-model real-LangGraph run that records the same contracts through production graph execution. This deterministic harness should stay stable.
+
+For real-model behavior (outcome per request type, policy-check hits, feedback recoveries, prompt-cache hit ratio) use `scripts/eval_agent_live.py`; it runs against a throwaway fixture repo with the model in `~/.repooperator/config.json`.

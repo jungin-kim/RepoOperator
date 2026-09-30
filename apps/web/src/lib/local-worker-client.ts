@@ -279,6 +279,17 @@ export type AgentRunPayload = {
   git_approval?: GitApprovalPayload | null;
   loop_iteration?: number;
   stop_reason?: string | null;
+  model_usage?: ModelUsagePayload | null;
+};
+
+export type ModelUsagePayload = {
+  calls?: number;
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  cache_write_tokens?: number;
+  output_tokens?: number;
+  cache_hit_ratio?: number;
+  gate_feedback_retries?: number;
 };
 
 export type ValidationCommandCandidatePayload = {

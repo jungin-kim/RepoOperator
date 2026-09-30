@@ -19,10 +19,16 @@ from repooperator_worker.schemas import AgentRunRequest, AgentRunResponse
 from repooperator_worker.services.event_service import append_run_event, list_run_events
 from repooperator_worker.services.json_safe import safe_agent_response_payload, json_safe
 from repooperator_worker.services.skills_service import enabled_skill_context
+from repooperator_worker.services import usage_tracker
 
 def build_compiled_repooperator_graph(*, checkpoint_adapter: Any | None = None) -> Any:
     checkpointer = checkpoint_adapter if _is_langgraph_checkpointer(checkpoint_adapter) else get_default_langgraph_checkpointer()
     return build_repooperator_state_graph().compile(checkpointer=checkpointer)
+
+def _with_model_usage(response: AgentRunResponse, run_id: str) -> AgentRunResponse:
+    usage = usage_tracker.snapshot(run_id)
+    return response.model_copy(update={"model_usage": usage or None}) if usage else response
+
 
 def run_langgraph_controller(
     request: AgentRunRequest,
@@ -32,6 +38,20 @@ def run_langgraph_controller(
     checkpoint_adapter: Any | None = None,
 ) -> AgentRunResponse:
     run_id = run_id or "run_controller"
+    with usage_tracker.tracking(run_id):
+        response = _run_langgraph_controller(
+            request, run_id=run_id, stream_final_answer=stream_final_answer, checkpoint_adapter=checkpoint_adapter
+        )
+    return _with_model_usage(response, run_id)
+
+
+def _run_langgraph_controller(
+    request: AgentRunRequest,
+    *,
+    run_id: str,
+    stream_final_answer: bool,
+    checkpoint_adapter: Any | None,
+) -> AgentRunResponse:
     validate_active_repository(request)
     skills_context, skills_used = enabled_skill_context(task=request.task)
     initial_state = initial_graph_state(
@@ -67,6 +87,20 @@ def resume_langgraph_controller(
     run_id: str,
     approval_decision: dict[str, Any],
     checkpoint_adapter: Any | None = None,
+) -> AgentRunResponse:
+    with usage_tracker.tracking(run_id):
+        response = _resume_langgraph_controller(
+            request, run_id=run_id, approval_decision=approval_decision, checkpoint_adapter=checkpoint_adapter
+        )
+    return _with_model_usage(response, run_id)
+
+
+def _resume_langgraph_controller(
+    request: AgentRunRequest,
+    *,
+    run_id: str,
+    approval_decision: dict[str, Any],
+    checkpoint_adapter: Any | None,
 ) -> AgentRunResponse:
     compiled = build_compiled_repooperator_graph(checkpoint_adapter=checkpoint_adapter)
     config = graph_config_for_request(request, run_id)

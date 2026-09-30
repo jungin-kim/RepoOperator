@@ -6,7 +6,9 @@ from typing import Any, Iterator
 from urllib import error, request
 
 from repooperator_worker.config import Settings, get_settings
+from repooperator_worker.services import usage_tracker
 from repooperator_worker.services.model_tools import (
+    normalize_usage,
     ToolCallResponse,
     parse_anthropic_response,
     parse_openai_response,
@@ -47,7 +49,9 @@ def _post_json(
     )
     try:
         with request.urlopen(http_request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            decoded = json.loads(response.read().decode("utf-8"))
+        usage_tracker.record(normalize_usage(decoded))
+        return decoded
     except error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
         if exc.code == 404 and "model" in error_body.lower():
@@ -349,6 +353,33 @@ def _openai_messages_to_anthropic(messages: list[dict[str, Any]]) -> list[dict[s
     return translated
 
 
+def _with_message_cache_breakpoint(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark the end of the stable conversation prefix for Anthropic prompt caching.
+
+    Anthropic caches only up to explicit ``cache_control`` breakpoints. The
+    agent transcript is append-only except for its final block (the per-step
+    run status), so the breakpoint goes on the block just before that one:
+    the next step's request extends exactly this prefix and reads it from cache.
+    Together with the system and tools breakpoints this stays within the
+    four-breakpoint limit.
+    """
+
+    if not messages:
+        return messages
+    last = messages[-1]
+    blocks = last.get("content") or []
+    if len(blocks) >= 2:
+        target_message, index = last, len(blocks) - 2
+    elif len(messages) >= 2 and messages[-2].get("content"):
+        target_message, index = messages[-2], len(messages[-2]["content"]) - 1
+    else:
+        return messages
+    block = target_message["content"][index]
+    if block.get("type") in {"text", "tool_result", "tool_use"}:
+        target_message["content"][index] = {**block, "cache_control": {"type": "ephemeral"}}
+    return messages
+
+
 class AnthropicModelClient:
     """Native Anthropic Messages API client with tool-use support."""
 
@@ -391,11 +422,14 @@ class AnthropicModelClient:
         payload: dict[str, Any] = {
             "model": self.model_name,
             "max_tokens": int(max_output_tokens or 4096),
-            "system": system_prompt,
-            "messages": _openai_messages_to_anthropic(messages),
+            "messages": _with_message_cache_breakpoint(_openai_messages_to_anthropic(messages)),
         }
+        if system_prompt:
+            payload["system"] = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
         if tools:
             payload["tools"] = to_anthropic_tools(tools)
+            if payload["tools"]:
+                payload["tools"][-1] = {**payload["tools"][-1], "cache_control": {"type": "ephemeral"}}
             if tool_choice == "required":
                 payload["tool_choice"] = {"type": "any"}
             elif tool_choice and tool_choice not in {"auto", "none"}:

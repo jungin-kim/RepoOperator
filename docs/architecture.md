@@ -49,6 +49,22 @@ RepoOperator supports two planners behind one decision seam
   whenever the model is unavailable, declines, or proposes a repeat/ineffective
   action.
 
+Policy checks on the model's choice (answer without evidence, describe a
+change instead of applying it, patch during a read-only question, skip a
+requested command) are returned to the model as a failed tool result
+(`{"ok": false, "code", "problem", "hint"}`) and the model gets one retry.
+Only a repeated violation hands the step to the deterministic choosers.
+
+The system prompt lives in `src/repooperator_worker/prompts/agent.md` and is
+re-read when the file changes; `~/.repooperator/prompts/agent.md` overrides it.
+
+The transcript is append-only per step so provider prompt caches keep hitting:
+the task turn is snapshotted once per run, per-step status goes last, the
+action window slides in blocks, and the tool list is fixed for the run.
+Read-only calls the model batches in one response are queued and run without
+extra model round trips. Token usage (incl. cached input) is tracked per run
+(`services/usage_tracker.py`) and returned as `model_usage` on the response.
+
 Both planners produce the same `AgentAction` shape, so execution, permission
 gating, secret redaction, and budgets are enforced identically by the tool
 orchestrator regardless of which planner chose the action. Native tool calling

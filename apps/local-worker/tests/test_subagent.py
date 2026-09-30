@@ -50,6 +50,32 @@ class FakeOrchestrator:
 
 
 class SubagentTests(unittest.TestCase):
+    def test_parallel_calls_run_in_one_step(self) -> None:
+        responses = [
+            ToolCallResponse(
+                tool_calls=(
+                    ToolCall(id="c1", name="read_file", arguments={"target_files": ["a.py"]}),
+                    ToolCall(id="c2", name="read_file", arguments={"target_files": ["b.py"]}),
+                )
+            ),
+            ToolCallResponse(text="a and b are the entrypoints."),
+        ]
+        client = SequencedClient(responses)
+        orch = FakeOrchestrator()
+        subagent.run_worker_subagent(
+            {"role": "AnalysisAgent", "files": ["a.py", "b.py"]},
+            request=_request(),
+            run_id="r1",
+            settings=_settings(),
+            client_factory=lambda s: client,
+            orchestrator=orch,
+        )
+        self.assertEqual([a.target_files for a in orch.executed], [["a.py"], ["b.py"]])
+        self.assertEqual(len(client.calls), 2, "both reads in one step, then the report")
+        second = client.calls[1]["messages"]
+        self.assertEqual(len(second[1]["tool_calls"]), 2)
+        self.assertEqual([m["tool_call_id"] for m in second[2:4]], ["c1", "c2"])
+
     def test_disabled_returns_none(self) -> None:
         report = subagent.run_worker_subagent(
             {"role": "AnalysisAgent", "files": ["a.py"]},
