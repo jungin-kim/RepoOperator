@@ -306,6 +306,9 @@ class AgentRunResponse(BaseModel):
     git_approval: dict | None = None
     loop_iteration: int = 0
     stop_reason: str | None = None
+    # Token usage across the run's model calls: input/cached/output tokens,
+    # call count, cache_hit_ratio, gate_feedback_retries.
+    model_usage: dict | None = None
 
 
 class LocalBranchSummary(BaseModel):

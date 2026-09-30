@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { formatModelUsage } from "./model-usage";
 import type {
   AgentRunPayload,
   CommandResultPayload,
@@ -434,6 +435,12 @@ function ToolCard({ metadata }: { metadata: AgentRunPayload }) {
             <div className="tool-meta-item">
               <span className="tool-meta-label">Model</span>
               <span className="tool-meta-value">{metadata.model}</span>
+            </div>
+          )}
+          {formatModelUsage(metadata.model_usage) && (
+            <div className="tool-meta-item">
+              <span className="tool-meta-label">Tokens</span>
+              <span className="tool-meta-value">{formatModelUsage(metadata.model_usage)}</span>
             </div>
           )}
           {metadata.agent_flow && (

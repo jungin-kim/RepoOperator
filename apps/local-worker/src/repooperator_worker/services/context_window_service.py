@@ -74,9 +74,9 @@ def _thread_context_usage(thread_id: str | None) -> dict[str, Any] | None:
 
 def _system_prompt_tokens() -> int:
     try:
-        from repooperator_worker.agent_core.agentic_loop import AGENTIC_SYSTEM_PROMPT
+        from repooperator_worker.agent_core.agentic_loop import agent_system_prompt
 
-        return _tokens(AGENTIC_SYSTEM_PROMPT)
+        return _tokens(agent_system_prompt())
     except Exception:
         return 0
 

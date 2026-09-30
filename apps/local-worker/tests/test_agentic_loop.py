@@ -319,3 +319,87 @@ class BatchedToolCallTests(unittest.TestCase):
         first = self._propose(client, _state(run_id="batch-3"))
         self.assertEqual(first.type, "read_file")
         self.assertNotIn("batch-3", agentic_loop._RUN_ACTION_QUEUE)
+
+
+class SequencedClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    def generate_with_tools(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._responses.pop(0) if self._responses else ToolCallResponse(text="done")
+
+
+class GateFeedbackTests(unittest.TestCase):
+    """Policy violations go back to the model as a failed call, not a silent veto."""
+
+    def setUp(self) -> None:
+        agentic_loop._RUN_STABLE_PAYLOAD.clear()
+        agentic_loop._RUN_TOOL_NAMES.clear()
+        agentic_loop._RUN_ACTION_QUEUE.clear()
+
+    def test_model_corrects_itself_after_feedback(self) -> None:
+        client = SequencedClient(
+            [
+                ToolCallResponse(text="This is a local-first coding agent."),  # answers with no evidence
+                ToolCallResponse(tool_calls=(ToolCall(id="c2", name="inspect_repo_tree", arguments={}),)),
+            ]
+        )
+        action = agentic_loop.propose_next_action_with_tool_calling(
+            _request(), _state(), _frame(), client_factory=lambda s: client, settings=_settings()
+        )
+        self.assertEqual(action.type, "inspect_repo_tree")
+        self.assertEqual(len(client.calls), 2)
+        retry = client.calls[1]["messages"]
+        feedback = retry[-1]["content"]
+        self.assertIn('"ok": false', feedback)
+        self.assertIn("no_evidence_yet", feedback)
+        # The retry extends the first request, so it reuses its cached prefix.
+        self.assertEqual(retry[: len(client.calls[0]["messages"])], client.calls[0]["messages"])
+
+    def test_rejected_tool_call_gets_a_matching_tool_result(self) -> None:
+        client = SequencedClient(
+            [
+                ToolCallResponse(tool_calls=(ToolCall(id="bad1", name="delete_file", arguments={"path": "a.py"}),)),
+                ToolCallResponse(text="read_file returns the file contents."),
+            ]
+        )
+        action = agentic_loop.propose_next_action_with_tool_calling(
+            _request(), _state(files_read=["a.py"]), _frame(), client_factory=lambda s: client, settings=_settings()
+        )
+        self.assertEqual(action.type, "final_answer")
+        retry = client.calls[1]["messages"]
+        self.assertEqual(retry[-2]["tool_calls"][0]["id"], "bad1")
+        self.assertEqual(retry[-1], {"role": "tool", "tool_call_id": "bad1", "content": retry[-1]["content"]})
+        self.assertIn("read_only_request", retry[-1]["content"])
+
+    def test_repeated_violation_falls_back_to_deterministic(self) -> None:
+        client = SequencedClient([ToolCallResponse(text="answer"), ToolCallResponse(text="answer again")])
+        action = agentic_loop.propose_next_action_with_tool_calling(
+            _request(), _state(), _frame(), client_factory=lambda s: client, settings=_settings()
+        )
+        self.assertIsNone(action)
+        self.assertEqual(len(client.calls), 1 + agentic_loop.MAX_GATE_FEEDBACK_RETRIES)
+
+
+class PromptFileTests(unittest.TestCase):
+    def test_prompt_is_read_from_file_and_reloaded(self) -> None:
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent.md"
+            path.write_text("v1", encoding="utf-8")
+            with mock.patch.object(agentic_loop, "_prompt_path", return_value=path):
+                self.assertEqual(agentic_loop.agent_system_prompt(), "v1")
+                path.write_text("v2", encoding="utf-8")
+                os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
+                self.assertEqual(agentic_loop.agent_system_prompt(), "v2")
+        agentic_loop._PROMPT_CACHE.update(path=None, mtime=None, text="")
+
+    def test_bundled_prompt_exists_and_back_compat_constant(self) -> None:
+        self.assertTrue(agentic_loop._BUNDLED_PROMPT_PATH.is_file())
+        self.assertIn("RepoOperator", agentic_loop.AGENTIC_SYSTEM_PROMPT)

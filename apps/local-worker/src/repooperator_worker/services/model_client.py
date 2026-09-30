@@ -6,7 +6,9 @@ from typing import Any, Iterator
 from urllib import error, request
 
 from repooperator_worker.config import Settings, get_settings
+from repooperator_worker.services import usage_tracker
 from repooperator_worker.services.model_tools import (
+    normalize_usage,
     ToolCallResponse,
     parse_anthropic_response,
     parse_openai_response,
@@ -47,7 +49,9 @@ def _post_json(
     )
     try:
         with request.urlopen(http_request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            decoded = json.loads(response.read().decode("utf-8"))
+        usage_tracker.record(normalize_usage(decoded))
+        return decoded
     except error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
         if exc.code == 404 and "model" in error_body.lower():
