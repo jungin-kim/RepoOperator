@@ -403,3 +403,19 @@ class PromptFileTests(unittest.TestCase):
     def test_bundled_prompt_exists_and_back_compat_constant(self) -> None:
         self.assertTrue(agentic_loop._BUNDLED_PROMPT_PATH.is_file())
         self.assertIn("RepoOperator", agentic_loop.AGENTIC_SYSTEM_PROMPT)
+
+
+class GateCountersTests(unittest.TestCase):
+    def test_codes_recoveries_and_fallbacks_are_counted(self) -> None:
+        from repooperator_worker.services import usage_tracker
+
+        agentic_loop._RUN_TOOL_NAMES.clear()
+        recovers = SequencedClient([ToolCallResponse(text="a"), ToolCallResponse(tool_calls=(ToolCall(id="c", name="inspect_repo_tree", arguments={}),))])
+        falls = SequencedClient([ToolCallResponse(text="a"), ToolCallResponse(text="b")])
+        with usage_tracker.tracking("gate-count-1"):
+            agentic_loop.propose_next_action_with_tool_calling(_request(), _state(), _frame(), client_factory=lambda s: recovers, settings=_settings())
+            agentic_loop.propose_next_action_with_tool_calling(_request(), _state(), _frame(), client_factory=lambda s: falls, settings=_settings())
+        snap = usage_tracker.snapshot("gate-count-1")
+        self.assertEqual(snap["gate:no_evidence_yet"], 3)
+        self.assertEqual(snap["gate_feedback_recovered"], 1)
+        self.assertEqual(snap["gate_fallbacks"], 1)

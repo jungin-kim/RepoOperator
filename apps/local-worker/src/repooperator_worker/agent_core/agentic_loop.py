@@ -184,8 +184,12 @@ def propose_next_action_with_tool_calling(
     for attempt in range(MAX_GATE_FEEDBACK_RETRIES + 1):
         violation = _gate_violation(actions[0], state, task_frame)
         if violation is None:
+            if attempt:
+                _bump_usage("gate_feedback_recovered")
             break
+        _bump_usage(f"gate:{violation['code']}")
         if attempt == MAX_GATE_FEEDBACK_RETRIES:
+            _bump_usage("gate_fallbacks")
             return None
         _bump_usage("gate_feedback_retries")
         messages = messages + _feedback_messages(response, actions[0], violation)

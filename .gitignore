@@ -48,3 +48,6 @@ docs/implementation-status-report.md
 
 # Python editable-install artifacts
 *.egg-info/
+
+# live agent eval output (scripts/eval_agent_live.py)
+.eval-out/
